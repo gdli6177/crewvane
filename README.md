@@ -74,6 +74,12 @@ The attention panel is intentionally narrow. It shows work when:
 Ordinary progress, a busy terminal, an idle agent, or a chat reply does not
 become an attention item.
 
+When a waiting item is due, the card asks for one plain-language update. The
+concierge reads that message and decides whether to keep waiting, resume,
+submit for review, complete, or drop the goal. The only separate shortcut is
+“remind me in one hour”; completion and decisions remain auditable against the
+user's exact words.
+
 ### Bring your own agent
 
 Configure the launch command and native arguments for the concierge, owners, and

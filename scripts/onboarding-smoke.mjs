@@ -279,37 +279,42 @@ try {
   assert.ok(feedbackGoal.activities.some(activity => activity.kind === "message" && activity.text === "补充约束：不要改变交付范围"));
   await page.getByRole("button", { name:"关闭", exact:true }).click();
   const waiting = await page.evaluate(() => window.crewvane.command({ type:"goal.create", input:{
-    title:"等待审批后继续",projectId:"personal",mode:"manual",
+    title:"等待审批后继续",projectId:"personal",mode:"concierge",
   }}));
   await page.evaluate(id => window.crewvane.command({ type:"goal.wait", goalId:id, reason:"等 YR 审批", owner:"YR", remindAt:"2030-01-01T00:00:00Z" }), waiting.id);
   await page.getByRole("button", { name:"全部目标", exact:true }).click();
   await page.getByText("等待审批后继续", { exact:true }).click();
-  await page.getByRole("button", { name:"有结果，继续推进", exact:true }).click();
-  await page.getByLabel("最新结果与下一步").fill("YR 已批准，按原方案继续开发");
-  await page.getByRole("button", { name:"交给管家继续", exact:true }).click();
+  await page.getByRole("button", { name:"告诉管家", exact:true }).click();
+  await page.getByLabel("发给管家的消息", { exact:true }).fill("YR 已批准，按原方案继续开发");
+  await page.getByRole("button", { name:"交给管家", exact:true }).click();
   await expect.poll(async () => {
     const state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
     return state.goals.find(goal => goal.id === waiting.id)?.dispatch?.status;
   }, {timeout:60_000}).toBe("sent");
   await expect.poll(() => readFile(log,"utf8"), {timeout:10_000}).toContain("YR 已批准，按原方案继续开发");
   let waitingGoal = (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).goals.find(goal => goal.id === waiting.id);
-  assert.equal(waitingGoal.status,"active"); assert.equal(waitingGoal.remindAt,undefined);
-  await page.evaluate(id => window.crewvane.command({ type:"goal.wait", goalId:id, reason:"继续等 YR 审批", owner:"YR", remindAt:"2030-01-01T00:00:00Z" }), waiting.id);
-  await page.getByRole("button", { name:"让管家跟进", exact:true }).click();
+  assert.equal(waitingGoal.status,"waiting", "a user reply must leave the state decision to the concierge");
+  assert.ok(waitingGoal.activities.some(activity => activity.text === "YR 已批准，按原方案继续开发"));
+  await page.evaluate(id => window.crewvane.command({
+    type:"goal.progress", goalId:id, actor:"concierge",
+    summary:"YR 已批准，按原方案继续开发", next:"开始实现",
+  }), waiting.id);
   await expect.poll(async () => {
     const state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
-    return state.goals.find(goal => goal.id === waiting.id)?.dispatch?.status;
-  }, {timeout:60_000}).toBe("sent");
-  await expect.poll(() => readFile(log,"utf8"), {timeout:10_000}).toContain("保持等待状态和跟进提醒");
-  waitingGoal = (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).goals.find(goal => goal.id === waiting.id);
-  assert.equal(waitingGoal.status,"waiting");
-  assert.equal(waitingGoal.remindAt,"2030-01-01T00:00:00.000Z");
+    return state.goals.find(goal => goal.id === waiting.id)?.status;
+  }, {timeout:20_000}).toBe("active");
+  await page.evaluate(id => window.crewvane.command({ type:"goal.wait", goalId:id, reason:"继续等 YR 审批", owner:"YR", remindAt:"2030-01-01T00:00:00Z" }), waiting.id);
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
+    return state.goals.find(goal => goal.id === waiting.id)?.status;
+  }, {timeout:20_000}).toBe("waiting");
   await page.getByRole("button", { name:"1 小时后提醒", exact:true }).click();
   waitingGoal = (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).goals.find(goal => goal.id === waiting.id);
   assert.ok(Date.parse(waitingGoal.remindAt) > Date.now());
-  await page.getByRole("button", { name:"有结果，继续推进", exact:true }).click();
-  await page.getByLabel("最新结果与下一步").fill("审批已确认，我自己收尾");
-  await page.getByRole("button", { name:"交给管家继续", exact:true }).click();
+  await page.evaluate(id => window.crewvane.command({
+    type:"goal.progress", goalId:id, actor:"concierge",
+    summary:"审批已确认", next:"由你继续收尾",
+  }), waiting.id);
   await expect.poll(async () => {
     const state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
     return state.goals.find(goal => goal.id === waiting.id)?.status;
@@ -449,7 +454,7 @@ try {
     "arbitrary CLI saves and starts", "native argv preserved", "reuse custom concierge",
     "real goal and delegation-only role delivered to CLI stdin", "raw Herdr opens independently", "restart reuses installed latest and running CLI",
     "visible goal feedback reaches CLI without replacing the next step",
-    "waiting resume reaches CLI", "follow-up preserves waiting and reminder", "snooze and manual takeover",
+    "waiting chat reaches CLI without changing state", "concierge decision writes the next state", "snooze and manual takeover",
     "external CLI decision wakes desktop pending dispatch and reaches the concierge",
     "terminal panel resizes and toggles fullscreen", "closed concierge reconciles offline",
     "manual process in old pane is preserved while concierge recovery uses a new site",

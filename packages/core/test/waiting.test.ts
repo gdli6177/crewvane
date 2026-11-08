@@ -76,3 +76,40 @@ test("snooze clears only the due reminder attention; terminal goals cannot resum
   await assert.rejects(service.execute({ type: "goal.resume", goalId: id, note: "继续", mode: "concierge" }), /已结束/);
   await assert.rejects(service.execute({ type: "goal.followup", goalId: id }), /已结束/);
 });
+
+test("a follow-up reply clears the due item while leaving the final state decision to the concierge", async () => {
+  const { service, id } = await waiting();
+  assert.equal(attentionGoals((await service.read()).goals).length, 1);
+  const replied = await service.execute({
+    type: "goal.message",
+    goalId: id,
+    text: "YR 已经批准，可以继续开发",
+    routeToConcierge: true,
+  }) as Goal;
+  assert.equal(replied.status, "waiting");
+  assert.equal(replied.waitingFor, "YR");
+  assert.equal(replied.remindAt, undefined);
+  assert.equal(replied.attention, null);
+  assert.equal(replied.dispatch?.kind, "feedback");
+  assert.equal(replied.dispatch?.status, "pending");
+  assert.equal(attentionGoals([replied]).length, 0);
+});
+
+test("the concierge can complete a target only with the user's explicit quote", async () => {
+  const { service, id } = await waiting();
+  await assert.rejects(
+    service.execute({ type: "goal.complete", goalId: id, actor: "concierge" }),
+    /用户确认完成的原话/,
+  );
+  const completed = await service.execute({
+    type: "goal.complete",
+    goalId: id,
+    actor: "concierge",
+    note: "这件事已经搞定，结束吧",
+  }) as Goal;
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.attention, null);
+  assert.equal(completed.remindAt, undefined);
+  assert.equal(completed.activities.at(-1)?.actor, "concierge");
+  assert.equal(completed.activities.at(-1)?.text, "这件事已经搞定，结束吧");
+});

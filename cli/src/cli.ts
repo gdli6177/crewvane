@@ -40,6 +40,7 @@ Agent 状态协议（仅在明确事实发生后使用）：
   crewvane goal review ID --summary TEXT [--location TEXT] [--url URL]
     --check "名称::命令或操作::passed::说明"（可重复）
   crewvane goal accept ID [--note TEXT]
+  crewvane goal complete ID --note "用户明确确认完成的原话"
   crewvane goal rework ID --note TEXT
   crewvane goal resolve ID --note TEXT [--outcome approved|rejected]
   crewvane goal drop ID --reason TEXT
@@ -260,7 +261,10 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         result = (await service.read()).goals.find(goal => goal.id === goalId);
         if (!result) throw new Error("找不到当前案卷");
         coordinatorRead = true;
-      } else if (group === "goal" && ["update", "progress", "wait", "decide", "risk", "ship"].includes(action ?? "")) {
+      } else if (group === "goal" && [
+        "update", "progress", "wait", "decide", "risk", "ship",
+        "accept", "complete", "rework", "drop", "resolve", "remind",
+      ].includes(action ?? "")) {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "session" && action === "set") {
         assertCoordinatorCase(coordinatorCase, target);
@@ -363,7 +367,20 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         };
       }
       else if (group === "goal" && action === "review") command = { type: "goal.review", goalId: target!, delivery: { summary: args.one("summary")!, location: args.one("location"), url: args.one("url"), checks: checks(args.all("check")) }, actor };
-      else if (group === "goal" && ["accept", "rework", "drop"].includes(action ?? "")) command = { type: `goal.${action}` as "goal.accept", goalId: target!, note: args.one("note") ?? args.one("reason") ?? "", actor };
+      else if (group === "goal" && action === "rework")
+        command = {
+          type: "goal.rework",
+          goalId: target!,
+          note: textArg(args.one("note"), "--note"),
+          actor,
+        };
+      else if (group === "goal" && ["accept", "complete", "drop"].includes(action ?? ""))
+        command = {
+          type: `goal.${action}` as "goal.accept" | "goal.complete" | "goal.drop",
+          goalId: target!,
+          note: args.one("note") ?? args.one("reason") ?? undefined,
+          actor,
+        };
       else if (group === "goal" && action === "resolve") command = {
         type: "goal.resolve", goalId: target!, note: args.one("note") ?? args.one("reason"), actor,
         outcome: (args.one("outcome") ?? "approved") as "approved" | "rejected",

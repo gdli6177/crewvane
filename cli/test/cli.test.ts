@@ -24,15 +24,19 @@ async function coordinator<T>(root: string, goalId: string, task: () => Promise<
   const scope = join(root, ".crewvane", "coordinator-scope.json");
   await writeFile(scope, JSON.stringify({ goalId, requestId: "test", setAt: new Date().toISOString() }));
   const previousCoordinator = process.env.CREWVANE_COORDINATOR,
-    previousScope = process.env.CREWVANE_COORDINATOR_SCOPE_FILE;
+    previousScope = process.env.CREWVANE_COORDINATOR_SCOPE_FILE,
+    previousActor = process.env.CREWVANE_AGENT_NAME;
   process.env.CREWVANE_COORDINATOR = "1";
   process.env.CREWVANE_COORDINATOR_SCOPE_FILE = scope;
+  process.env.CREWVANE_AGENT_NAME = "concierge";
   try { return await task(); }
   finally {
     if (previousCoordinator === undefined) delete process.env.CREWVANE_COORDINATOR;
     else process.env.CREWVANE_COORDINATOR = previousCoordinator;
     if (previousScope === undefined) delete process.env.CREWVANE_COORDINATOR_SCOPE_FILE;
     else process.env.CREWVANE_COORDINATOR_SCOPE_FILE = previousScope;
+    if (previousActor === undefined) delete process.env.CREWVANE_AGENT_NAME;
+    else process.env.CREWVANE_AGENT_NAME = previousActor;
   }
 }
 test("real CLI writes goals that desktop service can read", async () => {
@@ -463,6 +467,28 @@ test("coordinator CLI is limited to the current case and cannot read or mutate a
   assert.equal(state.goals.find(goal => goal.id === first.id)?.next, first.next);
   assert.ok(state.goals.find(goal => goal.id === first.id)?.activities.some(activity => activity.text === "已交给负责人"));
   assert.ok(!state.goals.find(goal => goal.id === second.id)?.activities.some(activity => activity.text === "越界写入"));
+});
+
+test("coordinator can turn an explicit user message into an audited current-case state change", async () => {
+  const root = await fixture("crewvane-cli-concierge-state-");
+  const first = (await call(root, ["ask", "方案讨论完成，等我确认后结束"])).json as Goal;
+  const second = (await call(root, ["ask", "另一个不能串案的目标"])).json as Goal;
+  await coordinator(root, first.id, async () => {
+    const completed = await call(root, ["goal", "complete", first.id,
+      "--note", "方案没问题，结束这个目标"]);
+    assert.equal(completed.code, 0, completed.stderr);
+    assert.equal(completed.json.status, "completed");
+    assert.equal(completed.json.activities.at(-1).actor, "concierge");
+    assert.equal(completed.json.activities.at(-1).text, "方案没问题，结束这个目标");
+
+    const crossCase = await call(root, ["goal", "complete", second.id,
+      "--note", "越权结束另一个目标"]);
+    assert.equal(crossCase.code, 1);
+    assert.match(crossCase.stderr, /当前只处理目标/);
+  });
+  const state = await new WorkspaceService(root).read();
+  assert.equal(state.goals.find(goal => goal.id === first.id)?.status, "completed");
+  assert.equal(state.goals.find(goal => goal.id === second.id)?.status, "active");
 });
 
 test("spawned CLI updates an item and rejects a late update after cancellation", async () => {

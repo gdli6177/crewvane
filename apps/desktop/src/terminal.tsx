@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { ArrowLeft, ChevronRight, Copy, FileText, Grip, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
+import { ArrowLeft, ChevronRight, FileText, Grip, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
 import { api } from "./api.js";
 import type { GoalSceneContext } from "./features/goals/goalPresentation.js";
 import "@xterm/xterm/css/xterm.css";
@@ -45,7 +46,6 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [error, setError] = useState(""), [expanded, setExpanded] = useState(false);
-  const [selectionLength, setSelectionLength] = useState(0);
   const [clipboardNotice, setClipboardNotice] = useState("");
   const [geometry, setGeometry] = useState<TerminalGeometry | undefined>(savedGeometry);
   const [attempt, setAttempt] = useState(0);
@@ -54,25 +54,12 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
     setClipboardNotice(message);
     noticeTimer.current = window.setTimeout(() => setClipboardNotice(""), 2200);
   }
-  async function copySelection() {
-    const selection = term.current?.getSelection() ?? "";
-    if (!selection) {
-      announceClipboardNotice("先按住 ⌥ 拖动选择文本");
-      return;
-    }
-    try {
-      await api.writeClipboardText(selection);
-      announceClipboardNotice(`已复制 ${Array.from(selection).length} 个字符`);
-    } catch (reason) {
-      setError(`复制失败：${String(reason).replace(/^Error: /, "")}`);
-    }
-  }
   useEffect(() => {
     const terminal = new Terminal({
       cursorBlink: true, fontFamily: '"SFMono-Regular", Menlo, Consolas, monospace',
       fontSize: 13, lineHeight: 1.25, scrollback: 3000,
       allowProposedApi: false, screenReaderMode: true,
-      macOptionClickForcesSelection: true, rightClickSelectsWord: true,
+      rightClickSelectsWord: true,
       cols: 120, rows: 32, theme: terminalTheme(theme),
     });
     terminal.attachCustomKeyEventHandler((event) => {
@@ -84,11 +71,8 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
         (event.ctrlKey && event.shiftKey && key === "v");
       if (copyShortcut) {
         const selection = terminal.getSelection();
+        if (!selection) return true;
         event.preventDefault();
-        if (!selection) {
-          announceClipboardNotice("先按住 ⌥ 拖动选择文本");
-          return false;
-        }
         void api.writeClipboardText(selection)
           .then(() => announceClipboardNotice(`已复制 ${Array.from(selection).length} 个字符`))
           .catch(report);
@@ -105,6 +89,21 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
+    const clipboard = new ClipboardAddon(undefined, {
+      // OSC 52 clipboard reads would expose the host clipboard to terminal
+      // applications. Herdr only needs writes for copy-on-select.
+      readText: () => "",
+      async writeText(selection, text) {
+        if (selection !== "c") return;
+        try {
+          await api.writeClipboardText(text);
+          announceClipboardNotice(`已复制 ${Array.from(text).length} 个字符`);
+        } catch (reason) {
+          report(reason);
+        }
+      },
+    });
+    terminal.loadAddon(clipboard);
     terminal.open(container.current!);
     term.current = terminal;
     let active = true, hydrated = false, queued: { data: string; sequence: number }[] = [];
@@ -121,9 +120,6 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
         else queued.push({ data: event.data, sequence: event.sequence });
       }
       if (event.type === "terminal-exit") setError(event.error || "终端连接已断开。目标和会话记录仍然保留，可重新连接。");
-    });
-    const selection = terminal.onSelectionChange(() => {
-      setSelectionLength(terminal.getSelection().length);
     });
     setError("");
     void api.terminalSnapshot().then((snapshot) => {
@@ -145,7 +141,7 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
     observer.observe(container.current!);
     return () => {
       active = false;
-      observer.disconnect(); unsubscribe(); selection.dispose(); input.dispose(); terminal.dispose();
+      observer.disconnect(); unsubscribe(); input.dispose(); clipboard.dispose(); terminal.dispose();
       term.current = undefined;
     };
     // Theme is updated in-place below so changing it never reconnects a session.
@@ -239,21 +235,12 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
           <small className="terminal-clipboard-status" role="status" aria-live="polite">
             {clipboardNotice || (
               title === "全局管家"
-                ? "⌥ 拖动选择 · ⌘C 复制"
-                : "HERDR · ⌥ 拖动选择 · ⌘C 复制"
+                ? "拖动文本自动复制"
+                : "HERDR · 拖动文本自动复制"
             )}
           </small>
         </div>
         <div>
-          <button
-            className="icon-button"
-            aria-label="复制终端选区"
-            title={selectionLength ? "复制终端选区" : "先按住 ⌥ 拖动选择文本"}
-            disabled={!selectionLength}
-            onClick={() => void copySelection()}
-          >
-            <Copy size={15} />
-          </button>
           <button className="icon-button" aria-label={expanded ? "退出全屏现场" : "全屏显示现场"} title={expanded ? "退出全屏（Esc）" : "全屏显示"} onClick={() => setExpanded(!expanded)}>{expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           <button className="secondary terminal-hide" title="隐藏面板，Agent 继续执行" onClick={onClose}><X size={15} />隐藏终端</button>
         </div>

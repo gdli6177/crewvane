@@ -102,7 +102,7 @@ export type CrewvaneCommand =
   | { type: "attachments.cleanup"; retentionDays?: number; at?: string }
   | { type: "goal.delete"; goalId: string; actor?: string }
   | { type: "goal.update"; goalId: string; patch: { title?: string; description?: string; next?: string; owner?: string; stageId?: string; waitingFor?: string; remindAt?: string | null; status?: "active" | "waiting" } }
-  | { type: "goal.message"; goalId: string; text: string; attachments?: GoalAttachment[]; actor?: string }
+  | { type: "goal.message"; goalId: string; text: string; attachments?: GoalAttachment[]; actor?: string; routeToConcierge?: boolean }
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
   | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "failed"; detail?: string; requestId?: string }
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
@@ -114,7 +114,7 @@ export type CrewvaneCommand =
   | { type: "goal.risk"; goalId: string; category: HighRiskCategory; summary: string; actionKey?: string; actor?: string }
   | { type: "goal.ship"; goalId: string; operation: "merge" | "deploy"; checksPassed: boolean; actor?: string }
   | { type: "goal.review"; goalId: string; delivery: Omit<Delivery, "submittedAt" | "submittedBy">; actor?: string }
-  | { type: "goal.accept" | "goal.drop"; goalId: string; note?: string; actor?: string }
+  | { type: "goal.accept" | "goal.complete" | "goal.drop"; goalId: string; note?: string; actor?: string }
   | { type: "goal.resolve"; goalId: string; note?: string; actor?: string; outcome?: DecisionOutcome; source?: "desktop" | "herdr" | "cli" }
   | { type: "goal.rework"; goalId: string; note: string; actor?: string }
   | { type: "goal.remind"; goalId: string; at: string; note?: string }

@@ -424,6 +424,11 @@ try {
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByText(/herdr session attach crewvane-/).waitFor();
+  const externalHerdr = page.getByRole("group", { name: "在外部终端打开同一 Herdr 会话" });
+  const attachCommand = await externalHerdr.locator("code").filter({ hasText: "herdr session attach crewvane-" }).innerText();
+  await externalHerdr.getByRole("button", { name: "复制外部终端 attach 命令", exact: true }).click();
+  assert.equal(await page.evaluate(() => window.crewvane.readClipboardText()), attachCommand);
+  await externalHerdr.getByRole("button", { name: "复制外部终端 attach 命令", exact: true }).getByText("已复制").waitFor();
   await page.getByRole("button", { name: "管理 Webhook", exact: true }).click();
   await page.getByRole("button", { name: "测试当前配置", exact: true }).click();
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -664,13 +669,28 @@ try {
   await page.getByText("处理跟进", { exact: true }).click();
   await page.locator(".goal-attention-modal").waitFor();
   await page.getByText("当前下一步", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "有结果，继续推进", exact: true }).click();
-  await page.getByLabel("最新结果与下一步", { exact: true }).fill("审批通过了，我亲自处理。");
-  await page.getByRole("button", { name: "交给管家继续", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "补充情况", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "让管家跟进", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "有结果，继续推进", exact: true }).count(), 0);
+  await page.screenshot({ path: join(home, "followup-chat.png"), animations: "disabled" });
+  await page.getByLabel("发给管家的消息", { exact: true }).fill("审批通过了，请管家判断下一步并继续推进。");
+  await page.getByRole("button", { name: "交给管家", exact: true }).click();
   await page.waitForFunction(async goalId => {
     const state = await window.crewvane.command({ type: "snapshot" });
-    return state.goals.find(item => item.id === goalId)?.status === "active";
+    const goal = state.goals.find(item => item.id === goalId);
+    return goal?.status === "waiting" &&
+      goal.mode === "concierge" &&
+      goal.remindAt === undefined &&
+      goal.activities.some(activity => activity.text === "审批通过了，请管家判断下一步并继续推进。");
   }, waiting.id);
+  await service.execute({
+    type: "goal.progress",
+    goalId: waiting.id,
+    actor: "concierge",
+    summary: "审批已通过，继续推进。",
+    next: "由你继续核实验收",
+  });
+  await service.execute({ type: "goal.takeover", goalId: waiting.id });
   // The attention card can close from the state event before the renderer has
   // applied the same snapshot to the surrounding navigation. It can also switch
   // directly to an actionable dispatch-failure card because this test uses a
@@ -683,11 +703,6 @@ try {
     await page.getByRole("button", { name: "完整记录", exact: true }).click();
   await page.locator(".goal-detail-modal").waitFor();
   await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "我来处理", exact: true }).click();
-  await page.waitForFunction(async goalId => {
-    const state = await window.crewvane.command({ type: "snapshot" });
-    return state.goals.find(item => item.id === goalId)?.mode === "manual";
-  }, waiting.id);
   waitingState = (await service.read()).goals.find(item => item.id === waiting.id);
   assert.equal(waitingState.status, "active");
   assert.equal(waitingState.mode, "manual");
@@ -917,7 +932,7 @@ try {
         "reply images are imported into the message activity",
         "complete goal conversation and substantive owner answer remain visible",
         "external terminal feedback refreshes the app without replaying a handoff",
-        "waiting snooze and resume directly without the manual editor",
+        "waiting chat handoff and snooze work without ambiguous state buttons",
         "light and narrow goal detail layouts have no horizontal overflow",
         "6 theme/size UI audit combinations across 5 core screens",
         "dispatch failure is presented as a retryable concierge connection failure",

@@ -45,7 +45,10 @@ try {
       "apps/desktop/release/Crewvane-darwin-arm64/Crewvane.app/Contents/MacOS/Crewvane"),
     args: [],
     env: { ...process.env, CREWVANE_TEST_HOME: home, CREWVANE_TEST_USER_DATA: join(home, "userData"),
-      CREWVANE_TEST_WORKSPACE: workspace, CREWVANE_HERDR_SESSION: session },
+      CREWVANE_TEST_WORKSPACE: workspace, CREWVANE_HERDR_SESSION: session,
+      // Force Herdr's OSC 52 branch even on a local test machine. This covers
+      // remote/SSH-like clients and terminals where the native branch is unavailable.
+      SSH_CONNECTION: process.env.SSH_CONNECTION ?? "127.0.0.1 1 127.0.0.1 22" },
     timeout: 60_000,
   });
   const page = await app.firstWindow();
@@ -79,7 +82,7 @@ try {
     const quote = text => `'${text.replaceAll("'", "'\\''")}'`;
     await window.crewvane.writeTerminal(session,
       `/usr/bin/printf '%s' ${quote(marker)} > ${quote(resultFile)} && ` +
-      `/usr/bin/printf '\\033[?1000h\\n%s\\n' ${quote(marker)}\r`);
+      `/usr/bin/printf '%s\\n' ${quote(marker)}\r`);
   }, { session, marker, resultFile });
   // TUI redraws can split or omit unchanged bytes in the PTY stream. Require an
   // actual shell-side effect rather than mistaking echoed input for execution.
@@ -87,29 +90,38 @@ try {
   await page.locator(".xterm-accessibility").filter({ hasText: marker }).waitFor({ state: "attached" });
   const firstPid = await app.evaluate(({ app }) => app.getAppMetrics().filter(item => item.name === "Crewvane Herdr terminal").map(item => item.pid));
   assert.equal(firstPid.length, 1);
-  // Herdr enables application mouse reporting. A normal drag is therefore sent
-  // to Herdr and creates no terminal selection; macOS terminal convention is
-  // Option-drag, which must force xterm's own selection model.
   const textarea = page.locator(".xterm-helper-textarea");
   await textarea.focus();
   const selectionRect = await page.evaluate((value) => {
     const tree = document.querySelector(".xterm-accessibility-tree");
     if (!tree) throw new Error("xterm accessibility tree is missing");
     const walker = document.createTreeWalker(tree, NodeFilter.SHOW_TEXT);
+    const rects = [];
     let node;
     while ((node = walker.nextNode())) {
-      const offset = node.data.indexOf(value);
-      if (offset < 0) continue;
-      const range = document.createRange();
-      range.setStart(node, offset);
-      range.setEnd(node, offset + value.length);
-      const rect = range.getBoundingClientRect();
-      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      let offset = node.data.indexOf(value);
+      while (offset >= 0) {
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, offset + value.length);
+        const rect = range.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0)
+          rects.push({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+        offset = node.data.indexOf(value, offset + value.length);
+      }
     }
-    throw new Error("terminal marker was not found in the accessibility tree");
+    const visible = rects.sort((left, right) =>
+      Math.abs(left.y - right.y) > 1 ? right.y - left.y : right.x - left.x)[0];
+    if (!visible) throw new Error("terminal marker was not found in the accessibility tree");
+    return visible;
   }, marker);
-  await writeSystemClipboard("before-terminal-copy");
-  await page.keyboard.down("Alt");
+  // Herdr's default copy_on_select captures a normal drag, shows "copied to
+  // clipboard", and writes the selected text through the terminal's OSC 52
+  // clipboard protocol. The embedded terminal must turn that protocol message
+  // into a real macOS clipboard write.
+  await expect(page.getByText("拖动文本自动复制", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "复制终端选区", exact: true })).toHaveCount(0);
+  await writeSystemClipboard("before-herdr-copy-on-select");
   await page.mouse.move(selectionRect.x + 1, selectionRect.y + selectionRect.height / 2);
   await page.mouse.down();
   await page.mouse.move(
@@ -118,16 +130,11 @@ try {
     { steps: 15 },
   );
   await page.mouse.up();
-  await page.keyboard.up("Alt");
-  await expect(page.getByRole("button", { name: "复制终端选区", exact: true })).toBeEnabled();
-  await page.keyboard.press("Meta+C");
   await expect.poll(readSystemClipboard, { timeout: 10_000 }).toBe(marker);
   await expect(page.getByRole("status")).toContainText("已复制");
-  // The explicit button is the discoverable fallback when the native keyboard
-  // path is intercepted by a terminal application.
-  await writeSystemClipboard("before-terminal-copy-button");
-  await page.getByRole("button", { name: "复制终端选区", exact: true }).click();
-  await expect.poll(readSystemClipboard, { timeout: 10_000 }).toBe(marker);
+  const terminalData = await page.evaluate(async () =>
+    (await window.crewvane.terminalSnapshot())?.data ?? "");
+  assert.ok(terminalData.includes("\x1b]52;c;"), "Herdr copy-on-select must exercise OSC 52");
   // Paste a shell command from the real system clipboard, then submit it with
   // Enter. The file is authoritative evidence that the PTY received it.
   const pasteMarker = `paste_${randomUUID().replaceAll("-", "")}`;
@@ -224,7 +231,8 @@ try {
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, home, session, checks: [
     "real Herdr TUI in embedded PTY", "real shell input/output", "collapse/reopen reuses PID",
-    "system clipboard copy/paste through the PTY",
+    "system clipboard paste through the PTY",
+    "ordinary Herdr drag copies through OSC 52 to the macOS clipboard",
     "fullscreen toggle reuses the terminal process", "dark/light", "reject unrelated terminal input",
     "scene context opens goal record and returns to attention without losing the terminal",
     "terminal events preserve modal draft and input",
