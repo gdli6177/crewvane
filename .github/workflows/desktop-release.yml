@@ -18,6 +18,10 @@ jobs:
     # This GitHub-hosted image is Apple Silicon, so node-pty matches the DMG.
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      # GitHub's artifact endpoint intermittently returns 502/504 to hosted
+      # runners. The mirror hosts the same Electron archives and checksums.
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +81,8 @@ jobs:
           - 修复内嵌 Herdr 提示“copied to clipboard”，但 macOS 系统剪贴板为空、外部应用无法粘贴的问题。
           - 支持 Herdr 用于复制选中文本的 OSC 52 剪贴板写入协议；普通拖动现在会自动写入系统剪贴板。
           - 禁用 OSC 52 剪贴板读取，避免终端程序读取宿主剪贴板；移除不必要的 `⌥` 拖动选择提示，拖动文本即可自动复制。
+          - 设置中的 Herdr 卡片显示当前命名 Session，并可一键复制外部终端 attach 命令。
+          - 等待与到点跟进收敛为“告诉管家”自由输入框和“1 小时后提醒”；由管家读取明确原话后决定继续等待、推进、验收、完成或放弃，结束记录保留用户原话。
 
           0.6.3 的终端选择、0.6.2 的 Webhook 去重、0.6.1 的长文本目标，以及 0.6.0 的注意力、场景优先、工作区恢复与 Herdr 同步能力保持不变。
 

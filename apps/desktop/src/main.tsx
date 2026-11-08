@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   LayoutList,
   Moon,
+  Copy,
   Plus,
   Settings2,
   Sparkles,
@@ -1631,6 +1632,24 @@ function Settings({
   openWebhook,
   version,
 }: any) {
+  const [attachCopyState, setAttachCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const attachCopyTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    setAttachCopyState("idle");
+    window.clearTimeout(attachCopyTimer.current);
+  }, [herdr?.session]);
+  useEffect(() => () => window.clearTimeout(attachCopyTimer.current), []);
+  async function copyAttachCommand() {
+    if (!herdr?.session) return;
+    try {
+      await api.writeClipboardText(`herdr session attach ${herdr.session}`);
+      setAttachCopyState("copied");
+      window.clearTimeout(attachCopyTimer.current);
+      attachCopyTimer.current = window.setTimeout(() => setAttachCopyState("idle"), 2200);
+    } catch {
+      setAttachCopyState("failed");
+    }
+  }
   return (
     <div className="content settings">
       <section className="intro">
@@ -1662,12 +1681,23 @@ function Settings({
         >
           <div className="settings-facts">
             {herdr?.session && (
-              <p>
-                外部终端连接同一现场：
-                <code>herdr session attach {herdr.session}</code>
-              </p>
+              <div className="external-herdr-command" role="group" aria-label="在外部终端打开同一 Herdr 会话">
+                <div>
+                  <strong>在 iTerm2 / Terminal 中打开同一现场</strong>
+                  <p>裸跑 herdr 默认连接 default Session，不会自动显示这个工作区；复制下面的命令才能进入 Crewvane 当前 Session。</p>
+                  <code>herdr session attach {herdr.session}</code>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Copy size={14} />}
+                  aria-label="复制外部终端 attach 命令"
+                  onClick={() => void copyAttachCommand()}
+                >
+                  {attachCopyState === "copied" ? "已复制" : attachCopyState === "failed" ? "复制失败" : "复制命令"}
+                </Button>
+              </div>
             )}
-            <p>裸跑 herdr 默认连接 default Session，不会自动显示这个工作区。</p>
             {herdr?.executable && <code>{herdr.executable}</code>}
           </div>
           <div className="settings-inline">

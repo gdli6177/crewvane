@@ -160,7 +160,7 @@ Herdr 0.9.5 的插件 v1 事件没有用户 prompt 提交事件。直接终端�
 
 正在推进的新目标提供“我来处理”，通过 `goal.takeover` 转为人工推进，清除未发送的派发请求与仅由派发失败产生的介入项。迟到的发送回执必须按请求 ID 丢弃，不得把人工接管重新改为管家目标。保留人工查看 Herdr 现场、补充进展、编辑安排、提交成果和验收的能力；接管不终止或删除真实 Herdr 会话。
 
-进行中的目标在详情显著位置提供自由消息框，用于追加新的要求、约束和想法。它通过 `goal.message` 保存完整原话与附件，并建立独立的待发送请求；该命令不修改状态、下一步、等待对象或提醒。管家模式必须实际通知管家，失败可重试。明确验收、退回、继续推进和批准由各自按钮触发结构化命令，不能借普通留言冒充。Herdr 终端直聊和 `crewvane direct` 遵守同一边界。
+进行中的目标在详情显著位置提供自由消息框，用于追加新的要求、约束和想法。它通过 `goal.message` 保存完整原话与附件，并建立独立的待发送请求；消息入口本身不按关键词修改状态、下一步、等待对象或提醒。被路由给管家的消息必须实际送达，失败可重试。等待事项的到期卡只保留一个“告诉管家”输入框和一个“1 小时后提醒”次级动作；管家读取完整原话后，才通过结构化命令决定继续等待、恢复推进、验收或结束。高风险批准、交付验收和决定仍要求人的明确语义，并由 core 记录用户原话。Herdr 终端直聊和 `crewvane direct` 遵守同一边界。
 
 管家只负责读取事项和规则、明确下一步、创建或复用独立负责人、转达任务与返工、跟进等待、核对交付记录并交接给人。不得亲自调查业务代码、产出或修改成果、执行目标命令和测试。负责人阻塞时通过澄清要求、调整分工或联系其他负责人协调恢复，不能由管家接手；协调后仍需人的决定时进入注意力。成果与真实检查由负责人提交，管家核对位置和记录是否齐备，缺失交回补齐，最终验收由人完成。
 
@@ -211,6 +211,7 @@ crewvane goal ship ID --operation merge|deploy --checks passed|failed
 crewvane goal review ID --summary TEXT [--location TEXT] [--url URL]
                         [--check NAME::COMMAND::passed|failed::NOTE]
 crewvane goal accept ID [--note TEXT]
+crewvane goal complete ID --note TEXT
 crewvane goal rework ID --note TEXT
 crewvane goal drop ID --reason TEXT
 crewvane goal remind ID --at ISO [--note TEXT]
@@ -218,7 +219,7 @@ crewvane goal resolve ID --note TEXT [--outcome approved|rejected]
 crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
 ```
 
-`--json` 输出可供 Agent 读取的结构化记录；默认输出简洁中文。写操作输出更新后的目标。所有时间使用 ISO 8601；ID 和路径按服务端验证。`goal accept` 只结束 Crewvane 目标，不产生 Git 或部署副作用。`rework` 将目标退回 `active` 并清除待验收注意力；`resolve` 只解决决定 / 跟进，不代替成果验收。`goal ship` 只返回策略判断，不自行执行外部动作。
+`--json` 输出可供 Agent 读取的结构化记录；默认输出简洁中文。写操作输出更新后的目标。所有时间使用 ISO 8601；ID 和路径按服务端验证。`goal accept` 只接受已有交付记录的目标；`goal complete` 用于用户明确要求结束、但没有正式交付审查的事项。两者都只结束 Crewvane 目标，不产生 Git 或部署副作用。`rework` 将目标退回 `active` 并清除待验收注意力；`resolve` 只解决决定 / 跟进，不代替成果验收。`goal ship` 只返回策略判断，不自行执行外部动作。
 
 上线策略默认 `external-approval`。`goal ship` 先要求本地检查通过：默认档的合并和部署都等待人，`auto-merge-manual-deploy` 的部署等待人，`auto` 在检查通过后放行。人可在桌面修改项目策略；受管管家 CLI 没有策略修改入口。
 
@@ -228,9 +229,9 @@ crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
 
 `ask` 与桌面单框新建共用 `goal.intake`，立即保存完整原文、附件和持久派发请求；桌面未运行或用户稍后启动时会补发。`goal message` 与 `direct` 是消息入口，只追加人的原话和附件，不覆盖下一步或改变状态；`direct` 不接受 `--next`。`progress`、`wait`、`review`、`decide` 等是 Agent 或受信任适配器在明确事实发生后使用的高级状态协议。`board` 是 Herdr 插件使用的同源终端 Pane：交互模式支持选择、补充/决定、等待跟进、继续推进、人工接管、验收、退回和聚焦负责人现场，`--once` 输出静态文本供测试和诊断。
 
-管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、session；不得 list、attention、ask 或跨目标访问。这个应用层闸门不冒充操作系统文件沙箱。
+管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind、session；不得 list、attention、ask、message 或跨目标访问。这个应用层闸门不冒充操作系统文件沙箱。
 
-等待目标的桌面操作使用 `goal.resume`（继续推进）、`goal.followup`（请管家跟进）和 `goal.remind`（稍后提醒），不要求人重填整张表单。`goal.resume` 清除等待和旧提醒，保留原负责人现场；`goal.followup` 保留等待和提醒。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发，已结束的目标不能恢复。
+等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。`goal.message` 立即清除已处理的到期注意力与旧提醒，但保持 `waiting` 和等待对象不变；管家收到唯一 `feedback` 请求后，依据用户明确语义调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发，已结束的目标不能恢复。
 
 高级手动操作必须区分补充进展、编辑目标与提交成果。补充进展只写事实，不默认覆盖下一步；编辑目标调整安排但不提交验收；提交成果必须包含可核对成果与真实检查。等待中的直接操作与这些高级表单不能互相覆盖输入或改变原定安排。
 

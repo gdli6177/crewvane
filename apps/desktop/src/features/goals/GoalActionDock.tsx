@@ -47,6 +47,18 @@ export function GoalActionDock({
     }
   }
 
+  async function snooze() {
+    await act(
+      {
+        type: "goal.remind",
+        goalId: goal.id,
+        at: new Date(Date.now() + 3_600_000).toISOString(),
+        note: goal.next,
+      },
+      "1 小时后再提醒你",
+    );
+  }
+
   if (replyMode) {
     return (
       <GoalReplyComposer
@@ -55,6 +67,11 @@ export function GoalActionDock({
         busy={busy}
         error={error}
         service={service}
+        routeToConcierge={
+          replyMode === "message" &&
+          goal.status === "waiting" &&
+          goal.mode !== "concierge"
+        }
         onClose={() => setReplyMode(null)}
         onComplete={(receipt) => {
           setReplyMode(null);
@@ -226,57 +243,33 @@ export function GoalActionDock({
 
   if (view.dueFollowUp) {
     return (
-      <div className="goal-followup-dock waiting">
-        <div className="goal-followup-heading">
-          <Clock3 size={18} />
-          <div>
-            <span>到点跟进</span>
-            <strong>
-              {goal.waitingFor
-                ? `仍在等 ${goal.waitingFor}，还是已经有结果？`
-                : "等待有结果了吗？"}
-            </strong>
-          </div>
-        </div>
-        <div className="goal-action-buttons">
-          <Button variant="secondary" onClick={() => setReplyMode("message")}>
-            补充情况
+      <GoalReplyComposer
+        goal={goal}
+        mode="message"
+        busy={busy}
+        error={error}
+        service={service}
+        inline
+        dismissible={false}
+        autoFocus={false}
+        heading="把现在的情况告诉管家"
+        placeholder={
+          goal.waitingFor
+            ? `例如：${goal.waitingFor} 已有结果、仍在等，或这件事已经结束。`
+            : "例如：已经收到结果、仍在等，或这件事已经结束。"
+        }
+        note="你只描述情况；是否继续等待、推进、验收或结束，由管家判断。"
+        submitLabel="交给管家"
+        successMessage="已交给管家；管家会读取你的原话并判断下一步。"
+        routeToConcierge={goal.mode !== "concierge"}
+        secondaryAction={
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void snooze()}>
+            1 小时后提醒
           </Button>
-          <Button
-            variant="secondary"
-            disabled={busy || goal.dispatch?.status === "pending"}
-            onClick={() =>
-              void act(
-                { type: "goal.followup", goalId: goal.id },
-                "跟进请求已交给管家，目标仍保持等待",
-              )
-            }
-          >
-            让管家跟进
-          </Button>
-          <Button variant="secondary" onClick={() => setReplyMode("resume")}>
-            有结果，继续推进
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() =>
-              void act(
-                {
-                  type: "goal.remind",
-                  goalId: goal.id,
-                  at: new Date(Date.now() + 3_600_000).toISOString(),
-                  note: goal.next,
-                },
-                "1 小时后再提醒你",
-              )
-            }
-          >
-            1 小时后再提醒
-          </Button>
-        </div>
-      </div>
+        }
+        onClose={() => undefined}
+        onComplete={notify}
+      />
     );
   }
 
@@ -294,40 +287,16 @@ export function GoalActionDock({
           </small>
         </div>
         <div className="goal-action-buttons">
-          <Button variant="secondary" onClick={() => setReplyMode("message")}>
-            补充情况
+          <Button variant="primary" onClick={() => setReplyMode("message")}>
+            告诉管家
           </Button>
           <Button
-            variant="secondary"
-            disabled={busy || goal.dispatch?.status === "pending"}
-            onClick={() =>
-              void act(
-                { type: "goal.followup", goalId: goal.id },
-                "跟进请求已交给管家，目标仍保持等待",
-              )
-            }
-          >
-            让管家跟进
-          </Button>
-          <Button
-            variant="secondary"
+            variant="ghost"
+            size="sm"
             disabled={busy}
-            onClick={() =>
-              void act(
-                {
-                  type: "goal.remind",
-                  goalId: goal.id,
-                  at: new Date(Date.now() + 3_600_000).toISOString(),
-                  note: goal.next,
-                },
-                "1 小时后提醒你继续关注",
-              )
-            }
+            onClick={() => void snooze()}
           >
             1 小时后提醒
-          </Button>
-          <Button variant="primary" onClick={() => setReplyMode("resume")}>
-            有结果，继续推进
           </Button>
         </div>
       </div>

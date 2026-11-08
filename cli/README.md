@@ -4,10 +4,10 @@ Crewvane 桌面应用在“设置”中安装自包含 CLI，管家和负责人�
 
 命令分为两类：
 
-- **消息入口**：`ask`、`goal message`、`direct`。只追加人的原话和附件，不修改状态、下一步、等待对象或提醒。
+- **消息入口**：`ask`、`goal message`、`direct`。只追加人的原话和附件；桌面在等待事项中把“告诉管家”的消息交给当前管家，由管家读取原话后再决定状态。
 - **Agent 状态协议**：`progress`、`wait`、`review`、`decide`、`risk`、`ship` 等。仅在明确事实发生后由管家、负责人或受信任适配器调用。
 
-人通过“验收通过、批准、拒绝、继续推进”等桌面明确按钮触发状态变化。CLI 不解析自然语言来猜测批准、验收或完成。
+人的自由文本不会由 core 按关键词自动改变状态。管家收到消息后，只能在语义明确时调用当前目标的 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`；完成、放弃和决定必须把用户原话写入 `--note` / `--reason`。语义含糊时先追问，不能从顺承词或一般认可中猜测。
 
 ```sh
 crewvane --help
@@ -57,10 +57,10 @@ CLI 只接受 PNG、JPEG、WebP、GIF；单张最多 10 MB，每个目标最多 
 
 - `status`；
 - `goal show <当前ID>`；
-- 当前目标的 `goal update/progress/wait/decide/risk/ship`；
+- 当前目标的 `goal update/progress/wait/decide/risk/ship/accept/complete/rework/drop/resolve/remind`；
 - 当前目标的 `session set`。
 
-`goal list`、`attention`、`ask` 以及任何跨目标读写都会被拒绝。每次通知也带唯一 `case_id`，同一工作区严格串行发送，避免多个目标在长期会话中串案。
+`goal list`、`attention`、`ask`、`goal message` 以及任何跨目标读写都会被拒绝。每次通知也带唯一 `case_id`，同一工作区严格串行发送，避免多个目标在长期会话中串案；结束类状态命令还要求 `--note` 保留用户明确确认的原话。
 
 这是 Crewvane CLI 的应用层数据边界，不是操作系统文件沙箱，也不能阻止第三方 Agent 绕过 CLI 直接访问文件。Agent CLI 的模型、沙箱和权限参数完全使用用户配置的原生 argv；Crewvane 不会自动添加 Codex 专属 `workspace-write` 或其他运行时参数。
 
@@ -88,12 +88,15 @@ crewvane goal review <ID> --summary "功能已实现" \
   --check "单元测试::pnpm test::passed::全部通过"
 crewvane goal rework <ID> --note "补充边界场景"
 crewvane goal accept <ID> --note "已查看实际成果"
+crewvane goal complete <ID> --note "方案没问题，结束这个目标"
 crewvane goal resolve <ID> --note "批准今天发布" --outcome approved
 crewvane goal resolve <ID> --note "拒绝删除旧数据" --outcome rejected
 crewvane goal drop <ID> --reason "不再需要"
 ```
 
 `goal review` 至少接受一项真实检查记录，且检查结果必须为 `passed`。`goal ship` 只按项目策略返回是否放行或需要人审批，不替负责人执行 Git 或部署。
+
+`goal complete` 用于没有待验收交付、但用户已经明确要求结束的事项；`goal accept` 仍要求目标已经提交带检查记录的成果。两者都由 core 记录执行者与原话，人工按钮和管家聊天走同一份审计记录。
 
 ## 上线策略、决定账本与高风险动作
 

@@ -397,6 +397,14 @@ export class WorkspaceService {
           ]);
           if (combined.length) item.attachments = combined;
           if (item.attention?.source === "dispatch") item.attention = null;
+          if (
+            item.attention?.kind === "follow_up" ||
+            (item.status === "waiting" && item.remindAt && Date.parse(item.remindAt) <= Date.now())
+          ) {
+            item.attention = null;
+            item.remindAt = undefined;
+          }
+          if (command.routeToConcierge) item.mode = "concierge";
           if (item.mode === "concierge")
             item.dispatch = {
               id: newId("handoff"),
@@ -759,6 +767,12 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (item.status !== "review" || !item.delivery)
             throw new Error("只有提交验收的目标才能通过验收");
+          const actor = command.actor || "你";
+          const note = command.note?.trim()
+            ? text(command.note, "验收依据", 4000)
+            : "成果验收通过。";
+          if (actor !== "你" && !command.note?.trim())
+            throw new Error("管家结束目标时必须记录用户明确确认完成的原话");
           item.status = "completed";
           item.attention = null;
           item.remindAt = undefined;
@@ -767,9 +781,22 @@ export class WorkspaceService {
           activity(
             item,
             "accepted",
-            command.note || "成果验收通过。",
-            command.actor || "你",
+            note,
+            actor,
           );
+          return item;
+        }
+        case "goal.complete": {
+          const item = goal(command.goalId);
+          ongoing(item, true);
+          const actor = command.actor || "你";
+          const note = text(command.note, "用户确认完成的原话", 4000);
+          item.status = "completed";
+          item.attention = null;
+          item.remindAt = undefined;
+          item.waitingFor = undefined;
+          item.next = `已结束：${note}`;
+          activity(item, "accepted", note, actor);
           return item;
         }
         case "goal.rework": {
@@ -785,11 +812,14 @@ export class WorkspaceService {
         case "goal.drop": {
           const item = goal(command.goalId);
           ongoing(item, true);
+          const actor = command.actor || "你";
+          if (actor !== "你" && !command.note?.trim())
+            throw new Error("管家放弃目标时必须记录用户明确放弃的原话");
           item.status = "dropped";
           item.attention = null;
           item.remindAt = undefined;
           item.next = text(command.note || "这件事已放弃。", "原因", 4000);
-          activity(item, "dropped", item.next, command.actor || "你");
+          activity(item, "dropped", item.next, actor);
           return item;
         }
         case "goal.resolve": {

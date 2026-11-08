@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import {
   Paperclip,
@@ -13,7 +14,7 @@ import { Button } from "../../ui/index.js";
 import type { Goal } from "../../../../../packages/core/src/types.js";
 import type { GoalDetailService } from "./goalService.js";
 
-export type GoalReplyMode = "message" | "return" | "resume" | "drop";
+export type GoalReplyMode = "message" | "return" | "drop";
 type ReplyImage = { key: string; file: File; preview: string };
 
 const attachmentFormats = new Set([
@@ -33,6 +34,16 @@ export function GoalReplyComposer({
   service,
   onClose,
   onComplete,
+  heading,
+  placeholder,
+  note,
+  submitLabel,
+  successMessage,
+  dismissible = true,
+  autoFocus = true,
+  inline = false,
+  routeToConcierge = false,
+  secondaryAction,
 }: {
   goal: Goal;
   mode: GoalReplyMode;
@@ -41,6 +52,16 @@ export function GoalReplyComposer({
   service: GoalDetailService;
   onClose: () => void;
   onComplete: (receipt: string) => void;
+  heading?: string;
+  placeholder?: string;
+  note?: string;
+  submitLabel?: string;
+  successMessage?: string;
+  dismissible?: boolean;
+  autoFocus?: boolean;
+  inline?: boolean;
+  routeToConcierge?: boolean;
+  secondaryAction?: ReactNode;
 }) {
   const [message, setMessage] = useState("");
   const [replyImages, setReplyImages] = useState<ReplyImage[]>([]);
@@ -58,14 +79,15 @@ export function GoalReplyComposer({
   );
 
   const acceptsImages = mode === "message";
-  const labels = {
+  const toConcierge = goal.mode === "concierge" || routeToConcierge;
+  const baseLabels = {
     message: {
-      heading: goal.mode === "concierge" ? "回复管家" : "记录留言",
+      heading: toConcierge ? "回复管家" : "记录留言",
       placeholder: "直接说，不必套格式。你的原话会交给管家。",
-      submit: goal.mode === "concierge" ? "交给管家" : "记录留言",
+      submit: toConcierge ? "交给管家" : "记录留言",
       note:
-        goal.mode === "concierge"
-          ? "只发给管家，不改目标状态"
+        toConcierge
+          ? "你只描述情况；等待、推进、验收或结束由管家判断。"
           : "只写入当前目标记录",
     },
     return: {
@@ -74,12 +96,6 @@ export function GoalReplyComposer({
       submit: "退回并交给管家",
       note: "退回是明确状态操作",
     },
-    resume: {
-      heading: "有结果了，继续推进",
-      placeholder: "写下最新结果与下一步；等待状态会结束。",
-      submit: "交给管家继续",
-      note: "这是明确的状态更新",
-    },
     drop: {
       heading: "放弃目标",
       placeholder: "写下放弃这件事的原因；记录会保留下来。",
@@ -87,6 +103,13 @@ export function GoalReplyComposer({
       note: "放弃后不会再联系管家；记录仍可查看",
     },
   }[mode];
+  const labels = {
+    ...baseLabels,
+    heading: heading ?? baseLabels.heading,
+    placeholder: placeholder ?? baseLabels.placeholder,
+    submit: submitLabel ?? baseLabels.submit,
+    note: note ?? baseLabels.note,
+  };
 
   function clearImages() {
     replyImages.forEach((item) => URL.revokeObjectURL(item.preview));
@@ -148,16 +171,6 @@ export function GoalReplyComposer({
         onComplete("已退回，管家会带着你的原话继续协调");
         return;
       }
-      if (mode === "resume") {
-        await service.command({
-          type: "goal.resume",
-          goalId: goal.id,
-          note: body,
-          mode: "concierge",
-        });
-        onComplete("等待已结束，管家会继续推进");
-        return;
-      }
       if (mode === "drop") {
         await service.command({
           type: "goal.drop",
@@ -180,12 +193,13 @@ export function GoalReplyComposer({
         type: "goal.message",
         goalId: goal.id,
         text: body,
+        ...(routeToConcierge ? { routeToConcierge: true } : {}),
         ...(attachments.length ? { attachments } : {}),
       });
-      onComplete(
-        goal.mode === "concierge"
-          ? "消息已交给管家，目标状态保持不变"
-          : "留言已记录",
+      onComplete(successMessage ??
+        (toConcierge
+          ? "消息已交给管家；目标状态等待管家判断"
+          : "留言已记录"),
       );
     } catch (reason) {
       setValidation(String(reason).replace(/^Error: /, ""));
@@ -193,12 +207,14 @@ export function GoalReplyComposer({
   }
 
   return (
-    <form className="goal-reply-composer" onSubmit={submit}>
+    <form className={`goal-reply-composer ${inline ? "goal-reply-composer--inline" : ""}`} onSubmit={submit}>
       <div className="reply-composer-heading">
         <span>{labels.heading}</span>
-        <button type="button" onClick={onClose}>
-          取消
-        </button>
+        {dismissible && (
+          <button type="button" onClick={onClose}>
+            取消
+          </button>
+        )}
       </div>
       <div
         className={`goal-reply-box ${dragging ? "dragging" : ""}`}
@@ -232,17 +248,15 @@ export function GoalReplyComposer({
         }}
       >
         <textarea
-          autoFocus
+          autoFocus={autoFocus}
           required
           maxLength={12000}
           value={message}
           aria-label={
             mode === "return"
               ? "退回说明"
-              : mode === "resume"
-                ? "最新结果与下一步"
-                : mode === "drop"
-                  ? "放弃原因"
+              : mode === "drop"
+                ? "放弃原因"
                 : "发给管家的消息"
           }
           placeholder={labels.placeholder}
@@ -318,14 +332,17 @@ export function GoalReplyComposer({
       )}
       <div className="reply-composer-footer">
         <span>{labels.note}</span>
-        <Button
-          type="submit"
-          variant="primary"
-          disabled={busy || !message.trim()}
-          icon={<Send size={15} />}
-        >
-          {labels.submit}
-        </Button>
+        <div className="reply-composer-actions">
+          {secondaryAction}
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={busy || !message.trim()}
+            icon={<Send size={15} />}
+          >
+            {labels.submit}
+          </Button>
+        </div>
       </div>
     </form>
   );

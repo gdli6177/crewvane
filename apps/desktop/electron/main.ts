@@ -674,7 +674,7 @@ app.whenReady().then(async () => {
         if (root === target.root) window.webContents.send("crewvane:event", { type: "diagnostic", message: String(error) });
       });
     }
-    if (["goal.accept", "goal.drop"].includes(command.type)) {
+    if (["goal.accept", "goal.complete", "goal.drop"].includes(command.type)) {
       const item = result as import("../../../packages/core/src/index.js").Goal;
       await closeEndedGoalSession(target, item.id).catch((error) => {
         if (root === target.root) window.webContents.send("crewvane:event", {
