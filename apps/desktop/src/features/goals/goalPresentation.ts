@@ -10,7 +10,7 @@ export type GoalTone = "running" | "waiting" | "review" | "reply" | "blocked" | 
 
 export const statusLabel = {
   backlog: "暂存",
-  active: "进行中",
+  active: "跟进中",
   waiting: "等待中",
   review: "待验收",
   completed: "已完成",
@@ -119,6 +119,14 @@ export function sceneSyncPresentation(goal: Goal) {
   };
 }
 
+export function goalProgressLabel(goal: Goal) {
+  if (goal.watchdog?.contactedAt) return "管家核对中";
+  if (goal.recovery) return "待管家核对";
+  if (goal.live?.state === "working") return "执行中";
+  if (goal.live?.state === "idle" || goal.live?.state === "done") return "待管家核对";
+  return goal.herdr ? "待管家跟进" : "待分配";
+}
+
 export interface GoalSceneContext {
   id: string;
   title: string;
@@ -171,8 +179,10 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const contextAttachments = attachmentsFor(contextActivity);
 
   let tone: GoalTone = "running";
-  let label = "管家处理中";
-  let detail = "负责人正在推进；暂时不需要你处理。";
+  let label = goal.mode === "manual" ? "由你处理" : goal.herdr ? "等待管家跟进" : "等待分配";
+  let detail = goal.mode === "manual"
+    ? "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。"
+    : "目标已保存，管家会安排负责人并写回下一步。";
   let brief = latestAgentReply?.text || "有真正需要你的变化时，管家会带回这里。";
   let nextLabel = "接下来的安排";
   if (ended) {
@@ -221,6 +231,16 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       ? `正在等待 ${goal.waitingFor}，现在需要确认是否已有结果。`
       : "等待事项已到跟进时间。";
     nextLabel = "下一步";
+  } else if (goal.watchdog?.contactedAt) {
+    tone = "waiting";
+    label = "管家核对中";
+    detail = "负责人已停止输出且结果尚未写回。已请管家核对现场，现在不需要你处理。";
+    nextLabel = "核对后的安排";
+  } else if (goal.recovery) {
+    tone = "waiting";
+    label = "待管家核对";
+    detail = "负责人已停止输出，结果尚未写回。已安排管家核对；现在不需要你处理。";
+    nextLabel = "核对后的安排";
   } else if (goal.status === "waiting") {
     tone = "waiting";
     label = "等待外部";
@@ -229,6 +249,13 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       : "正在等待外部结果；现在不需要你处理。";
     brief = goal.next;
     nextLabel = "恢复推进的条件";
+  } else if (goal.live) {
+    label = goalProgressLabel(goal);
+    detail = goal.live.state === "working"
+      ? "负责人正在执行；暂时不需要你处理。"
+      : goal.live.reachable === false
+        ? "现场连接已中断，管家会核查并写回下一步。"
+        : "负责人当前没有继续输出，结果尚未写回；管家会核对，不会把空闲当作完成。";
   } else if (goal.mode === "manual") {
     tone = "running";
     label = "由你处理";

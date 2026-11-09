@@ -65,6 +65,52 @@ test("blocked or missing owner is checked without treating idle or waiting as fa
   assert.deepEqual(inspectWatchdog([item], after(40)), []);
   assert.equal(item.attention, null);
 });
+test("a settled owner is reconciled without declaring its goal completed or failed", () => {
+  const first = goal(), second = {...goal(), id:"goal_second"};
+  first.live = { state: "done", checkedAt: after(1), reachable: true };
+  second.live = { state: "working", checkedAt: after(1), reachable: true };
+  assert.deepEqual(inspectWatchdog([first, second], after(2.4)), []);
+  const requests = inspectWatchdog([first, second], after(2.5));
+  assert.deepEqual(requests.map(request => [request.goalId, request.reason]), [["goal_test", "settled"]]);
+  assert.equal(first.status, "active");
+  assert.equal(first.attention, null);
+  assert.equal(first.recovery, "done");
+  reportWatchdog(first, after(2.5), requests[0]!.basis, "contacted");
+  assert.equal(attentionGoals([first], Date.parse(after(2.5))).length, 0);
+  // Contacting the concierge is not evidence that the owner made progress.
+  assert.equal(first.watchdog?.reason, "settled");
+  assert.equal(first.recovery, undefined);
+  first.live = { state:"working", checkedAt:after(3), reachable:true };
+  assert.deepEqual(inspectWatchdog([first], after(3)), []);
+  assert.equal(first.recovery, undefined);
+});
+test("a quiet owner that recorded waiting on itself is still reconciled", () => {
+  const item = goal();
+  item.status = "waiting";
+  item.waitingFor = "owner";
+  item.live = { state:"idle", checkedAt:after(1), reachable:true };
+  const [request] = inspectWatchdog([item], after(2.5));
+  assert.equal(request?.reason, "settled");
+  reportWatchdog(item, after(2.5), request!.basis, "contacted");
+  assert.equal(item.watchdog?.contactedAt, after(2.5));
+  assert.ok(item.activities.some(activity => /已请管家核查/.test(activity.text)));
+});
+test("waiting for a person or another party does not probe the owner terminal", () => {
+  const human = goal(), external = goal();
+  human.status = external.status = "waiting";
+  human.waitingFor = "你";
+  external.waitingFor = "YR";
+  human.live = external.live = { state:"idle", checkedAt:after(1), reachable:true };
+  assert.deepEqual(inspectWatchdog([human, external], after(20)), []);
+});
+test("an idle owner cannot hide a fresh structured attention request", () => {
+  const item = goal();
+  item.live = { state:"idle", checkedAt:start, reachable:true };
+  item.attention = { kind:"decision", summary:"请选择方案", since:start };
+  assert.deepEqual(inspectWatchdog([item], after(5)), []);
+  assert.equal(item.attention.kind, "decision");
+  assert.equal(item.recovery, undefined);
+});
 test("an unreachable concierge becomes actionable, and successful retry clears only its own failure", () => {
   const item = goal(), [request] = inspectWatchdog([item], after(31));
   reportWatchdog(item, after(31), request!.basis, "failed", "会话未运行");

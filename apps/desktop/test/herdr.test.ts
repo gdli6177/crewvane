@@ -207,11 +207,12 @@ test("watchdog keeps recovery with owners instead of asking the concierge to exe
     { session: "crewvane-test", agent: "concierge" }, [
       { goalId: "goal_blocked", reason: "blocked" },
       { goalId: "goal_stale", reason: "stale" },
+      { goalId: "goal_settled", reason: "settled" },
     ],
   );
   const prompts = mock.calls.filter(args => args.slice(0, 3).join(" ") === "agent prompt concierge");
-  assert.equal(prompts.length, 2);
-  for (const [index, goalId] of ["goal_blocked", "goal_stale"].entries()) {
+  assert.equal(prompts.length, 3);
+  for (const [index, goalId] of ["goal_blocked", "goal_stale", "goal_settled"].entries()) {
     const message = prompts[index]![3]!;
     assert.match(message, new RegExp(goalId));
     assert.match(message, /不亲自执行目标/);
@@ -222,6 +223,9 @@ test("watchdog keeps recovery with owners instead of asking the concierge to exe
   }
   assert.doesNotMatch(prompts[0]![3]!, /goal_stale/);
   assert.doesNotMatch(prompts[1]![3]!, /goal_blocked/);
+  assert.match(prompts[2]![3]!, /尚未写回这一阶段的结果/);
+  assert.match(prompts[2]![3]!, /不要自行验收/);
+  assert.doesNotMatch(prompts[2]![3]!, /goal_stale/);
   assert.ok(prompts.every(args => args.includes("--wait") && !args.includes("--timeout")));
 });
 test("resumed concierge receives current role instructions without starting another agent", async () => {
@@ -235,6 +239,20 @@ test("resumed concierge receives current role instructions without starting anot
   assert.match(mock.calls[0]![3]!,/custom-cli/);
   assert.doesNotMatch(mock.calls[0]![3]!,/Codex 负责人使用 workspace-write/);
   assert.ok(mock.calls[0]!.includes("--wait") && !mock.calls[0]!.includes("--timeout"));
+});
+test("a running terminal-title spinner wins over a stale idle agent status", async () => {
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner", agent: "omp", agent_status: "idle", revision: 58,
+      terminal_title_stripped: "π ⠋ 🧪 IDLE: working on a tool call",
+      workspace_id: "w2", tab_id: "w2:t2", pane_id: "w2:p2",
+    }] } }),
+  });
+  const presences = await new HerdrClient(mock.runner, "crewvane-test").presences([{
+    id: "goal_one",
+    herdr: { session: "crewvane-test", agent: "owner", paneId: "w2:p2" },
+  }]);
+  assert.equal(presences.goal_one?.state, "working");
 });
 
 test("an agent_blocked dispatch becomes an actionable reminder without changing terminal input", async () => {

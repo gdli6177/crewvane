@@ -688,6 +688,7 @@ export class WorkspaceService {
               status: "pending", at: nowIso(),
             };
           activity(item, "progress", summary, actor);
+          delete item.recovery;
           return item;
         }
         case "goal.wait": {
@@ -700,6 +701,7 @@ export class WorkspaceService {
           item.waitingFor = item.owner;
           item.remindAt = command.remindAt ? iso(command.remindAt) : undefined;
           activity(item, "waiting", command.reason, command.actor || "管家");
+          delete item.recovery;
           return item;
         }
         case "goal.decide": {
@@ -730,6 +732,8 @@ export class WorkspaceService {
           };
           if (command.next) item.next = text(command.next, "下一步", 2000);
           activity(item, "decision", item.attention.summary, command.actor || "管家");
+          delete item.watchdog;
+          delete item.recovery;
           return item;
         }
         case "goal.risk": {
@@ -762,6 +766,8 @@ export class WorkspaceService {
           };
           item.next = `执行高风险动作前等待你确认：${summary}`;
           activity(item, "decision", item.attention.summary, command.actor || "管家");
+          delete item.watchdog;
+          delete item.recovery;
           return item;
         }
         case "goal.ship": {
@@ -884,6 +890,8 @@ export class WorkspaceService {
             item.delivery.summary,
             command.actor || "管家",
           );
+          delete item.watchdog;
+          delete item.recovery;
           return item;
         }
         case "goal.accept": {
@@ -1115,6 +1123,8 @@ export class WorkspaceService {
               checkedAt: iso(presence.checkedAt),
               ...(presence.reachable === undefined ? {} : { reachable: Boolean(presence.reachable) }),
             };
+            delete item.recovery;
+            if (presence.state === "working") delete item.watchdog;
             observeSceneWork(item, item.live);
             if (
               presence.state !== "blocked" &&
@@ -1162,6 +1172,8 @@ export class WorkspaceService {
               checkedAt: iso(command.presence.checkedAt),
               ...(command.presence.reachable === undefined ? {} : { reachable: Boolean(command.presence.reachable) }),
             };
+            delete item.recovery;
+            if (command.presence.state === "working") delete item.watchdog;
             observeSceneWork(item, item.live);
             if (command.reference)
               item.herdr = { ...reference, ...structuredClone(command.reference) };

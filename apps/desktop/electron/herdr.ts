@@ -85,13 +85,21 @@ function agents(raw: string): any[] {
   if (!Array.isArray(list)) throw new Error("Herdr 没有返回 Agent 列表");
   return list;
 }
-function livePresence(agent: any, checkedAt: string): LivePresence {
-  const state =
+function liveState(agent: any): LivePresence["state"] {
+  const reported =
     agent?.agent_status ?? agent?.state ?? agent?.status ?? agent?.lifecycle;
+  const title = String(agent?.terminal_title_stripped ?? agent?.terminal_title ?? "");
+  // Some interactive CLIs keep agent_status=idle while a tool call is still
+  // running and expose progress only through a spinner in the terminal title.
+  // Treat a running title animation as working until the title settles.
+  if (reported === "idle" && /[\u2800-\u28ff]/u.test(title)) return "working";
+  return ["working", "idle", "done", "blocked", "unknown"].includes(reported)
+    ? reported
+    : "unknown";
+}
+function livePresence(agent: any, checkedAt: string): LivePresence {
   return {
-    state: ["working", "idle", "done", "blocked", "unknown"].includes(state)
-      ? state
-      : "unknown",
+    state: liveState(agent),
     checkedAt,
     reachable: true,
   };
@@ -486,9 +494,9 @@ ${ownerSceneReplyInstructions(goal.id)}
   }
   async notifyWatchdog(reference: HerdrReference, issues: { goalId: string; reason: string }[]) {
     if (!reference.agent && reference.transport !== "pane") throw new Error("管家尚未准备好，请先连接管家");
-    const reasons: Record<string, string> = { blocked: "负责人正在等待输入或批准", missing: "负责人会话暂时不可达", stale: "目标 30 分钟没有写回实质进展", unassigned: "目标尚未登记独立负责人现场，请先创建并启动负责人，保存真实现场再发送任务" };
+    const reasons: Record<string, string> = { blocked: "负责人正在等待输入或批准", missing: "负责人会话暂时不可达", stale: "目标 30 分钟没有写回实质进展", unassigned: "目标尚未登记独立负责人现场，请先创建并启动负责人，保存真实现场再发送任务", settled: "负责人已停止输出并回到输入状态，但尚未写回这一阶段的结果；这不等于任务完成或失败" };
     for (const issue of issues) await this.prompt(reference,
-      `${conciergeRole}\n[CREWVANE_CASE_BEGIN]\ncase_id: ${issue.goalId}\nevent: watchdog\nissue: ${reasons[issue.reason] ?? issue.reason}\npolicy: 只处理上方案卷；忽略此前案卷的内容；不得读取或修改其他目标\n[CREWVANE_CASE_END]\n这是后台巡检，不是用户新增任务。请先用 crewvane goal show ${issue.goalId} 读取实际记录，检查真实负责人现场并主动联系负责人，通过澄清要求、调整分工或联系其他负责人协调恢复，不能自己接手执行。写回实际协调进展，不把终端安静或 idle 当作失败或完成。确实必须由人决定时才用 goal decide 提出具体问题；不要让人填写进度表。已等待他人、已交付或已结束的目标不要重新启动。`,
+      `${conciergeRole}\n[CREWVANE_CASE_BEGIN]\ncase_id: ${issue.goalId}\nevent: watchdog\nissue: ${reasons[issue.reason] ?? issue.reason}\npolicy: 只处理上方案卷；忽略此前案卷的内容；不得读取或修改其他目标\n[CREWVANE_CASE_END]\n这是后台巡检，不是用户新增任务。请先用 crewvane goal show ${issue.goalId} 读取实际记录，检查真实负责人现场并主动联系负责人，通过澄清要求、调整分工或联系其他负责人协调恢复，不能自己接手执行。写回实际协调进展，不把终端安静或 idle 当作失败或完成。确实必须由人决定时才用 goal decide 提出具体问题；不要让人填写进度表。已等待他人、已交付或已结束的目标不要重新启动。${issue.reason === "settled" ? "负责人停在输入状态但没有写回，可能是遗漏汇报，也可能是等待未被识别的输入。请要求负责人补齐真实结果、下一步，以及必要的 decide / wait / review；不要自行验收或猜测终端文字的含义。若目标已有 attentionRequest，不要重复提问，应先核对该事项。" : ""}`,
     );
   }
   async presences(
@@ -513,10 +521,11 @@ ${ownerSceneReplyInstructions(goal.id)}
         result[goal.id] = { state: "unknown", checkedAt: new Date().toISOString(), reachable: false };
         continue;
       }
-      const state =
-        agent.agent_status ?? agent.state ?? agent.status ?? agent.lifecycle;
-      if (["working", "idle", "done", "blocked", "unknown"].includes(state))
-        result[goal.id] = { state, checkedAt: new Date().toISOString(), reachable: true };
+      result[goal.id] = {
+        state: liveState(agent),
+        checkedAt: new Date().toISOString(),
+        reachable: true,
+      };
     }
     return result;
   }

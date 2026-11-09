@@ -194,7 +194,7 @@ export function GoalIntakeForm({
             取消
           </Button>
           <Button type="submit" aria-label={handling === "concierge" ? "确认交给管家" : handling === "later" ? "确认先记下" : "确认我来做"} variant="primary" disabled={busy} icon={<Sparkles size={15} />}>
-            {busy ? "正在保存…" : handling === "later" ? "先记下" : handling === "self" ? "记到我来做" : "交给管家"}
+            {busy ? "正在保存…" : handling === "later" ? "先记下" : handling === "self" ? "记到我来做" : "确认交给管家"}
           </Button>
         </div>
       </form>

@@ -9,9 +9,11 @@ import {
 } from "../../../packages/core/src/index.ts";
 import {
   goalConversationActivities,
+  goalProgressLabel,
   goalSystemActivities,
   presentGoal,
 } from "../src/features/goals/goalPresentation.ts";
+import { inspectWatchdog } from "../../../packages/core/src/watchdog.ts";
 import { pendingSceneReply } from "../../../packages/core/src/model.ts";
 
 async function fixture() {
@@ -127,6 +129,40 @@ test("a manual active goal is presented as owned by the human", async () => {
   assert.equal(current.mode, "manual");
   assert.equal(view.label, "由你处理");
   assert.match(view.detail, /标记完成/);
+});
+
+test("a quiet owner is labelled as pending reconciliation, not still executing", async () => {
+  const service = new WorkspaceService(await fixture());
+  const goal = await service.execute({ type:"goal.create", input:{
+    title:"负责人已空闲", projectId:"personal", mode:"concierge",
+  } }) as Goal;
+  await service.execute({ type:"session.set", goalId:goal.id, reference:{
+    session:"test", paneId:"w1:p2", agent:"owner-a",
+  } });
+  await service.execute({ type:"live.sync", presences:{ [goal.id]:{
+    state:"done", reachable:true, checkedAt:new Date(Date.now()-120_000).toISOString(),
+  } } });
+  let state = await service.read(), current = state.goals[0]!;
+  assert.equal(goalProgressLabel(current), "待管家核对");
+  assert.doesNotMatch(presentGoal(current, state).detail, /正在执行/);
+  await service.execute({ type:"watchdog.inspect", at:new Date().toISOString() });
+  state = await service.read(); current = state.goals[0]!;
+  assert.equal(goalProgressLabel(current), "待管家核对");
+  assert.equal(current.attention, null);
+  assert.equal(presentGoal(current, state).label, "待管家核对");
+  const watchdog = structuredClone(current.watchdog!);
+  await service.execute({
+    type:"watchdog.report", goalId:goal.id, at:new Date().toISOString(),
+    basis:watchdog.basis, outcome:"contacted",
+  });
+  state = await service.read(); current = state.goals[0]!;
+  assert.equal(goalProgressLabel(current), "管家核对中");
+  assert.equal(presentGoal(current, state).label, "管家核对中");
+  await service.execute({ type:"live.sync", presences:{ [goal.id]:{
+    state:"working", reachable:true, checkedAt:new Date().toISOString(),
+  } } });
+  assert.equal(goalProgressLabel((await service.read()).goals[0]!), "执行中");
+  assert.equal(inspectWatchdog((await service.read()).goals, new Date().toISOString()).length, 0);
 });
 
 test("decision context uses the latest agent handoff while keeping transport events out of conversation", async () => {

@@ -49,7 +49,7 @@ import { useReminderClock } from "./features/tasks/useReminderClock.js";
 import { GoalDetail } from "./features/goals/GoalDetail.js";
 import { GoalAttentionCard } from "./features/goals/GoalAttentionCard.js";
 import { goalEntryDestination } from "./features/goals/goalEntry.js";
-import { presentSceneContext, sceneSyncPresentation } from "./features/goals/goalPresentation.js";
+import { goalProgressLabel, presentSceneContext, sceneSyncPresentation } from "./features/goals/goalPresentation.js";
 import type { GoalDetailService } from "./features/goals/goalService.js";
 import {
   Button,
@@ -80,7 +80,7 @@ const pages = {
 } as const;
 const statusLabel = {
   backlog: "暂存",
-  active: "进行中",
+  active: "跟进中",
   waiting: "等待中",
   review: "待验收",
   completed: "已完成",
@@ -101,6 +101,7 @@ function goalRowTone(item: Goal): BadgeTone {
   if (kind === "review") return "mint";
   if (kind === "follow_up") return "warm";
   if (kind === "intervention") return "danger";
+  if (item.recovery || item.watchdog?.contactedAt) return "warm";
   return goalStatusTone[item.status];
 }
 const attentionLabel = {
@@ -370,7 +371,7 @@ function App() {
     if (destination === "task") return ["completed", "dropped"].includes(item.status)
       ? "查看记录" : item.status === "backlog" ? "尚未开始" : "我来做";
     if (destination === "details" && (item.status === "completed" || item.status === "dropped")) return "查看记录";
-    if (destination === "scene") return "回到现场";
+    if (destination === "scene") return goalProgressLabel(item);
     if (destination === "attention") return attentionActionLabel(item);
     return "查看目标";
   }
@@ -725,7 +726,7 @@ function App() {
                     tone="mint"
                     icon={<Sparkles size={18} />}
                     title="此刻，没有等你处理的事。"
-                    description={`${waiting.length ? `${waiting.length} 件在等待` : "没有被搁置的事项"}${active.length ? `，${active.length} 件正在推进` : ""}。到了该出现的时候再告诉你。`}
+                    description={`${waiting.length ? `${waiting.length} 件在等待` : "没有被搁置的事项"}${active.length ? `，${active.length} 件由管家跟进` : ""}。到了该出现的时候再告诉你。`}
                   />
                 )}
               </section>
@@ -762,10 +763,10 @@ function App() {
                 <div className="running">
                   <span className="pulse" />
                   <span>
-                    <strong>{active.length} 个目标</strong>正在推进
+                    <strong>{active.length} 个目标</strong>由管家跟进
                   </span>
                   <span>·</span>
-                  <span>工作时不会打扰你</span>
+                  <span>{active.some(item => item.recovery) ? "空闲结果正在核对" : "有需要时再打扰你"}</span>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -804,7 +805,7 @@ function App() {
                     ["all", "全部"],
                     ["attention", "需要处理"],
                     ["waiting", "等待中"],
-                    ["active", "进行中"],
+                    ["active", "跟进中"],
                     ["backlog", "暂存"],
                     ["completed", "已完成"],
                     ["dropped", "已放弃"],

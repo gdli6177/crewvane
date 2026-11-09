@@ -540,8 +540,7 @@ async function synchronize() {
         const all = await client(status.executable, workspace).presences(tracked);
         const presences = Object.fromEntries(Object.entries(all).filter(([id, presence]) => {
           const previous = tracked.find(goal => goal.id === id)?.live;
-          return previous?.state !== presence.state || previous?.reachable !== presence.reachable ||
-            Date.now() - Date.parse(previous?.checkedAt ?? "") >= 60_000;
+          return previous?.state !== presence.state || previous?.reachable !== presence.reachable;
         }));
         if (Object.keys(presences).length) await target.execute({ type: "live.sync", presences });
       } catch {
@@ -558,13 +557,19 @@ async function synchronize() {
     }
     const requests = (await target.execute({ type: "watchdog.inspect", at: new Date().toISOString() }) as WatchdogRequest[]).slice(0, 10);
     state = await target.read();
-    if (requests.length && root === workspace) {
+    // An agent may write a decision or delivery while the concierge prompt is
+    // in flight. That structured fact supersedes a quiet-terminal probe.
+    const activeRequests = requests.filter(request => {
+      const goal = state.goals.find(item => item.id === request.goalId);
+      return goal?.watchdog?.basis === request.basis && !goal.attention;
+    });
+    if (activeRequests.length && root === workspace) {
       let failure: string | undefined;
       try {
         if (!status.executable || state.concierge.status !== "ready") throw new Error("管家尚未连接，请点击「找管家」恢复");
         const coordinator = client(status.executable, workspace);
         await coordinate(target, async () => {
-          for (const request of requests) {
+          for (const request of activeRequests) {
             await setCoordinatorScope(target, request.goalId, `watchdog-${Date.parse(request.basis)}`);
             await coordinator.notifyWatchdog(state.concierge, [request]);
           }

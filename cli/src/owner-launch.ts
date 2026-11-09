@@ -36,6 +36,59 @@ export function quoteShell(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+// pane run sends text, not an argv array. On macOS a shell without bracketed
+// paste accepts at most 1024 bytes per canonical input line. Keep environment
+// setup and custom-CLI messages below that boundary without splitting a code
+// point. Environment exports are separate commands so no quoted string is cut.
+export function terminalText(value: string, limit = 768): string {
+  return value.split("\n").map(line => {
+    const lines: string[] = [];
+    let current = "", bytes = 0;
+    for (const character of line) {
+      const size = Buffer.byteLength(character);
+      if (current && bytes + size > limit) {
+        lines.push(current);
+        current = "";
+        bytes = 0;
+      }
+      current += character;
+      bytes += size;
+    }
+    return [...lines, current].join("\n");
+  }).join("\n");
+}
+
+function pathExports(executableDirectory: string, inherited: string): string[] {
+  const directories = [...new Set([executableDirectory, ...inherited.split(":")]
+    .filter(value => value.length > 0))];
+  const commands: string[] = [];
+  for (let index = 0; index < directories.length;) {
+    const batch: string[] = [];
+    let length = 0;
+    while (index < directories.length) {
+      const directory = directories[index]!;
+      const addition = (batch.length ? 1 : 0) + Buffer.byteLength(quoteShell(directory));
+      if (batch.length && length + addition > 560) break;
+      batch.push(directory);
+      length += addition;
+      index += 1;
+      // An unusual single executable path still has to be carried verbatim.
+      if (Buffer.byteLength(quoteShell(directory)) > 560) break;
+    }
+    commands.push(`export PATH=${batch.map(quoteShell).join(":")}${batch.length ? ":$PATH" : ""}`);
+  }
+  return commands;
+}
+
+async function sendShellCommand(run: HerdrCommandRunner, paneId: string, command: string) {
+  for (const line of terminalText(command).split("\n")) {
+    if (!line) continue;
+    if (Buffer.byteLength(line) > 768)
+      throw new Error("终端初始化包含超过 768 字节的单个路径，请改用较短的启动路径");
+    await run(["pane", "run", paneId, line]);
+  }
+}
+
 function createRunner(environment: NodeJS.ProcessEnv): HerdrCommandRunner {
   const session = environment.HERDR_SESSION?.trim();
   if (!session)
@@ -210,10 +263,6 @@ export async function launchOwner(
     if (!workspaceId || !tabId || !paneId)
       throw new Error("Herdr 没有返回负责人所需的真实 Workspace、Tab 和 Pane ID");
 
-    const path = [
-      executableDirectory,
-      environment.PATH || "",
-    ].filter(Boolean).join(":");
     const ownerEnvironment = [
       "unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE",
       `export CREWVANE_ROLE=owner CREWVANE_AGENT_NAME=${quoteShell(input.name)}`,
@@ -228,10 +277,10 @@ export async function launchOwner(
       `export HERDR_WORKSPACE_ID=${quoteShell(workspaceId)}`,
       `export HERDR_TAB_ID=${quoteShell(tabId)}`,
       `export HERDR_PANE_ID=${quoteShell(paneId)}`,
-      `export PATH=${quoteShell(path)}:"$PATH"`,
+      ...pathExports(executableDirectory, environment.PATH || ""),
       "printf '\\n__CREWVANE_OWNER_ENV_READY__\\n'",
-    ].join("; ");
-    await run(["pane", "run", paneId, ownerEnvironment]);
+    ].join("\n");
+    await sendShellCommand(run, paneId, ownerEnvironment);
     await run([
       "pane",
       "wait-output",
@@ -261,12 +310,7 @@ export async function launchOwner(
         ...(command.args.length ? ["--", ...command.args] : []),
       ]);
     } else {
-      await run([
-        "pane",
-        "run",
-        paneId,
-        [executable, ...command.args].map(quoteShell).join(" "),
-      ]);
+      await sendShellCommand(run, paneId, [executable, ...command.args].map(quoteShell).join(" "));
       const deadline = Date.now() + 20_000;
       let processId = 0;
       while (Date.now() < deadline) {
@@ -325,13 +369,23 @@ export async function launchOwner(
         };
       }
     } else {
-      await run(["pane", "run", paneId, task]);
+      await run(["pane", "run", paneId, terminalText(task)]);
       await new Promise((resolve) => setTimeout(resolve, 750));
     }
 
     return { goalId: goal.id, runtime: configured, reference };
   } catch (error) {
-    if (!bound) await closeTab(run, tabId);
+    if (!bound) {
+      await closeTab(run, tabId);
+      // A failed launch is a real coordination result. Do not leave the goal
+      // showing only an optimistic "assign an owner" next step.
+      const detail = String(error instanceof Error ? error.message : error).slice(0, 1000);
+      await service.execute({
+        type:"goal.progress", goalId:goal.id, actor:"管家",
+        summary:`负责人启动未完成：${detail}`,
+        next:"核对启动命令与真实现场后重试；目标尚未开始执行。",
+      }).catch(() => {});
+    }
     throw error;
   }
 }

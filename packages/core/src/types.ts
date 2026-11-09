@@ -53,7 +53,7 @@ export interface LiveEventReferenceUpdate {
   paneId?: string; tabId?: string; workspaceId?: string; agent?: string;
 }
 export interface LivePresence { state: LiveState; checkedAt: string; reachable?: boolean }
-export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned";
+export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned" | "settled";
 export interface WatchdogState {
   reason: WatchdogReason; basis: string; detectedAt: string;
   attemptedAt?: string; contactedAt?: string; escalatedAt?: string; lastError?: string;
@@ -74,6 +74,7 @@ export interface Goal {
   risk?: RiskEscalation;
   dispatch?: { id?: string; kind?: "resume" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
   sceneReply?: SceneReply;
+  recovery?: "idle" | "done" | "blocked";
   sceneVisit?: SceneVisit;
   watchdog?: WatchdogState;
   attachments?: GoalAttachment[];
