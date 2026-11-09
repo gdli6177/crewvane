@@ -47,7 +47,7 @@ export function validateState(value: unknown): WorkspaceState {
     if (!record(goal) || !nonEmptyString(goal.id) || !nonEmptyString(goal.projectId) ||
       !nonEmptyString(goal.title) || typeof goal.description !== "string" ||
       !["concierge", "manual"].includes(String(goal.mode)) ||
-      !["active", "waiting", "review", "completed", "dropped"].includes(String(goal.status)) ||
+      !["backlog", "active", "waiting", "review", "completed", "dropped"].includes(String(goal.status)) ||
       typeof goal.next !== "string" || typeof goal.owner !== "string" ||
       !Array.isArray(goal.activities) || !nonEmptyString(goal.createdAt) ||
       !nonEmptyString(goal.updatedAt))

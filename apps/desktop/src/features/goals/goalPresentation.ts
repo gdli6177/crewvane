@@ -1,4 +1,4 @@
-import { attentionKind } from "../../../../../packages/core/src/model.js";
+import { attentionKind, attentionRequest, pendingSceneReply } from "../../../../../packages/core/src/model.js";
 import type {
   Activity,
   Goal,
@@ -9,7 +9,8 @@ import type {
 export type GoalTone = "running" | "waiting" | "review" | "reply" | "blocked" | "done";
 
 export const statusLabel = {
-  active: "进行中",
+  backlog: "暂存",
+  active: "跟进中",
   waiting: "等待中",
   review: "待验收",
   completed: "已完成",
@@ -83,6 +84,47 @@ export interface GoalPresentation {
   needsIntervention: boolean;
   dispatchFailed: boolean;
   dueFollowUp: boolean;
+  sceneSync?: ReturnType<typeof sceneSyncPresentation>;
+}
+export function sceneSyncPresentation(goal: Goal) {
+  if (goal.mode !== "concierge" || ["completed", "dropped"].includes(goal.status)) return undefined;
+  const reply = pendingSceneReply(goal);
+  const delivered = goal.dispatch?.kind === "scene_reply" && goal.dispatch.status === "sent";
+  if (reply) return {
+    label: goal.dispatch?.status === "failed" ? "现场答复同步失败"
+      : delivered ? "答复已送达，事项尚未解决" : "现场已答复，管家核对中",
+    detail: goal.dispatch?.status === "failed"
+      ? goal.dispatch.detail || "答复已保存，恢复管家连接后可以重试。"
+      : delivered ? "管家已收到你的原话；当前问题尚未明确解决，可以继续在现场沟通或补充说明。"
+      : "你的原话已保存；管家正在核对这条事项，无需重复答复。",
+    quote: reply.quote,
+    summary: reply.summary,
+    retry: goal.dispatch?.status === "failed" ? "dispatch" as const : undefined,
+  };
+  const visit = goal.sceneVisit;
+  if (!visit || visit.attentionId !== attentionRequest(goal)?.id ||
+    visit.status === "watching") return undefined;
+  const expired = visit.status === "checking" &&
+    Date.now() - Date.parse(visit.attemptedAt || visit.at) >= 150_000;
+  const checking = visit.status === "pending" || visit.status === "checking" && !expired;
+  return {
+    label: checking ? "正在核对现场" : "现场尚未确认处理结果",
+    detail: checking
+      ? "负责人正在核对最近的真实交互；原事项在确认前仍会保留。"
+      : expired ? "上次现场核对中断或超时；原事项仍保留，可以重试同步。"
+      : visit.detail || "尚未收到明确答复的回执，原事项仍待处理。可以继续在现场沟通或重试同步。",
+    quote: undefined,
+    summary: undefined,
+    retry: checking ? undefined : "scene" as const,
+  };
+}
+
+export function goalProgressLabel(goal: Goal) {
+  if (goal.watchdog?.contactedAt) return "管家核对中";
+  if (goal.recovery) return "待管家核对";
+  if (goal.live?.state === "working") return "执行中";
+  if (goal.live?.state === "idle" || goal.live?.state === "done") return "待管家核对";
+  return goal.herdr ? "待管家跟进" : "待分配";
 }
 
 export interface GoalSceneContext {
@@ -100,7 +142,7 @@ export function presentSceneContext(goal: Goal, state: WorkspaceState): GoalScen
     title: goal.title,
     projectName: view.projectName,
     label: view.label,
-    currentAction: goal.attention?.summary || goal.next || view.brief,
+    currentAction: view.sceneSync?.detail || goal.attention?.summary || goal.next || view.brief,
   };
 }
 
@@ -110,7 +152,8 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const needsDecision = !ended && kind === "decision";
   const dispatchFailed = !ended && goal.attention?.source === "dispatch";
   const needsIntervention = !ended && kind === "intervention" && !dispatchFailed;
-  const dueFollowUp = !ended && goal.status === "waiting" && kind === "follow_up";
+  const dueFollowUp = !ended && kind === "follow_up";
+  const sceneSync = !ended ? sceneSyncPresentation(goal) : undefined;
   const latest = [...goal.activities]
     .reverse()
     .find((activity) => contentKinds.has(activity.kind));
@@ -136,8 +179,10 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const contextAttachments = attachmentsFor(contextActivity);
 
   let tone: GoalTone = "running";
-  let label = "管家处理中";
-  let detail = "负责人正在推进；暂时不需要你处理。";
+  let label = goal.mode === "manual" ? "由你处理" : goal.herdr ? "等待管家跟进" : "等待分配";
+  let detail = goal.mode === "manual"
+    ? "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。"
+    : "目标已保存，管家会安排负责人并写回下一步。";
   let brief = latestAgentReply?.text || "有真正需要你的变化时，管家会带回这里。";
   let nextLabel = "接下来的安排";
   if (ended) {
@@ -146,6 +191,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     detail = goal.status === "completed" ? "已经验收完成。" : "已经放弃，只保留记录。";
     brief = goal.delivery?.summary || goal.next || detail;
     nextLabel = "最后记录";
+  } else if (goal.status === "backlog") {
+    tone = "waiting";
+    label = dueFollowUp ? "到点安排" : "尚未开始";
+    detail = "只记录，不会启动 Agent。准备好后再决定由谁来做。";
+    brief = goal.description;
+    nextLabel = "准备好再开始";
   } else if (goal.status === "review") {
     tone = "review";
     label = "等你验收";
@@ -180,6 +231,16 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       ? `正在等待 ${goal.waitingFor}，现在需要确认是否已有结果。`
       : "等待事项已到跟进时间。";
     nextLabel = "下一步";
+  } else if (goal.watchdog?.contactedAt) {
+    tone = "waiting";
+    label = "管家核对中";
+    detail = "负责人已停止输出且结果尚未写回。已请管家核对现场，现在不需要你处理。";
+    nextLabel = "核对后的安排";
+  } else if (goal.recovery) {
+    tone = "waiting";
+    label = "待管家核对";
+    detail = "负责人已停止输出，结果尚未写回。已安排管家核对；现在不需要你处理。";
+    nextLabel = "核对后的安排";
   } else if (goal.status === "waiting") {
     tone = "waiting";
     label = "等待外部";
@@ -188,11 +249,23 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       : "正在等待外部结果；现在不需要你处理。";
     brief = goal.next;
     nextLabel = "恢复推进的条件";
+  } else if (goal.live) {
+    label = goalProgressLabel(goal);
+    detail = goal.live.state === "working"
+      ? "负责人正在执行；暂时不需要你处理。"
+      : goal.live.reachable === false
+        ? "现场连接已中断，管家会核查并写回下一步。"
+        : "负责人当前没有继续输出，结果尚未写回；管家会核对，不会把空闲当作完成。";
   } else if (goal.mode === "manual") {
     tone = "running";
     label = "由你处理";
-    detail = "这个目标由你推进：补充进展、提交成果，需要协作时可以交回管家。";
+    detail = "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。";
     brief = goal.next;
+  }
+  if (sceneSync) {
+    label = sceneSync.label;
+    detail = sceneSync.detail;
+    brief = sceneSync.summary || brief;
   }
 
   return {
@@ -215,6 +288,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     needsIntervention,
     dispatchFailed,
     dueFollowUp,
+    sceneSync,
   };
 }
 

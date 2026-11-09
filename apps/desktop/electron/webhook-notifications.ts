@@ -60,8 +60,9 @@ interface NotificationFile {
 
 const emptyFile = (): NotificationFile => ({ version: 1, deliveries: {} });
 const localHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-const allGoalStatuses: GoalStatus[] = ["active", "waiting", "review", "completed", "dropped"];
+const allGoalStatuses: GoalStatus[] = ["backlog", "active", "waiting", "review", "completed", "dropped"];
 const statusLabels: Record<GoalStatus, string> = {
+  backlog: "暂存",
   active: "进行中",
   waiting: "等待中",
   review: "待验收",

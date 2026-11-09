@@ -16,9 +16,11 @@ import type { Goal, WorkspaceState } from "../../../../../packages/core/src/type
 import { GoalActionDock } from "./GoalActionDock.js";
 import { GoalDeliveryEvidence } from "./GoalDeliveryEvidence.js";
 import { GoalAttachments } from "./GoalAttachments.js";
+import { GoalSceneSync } from "./GoalSceneSync.js";
 import type { GoalReplyMode } from "./GoalReplyComposer.js";
 import { presentGoal, time } from "./goalPresentation.js";
 import type { GoalDetailService } from "./goalService.js";
+import { attentionRequest } from "../../../../../packages/core/src/model.js";
 import { IconButton } from "../../ui/index.js";
 
 export function GoalAttentionCard({
@@ -76,10 +78,11 @@ export function GoalAttentionCard({
               <div>
                 <small>{view.label}</small>
                 <h2>{goal.attention?.summary || (goal.status === "review" ? "核对实际成果后验收" : goal.next)}</h2>
-                <p>{view.detail}</p>
+                {!view.sceneSync && <p>{view.detail}</p>}
               </div>
             </section>
-            {view.needsDecision && view.contextActivity && (
+            <GoalSceneSync goal={goal} view={view} service={service} busy={busy} />
+            {view.needsDecision && !view.sceneSync && view.contextActivity && (
               <section className="goal-handoff attention-evidence" aria-label="决定依据">
                 <header><span><Bot size={14} /></span><div><strong>{view.contextActivity.actor}</strong><small>负责人交接 · {time(view.contextActivity.at)}</small></div></header>
                 <p>{view.contextActivity.text}</p>
@@ -101,7 +104,7 @@ export function GoalAttentionCard({
             {error && <p className="goal-inline-error" role="alert">{error}</p>}
           </div>
           <footer className={`goal-action-dock ${view.tone}`}>
-            <GoalActionDock goal={goal} view={view} service={service} busy={busy} error={error}
+            <GoalActionDock key={attentionRequest(goal)?.id} goal={goal} view={view} service={service} busy={busy} error={error}
               replyMode={replyMode} setReplyMode={setReplyMode} notify={notify} />
           </footer>
           <footer className="goal-attention-footer">

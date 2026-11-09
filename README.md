@@ -61,6 +61,14 @@ All projects and personal tasks live in the same workspace. A single persistent
 actual execution to independent owners. The concierge coordinates; it does not
 quietly take over the work.
 
+### Capture first, decide when to start
+
+The same input can save an idea for later, record something you will do yourself,
+or hand it to the concierge. The task pool keeps deferred work out of execution
+and stall checks. Personal tasks can be completed directly, with optional reminders
+in the attention panel. Delegating later preserves the original record, project,
+images, and history.
+
 ### Attention instead of activity
 
 The attention panel is intentionally narrow. It shows work when:

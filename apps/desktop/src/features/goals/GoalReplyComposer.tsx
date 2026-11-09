@@ -13,6 +13,7 @@ import {
 import { Button } from "../../ui/index.js";
 import type { Goal } from "../../../../../packages/core/src/types.js";
 import type { GoalDetailService } from "./goalService.js";
+import { attentionRequest } from "../../../../../packages/core/src/model.js";
 
 export type GoalReplyMode = "message" | "return" | "drop";
 type ReplyImage = { key: string; file: File; preview: string };
@@ -166,6 +167,7 @@ export function GoalReplyComposer({
         await service.command({
           type: "goal.rework",
           goalId: goal.id,
+          attentionId: attentionRequest(goal)?.id,
           note: body,
         });
         onComplete("已退回，管家会带着你的原话继续协调");
@@ -175,6 +177,7 @@ export function GoalReplyComposer({
         await service.command({
           type: "goal.drop",
           goalId: goal.id,
+          attentionId: attentionRequest(goal)?.id,
           note: body,
         });
         onComplete("目标已放弃，记录仍可查看");

@@ -41,6 +41,12 @@ Crewvane 不运行模型，不扫描或适配 Agent 协议，不管理模型凭�
 
 `done` 只是 Agent 空闲，Crewvane 只有在交付检查记录通过且人验收后才把目标设为完成。
 
+活跃目标的负责人持续 `idle` / `done` 90 秒且仍未写回结果时，巡检请管家核对该负责人是否遗漏结果、真实等待或交付。核对期间界面显示“待管家核对”，而不是把业务上的 `active` 当作终端一直在执行；恢复 `working` 或提交新的结构化决定、交付后清除旧核对提示。`active` 只表示目标仍需跟进。终端空闲不自动改变业务状态，也不会直接产生人的注意力事项或自动验收。
+
+负责人现场答复通过 `goal.scene-reply` 保存原话和实际结果，再由唯一管家提交状态命令。注意力与回执分别具有独立编号；管家 scope 绑定二者并在状态事务内校验，防止迟到回复清除新问题。现场访问和工作回合仅触发空闲时的一次协议补核对，不构成审批事实；失败保持事项和重试入口。细节见 [人工交互同步](product/herdr-interaction-sync.md)。
+
+待办池复用 `Goal`，通过 `backlog` 生命周期和 `manual` 执行归属区分暂存与本人执行，不建立第二个存储。`goal.intake.handling` 明确选择 `later`、`self` 或默认 `concierge`；前两者没有派发请求。暂存不巡检、不能登记现场或通过进展命令变相启动。人工提醒到期与等待提醒共用稳定 attention ID，但保留原生命周期；只有明确交给管家才建立派发。完成个人事项无需 Agent 交付；移出保留历史，可恢复到暂存。见 [待办池开发说明](product/task-pool-proposal.md)。
+
 ### 场景优先导航
 
 注意力中的真实现场介入与有真实引用的普通活动目标直接打开 Herdr；决定、验收、到期跟进与派发失败使用轻量动作卡。已完成和已放弃目标只打开历史记录。完整记录继续承担附件、消息历史和目标管理，现场条仅展示结构化目标事实并提供回到注意力的入口。
@@ -65,7 +71,7 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind 和 session；`goal list`、attention、ask、message 和跨目标读写会被拒绝。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
-首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、写入负责人署名与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
+首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
 
 ## 上线策略与决定账本
 
@@ -85,7 +91,7 @@ Herdr 的 `pane.agent_status_changed`、`pane.exited`、`pane.closed`、`pane.mo
 
 插件适合 Herdr 内的快捷入口，不承担持久化、案卷隔离、Agent 权限或系统文件沙箱。插件 v1 的代码继承用户权限并可使用完整 Herdr CLI；Herdr 不沙箱插件。因此权限判断和状态写入继续留在受约束的 Electron IPC 与 Crewvane core，插件只作为表现和动作层。事件钩子只有在能提供明确增益且不会产生双写竞争时才引入。
 
-通知送达与负责人现场登记是两个独立事实。系统通知和可选 Webhook 消费明确的目标状态变化与只读注意力；状态变化可按五种状态分别订阅，Webhook 配置保存在应用数据目录且不回传令牌；普通 HTTP 2xx 记为送达，飞书 / Lark 和企业微信还要求响应业务码为 0，失败按 5 分钟退避，稳定投递键跨重启去重，投递失败不回滚目标。未登记现场的活动目标在一分钟启动宽限期后交由管家巡检，不把通知成功显示成已经执行。`session.set` 拒绝把管家现场或其他未结束目标的现场登记成当前目标负责人；真实连接仍由 Herdr presence 核实，包括自定义 CLI 的前台 PID。Webhook 载荷与适配器边界见 [消息通知](product/notifications.md)。
+通知送达与负责人现场登记是两个独立事实。系统通知和可选 Webhook 消费明确的目标状态变化与只读注意力；状态变化可按各状态分别订阅，Webhook 配置保存在应用数据目录且不回传令牌；普通 HTTP 2xx 记为送达，飞书 / Lark 和企业微信还要求响应业务码为 0，失败按 5 分钟退避，稳定投递键跨重启去重，投递失败不回滚目标。未登记现场的活动目标在一分钟启动宽限期后交由管家巡检，不把通知成功显示成已经执行。`session.set` 拒绝把管家现场或其他未结束目标的现场登记成当前目标负责人；真实连接仍由 Herdr presence 核实，包括自定义 CLI 的前台 PID。Webhook 载荷与适配器边界见 [消息通知](product/notifications.md)。
 
 `goal.accept`、`goal.complete`、`goal.drop` 和已结束目标的永久删除会释放负责人现场。桌面立即关闭对应 Herdr Tab，并通过 `session.release` 清理已结束目标的引用；关闭请求失败时保留引用，巡检恢复后继续重试。永久删除会先尝试关闭现场，关闭失败时不执行删除。目标删除只开放给 `completed` / `dropped`，同时删除附件文件；项目决定账本不随目标删除。
 

@@ -203,7 +203,7 @@ try {
   assert.equal(await page.getByText("dragged.png", { exact: true }).count(), 0);
   await page.screenshot({ path: join(home, "intake-with-images-dark.png"), animations: "disabled" });
   assert.equal(await page.locator('[role="dialog"] input:not([type="file"]), [role="dialog"] select').count(), 0);
-  await page.getByRole("button", { name: "交给管家", exact: true }).click();
+  await page.getByRole("button", { name: "确认交给管家", exact: true }).click();
   await page.getByRole("dialog", { name: /桌面试用交付/ }).waitFor();
   await page.locator(".goal-attachments").getByText("selected.png", { exact: true }).waitFor();
   await page.locator(".goal-attachments").getByText("pasted.png", { exact: true }).waitFor();
@@ -419,7 +419,7 @@ try {
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await page.getByText("Webhook 已保存，测试通知已送达。", { exact: true }).waitFor();
   await page.getByRole("button", { name: "管理 Webhook", exact: true }).click();
-  await page.getByText(/4 种状态/).waitFor();
+  await page.getByText(/5 种状态/).waitFor();
   await page.screenshot({ path: join(home, "webhook-dark.png"), animations: "disabled" });
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -573,6 +573,37 @@ try {
   assert.match(ledger, /只允许只读权限/);
   assert.match(ledger, /change-permissions/);
   await page.locator(".goal-attention-modal").waitFor({ state: "detached" });
+  // A persisted scene reply refreshes the UI without pretending it resolved
+  // the decision. The separate concierge state command closes the old card.
+  const sceneAnswer = await service.execute({ type: "goal.direct", text: "现场答复同步回归" });
+  await service.execute({ type: "session.set", goalId: sceneAnswer.id,
+    reference: { session: "cv-ui-scene", agent: "scene-owner", paneId: "w1:p9", tabId: "w1:t9" } });
+  const sceneQuestion = await service.execute({
+    type: "goal.decide", goalId: sceneAnswer.id, question: "先做核心范围？",
+  });
+  const sceneReceipt = await service.execute({
+    type: "goal.scene-reply", goalId: sceneAnswer.id, attentionId: sceneQuestion.attention.id,
+    quote: "先做核心范围，其他内容稍后再做。", summary: "已确认本轮范围，等管家记录后继续。", actor: "scene-owner",
+  });
+  await page.locator(".attention-card").filter({ hasText: "现场答复同步回归" }).click();
+  await page.getByRole("region", { name: "现场答复同步" }).getByText("先做核心范围，其他内容稍后再做。", { exact: true }).waitFor();
+  assert.equal((await service.read()).goals.find(item => item.id === sceneAnswer.id).attention.id, sceneQuestion.attention.id);
+  await page.waitForFunction(() => {
+    const card = document.querySelector(".goal-attention-modal");
+    return card && getComputedStyle(card).opacity === "1" &&
+      card.getAnimations().every(animation => animation.playState === "finished");
+  });
+  await page.screenshot({ path: join(home, "scene-reply-pending-light.png") });
+  assert.equal(await page.getByLabel("你的决定", { exact: true }).count(), 0,
+    "a saved scene answer should not ask the human to submit it again");
+  await page.getByRole("button", { name: "直接处理", exact: true }).click();
+  await page.getByLabel("你的决定", { exact: true }).waitFor();
+  await service.execute({ type: "goal.resolve", goalId: sceneAnswer.id,
+    attentionId: sceneReceipt.sceneReply.attentionId, sceneReplyId: sceneReceipt.sceneReply.id,
+    note: sceneReceipt.sceneReply.quote, actor: "concierge", outcome: "approved" });
+  await page.locator(".goal-attention-modal").waitFor({ state: "detached" });
+  // Stop the artificial transport fixture from entering a real runtime.
+  await service.execute({ type: "goal.takeover", goalId: sceneAnswer.id });
   await page.screenshot({ path: join(home, "home-light.png") });
   // A personal item must be manageable without asking an Agent or using CLI.
   await page.locator(".top-actions").getByRole("button", { name: "新目标" }).click();
@@ -586,63 +617,35 @@ try {
     return state.goals.find(goal => goal.title === title)?.mode === "manual";
   }, "个人事项界面闭环");
   await page.getByRole("button", { name: "补充说明", exact: true }).click();
-  await page.getByLabel("发给管家的消息", { exact: true }).fill("审批已经通过，继续处理");
+  await page.getByLabel("补充说明", { exact: true }).fill("审批已经通过，继续处理");
   const previousNext = (await service.read()).goals.find(item => item.title === "个人事项界面闭环").next;
-  await page.getByRole("button", { name: "记录留言", exact: true }).click();
+  await page.getByRole("button", { name: "保存说明", exact: true }).click();
+  await page.getByLabel("补充说明", { exact: true }).waitFor({ state: "detached" });
   let personal = (await service.read()).goals.find(item => item.title === "个人事项界面闭环");
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    personal = (await service.read()).goals.find(item => item.title === "个人事项界面闭环");
-    if (personal?.activities.some(activity =>
-      activity.kind === "message" && activity.text === "审批已经通过，继续处理")) break;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
   assert.ok(personal.activities.some(activity =>
     activity.kind === "message" && activity.text === "审批已经通过，继续处理"));
   assert.equal(personal.next, previousNext, "messages must not silently change the next step");
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "编辑目标", exact: true }).click();
-  await page.getByLabel("当前安排").selectOption("waiting");
-  await page.getByLabel("下一步", { exact: true }).fill("等待下一次核对");
-  await page.getByLabel("跟进提醒", { exact: true }).fill("2030-01-01T09:30");
-  await page.getByRole("button", { name: "保存更新", exact: true }).click();
-  await page.waitForFunction(async goalId => {
-    const state = await window.crewvane.command({ type: "snapshot" });
-    const item = state.goals.find(goal => goal.id === goalId);
-    return item?.mode === "manual" &&
-      item.status === "waiting" &&
-      item.remindAt === new Date("2030-01-01T09:30").toISOString();
-  }, personal.id);
+  await page.getByRole("button", { name: "提醒我", exact: true }).click();
+  await page.getByLabel("提醒时间", { exact: true }).fill("2030-01-01T09:30");
+  await page.getByRole("button", { name: "保存提醒", exact: true }).click();
+  await page.getByRole("button", { name: "修改提醒", exact: true }).waitFor();
   let manual = (await service.read()).goals.find(item => item.title === "个人事项界面闭环");
-  assert.equal(manual.status, "waiting");
+  assert.equal(manual.status, "active", "a personal reminder is not waiting for someone else");
   assert.equal(manual.remindAt, new Date("2030-01-01T09:30").toISOString());
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "编辑目标", exact: true }).click();
-  assert.equal(await page.getByLabel("跟进提醒", { exact: true }).inputValue(), "2030-01-01T09:30");
-  await page.getByRole("button", { name: "关闭", exact: true }).click();
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "提交成果", exact: true }).click();
-  await page.getByLabel("成果摘要").fill("已用桌面界面完成个人事项闭环");
-  await page.getByLabel("检查名称").fill("提醒时间核对");
-  await page.getByLabel("实际检查操作").fill("编辑后再次打开跟进提醒字段");
-  await page.getByLabel("通过依据").fill("界面值与保存前一致，未发生时区偏移");
-  await page.getByRole("button", { name: "提交验收", exact: true }).click();
-  await page.getByRole("button", { name: "验收通过", exact: true }).click();
-  await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("button", { name: "修改提醒", exact: true }).click();
+  assert.equal(await page.getByLabel("提醒时间", { exact: true }).inputValue(), "2030-01-01T09:30");
+  await page.getByRole("button", { name: "取消提醒", exact: true }).click();
+  await page.getByRole("button", { name: "提醒我", exact: true }).waitFor();
+  await page.getByRole("button", { name: "标记完成", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
   state = await service.read();
   assert.equal(state.goals[0].status, "completed");
   assert.equal(state.goals.find(item => item.id === manual.id).status, "completed");
+  assert.equal(state.goals.find(item => item.id === manual.id).delivery, undefined);
   assert.deepEqual(state.workflows, []);
-  await page.locator(".top-actions").getByRole("button", { name: "新目标" }).click();
-  await page.getByLabel("要交给管家的事情").fill("等待审批操作");
-  await page.getByRole("button", { name: "交给管家", exact: true }).click();
-  await page.getByRole("dialog", { name: /等待审批操作/ }).waitFor();
-  const waiting = (await service.read()).goals.find(item => item.title === "等待审批操作");
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "我来处理", exact: true }).click();
-  await page.waitForFunction(async goalId => {
-    const state = await window.crewvane.command({ type: "snapshot" });
-    return state.goals.find(item => item.id === goalId)?.mode === "manual";
-  }, waiting.id);
+  // This fixture is already delivered to the concierge. Personal tasks now
+  // have a dedicated action surface and are covered by task-pool-smoke.
+  const waiting = await service.execute({ type: "goal.direct", text: "等待审批操作" });
   await service.execute({ type: "goal.wait", goalId: waiting.id, reason: "等 YR 审批", owner: "YR", remindAt: "2030-01-01T00:00:00Z" });
   // FSEvents delivery is not guaranteed within Playwright's timeout on CI.
   // Reload after the external write so the renderer reads the persisted state.
@@ -699,41 +702,27 @@ try {
   await page.reload();
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "等待审批操作" }).click();
-  if (await page.locator(".goal-attention-modal").count())
-    await page.getByRole("button", { name: "完整记录", exact: true }).click();
-  await page.locator(".goal-detail-modal").waitFor();
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
+  await page.getByRole("dialog", { name: "等待审批操作", exact: true }).waitFor();
   waitingState = (await service.read()).goals.find(item => item.id === waiting.id);
   assert.equal(waitingState.status, "active");
   assert.equal(waitingState.mode, "manual");
   assert.equal(waitingState.owner, "你");
   assert.equal(waitingState.dispatch, undefined);
-  await page.screenshot({ path: join(home, "goal-detail-light.png"), animations: "disabled" });
+  await page.screenshot({ path: join(home, "personal-detail-light.png"), animations: "disabled" });
   await page.setViewportSize({ width: 1050, height: 760 });
-  const detailOverflow = await page.locator(".goal-detail-modal").evaluate(element =>
+  const detailOverflow = await page.getByRole("dialog").evaluate(element =>
     element.scrollWidth > element.clientWidth + 1);
-  assert.equal(detailOverflow, false, "goal detail must not overflow a narrow desktop viewport");
-  await page.screenshot({ path: join(home, "goal-detail-narrow-light.png"), animations: "disabled" });
+  assert.equal(detailOverflow, false, "personal detail must not overflow a narrow desktop viewport");
+  await page.screenshot({ path: join(home, "personal-detail-narrow-light.png"), animations: "disabled" });
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "提交成果", exact: true }).click();
-  await page.getByLabel("成果摘要").fill("删除闭环已完成");
-  await page.getByLabel("检查名称").fill("目标状态核对");
-  await page.getByLabel("实际检查操作").fill("确认目标已进入待验收");
-  await page.getByLabel("通过依据").fill("目标状态为 review");
-  await page.getByRole("button", { name: "提交验收", exact: true }).click();
-  await page.getByRole("button", { name: "验收通过", exact: true }).click();
-  await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("button", { name: "标记完成", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "等待审批操作" }).click();
-  await page.locator(".goal-detail-modal").waitFor();
+  await page.getByRole("dialog", { name: "等待审批操作", exact: true }).waitFor();
   page.once("dialog", dialog => void dialog.accept());
-  await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
-  await page.getByRole("button", { name: "永久删除目标", exact: true }).click();
-  await page.waitForFunction(async goalId => {
-    const state = await window.crewvane.command({ type: "snapshot" });
-    return !state.goals.some(item => item.id === goalId);
-  }, waiting.id);
+  await page.getByRole("button", { name: "永久删除", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
   assert.equal((await service.read()).goals.some(item => item.id === waiting.id), false);
   const sceneGoal = await service.execute({
     type: "goal.create",
@@ -762,10 +751,13 @@ try {
     input: {
       title: "放弃交互验证",
       projectId: "personal",
-      mode: "manual",
+      mode: "concierge",
     },
   });
   await page.locator(".goal-row").filter({ hasText: "放弃交互验证" }).click();
+  await page.locator(".goal-detail-modal, .goal-attention-modal").waitFor();
+  if (await page.locator(".goal-attention-modal").count())
+    await page.getByRole("button", { name: "完整记录", exact: true }).click();
   await page.locator(".goal-detail-advanced").evaluate(element => { element.open = true; });
   await page.getByRole("button", { name: "放弃目标", exact: true }).click();
   await page.getByLabel("放弃原因", { exact: true }).fill("验证放弃操作不再依赖系统弹窗");
@@ -923,7 +915,7 @@ try {
         "save Agent role preferences",
         "shared state",
         "renderer isolation",
-        "manual message/wait/review/accept through UI",
+        "personal notes/reminders/completion without agent delivery",
         "local reminder round trip",
         "single natural-language goal intake",
         "image paste, drag, file selection, preview, removal, and metadata-only persistence",

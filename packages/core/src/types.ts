@@ -1,4 +1,5 @@
-export type GoalStatus = "active" | "waiting" | "review" | "completed" | "dropped";
+export type GoalStatus = "backlog" | "active" | "waiting" | "review" | "completed" | "dropped";
+export type IntakeHandling = "concierge" | "later" | "self";
 export type AttentionKind = "decision" | "review" | "follow_up" | "intervention";
 export type LiveState = "working" | "idle" | "done" | "blocked" | "unknown";
 export type ShipPolicy = "auto" | "auto-merge-manual-deploy" | "external-approval";
@@ -24,6 +25,7 @@ export interface WorkspaceRecovery {
   detail: string;
 }
 export interface Attention {
+  id?: string;
   kind: AttentionKind; summary: string; since: string; notifiedAt?: string;
   source?: "live" | "dispatch" | "watchdog" | "governance";
   decisionKey?: string;
@@ -51,7 +53,7 @@ export interface LiveEventReferenceUpdate {
   paneId?: string; tabId?: string; workspaceId?: string; agent?: string;
 }
 export interface LivePresence { state: LiveState; checkedAt: string; reachable?: boolean }
-export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned";
+export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned" | "settled";
 export interface WatchdogState {
   reason: WatchdogReason; basis: string; detectedAt: string;
   attemptedAt?: string; contactedAt?: string; escalatedAt?: string; lastError?: string;
@@ -70,10 +72,30 @@ export interface Goal {
   delivery?: Delivery; herdr?: HerdrReference; live?: LivePresence;
   reviewRounds?: number; reviewLimit?: number;
   risk?: RiskEscalation;
-  dispatch?: { id?: string; kind?: "resume" | "follow_up" | "feedback"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
+  dispatch?: { id?: string; kind?: "resume" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
+  sceneReply?: SceneReply;
+  recovery?: "idle" | "done" | "blocked";
+  sceneVisit?: SceneVisit;
   watchdog?: WatchdogState;
   attachments?: GoalAttachment[];
   activities: Activity[]; createdAt: string; updatedAt: string;
+}
+export interface SceneReply {
+  id: string;
+  attentionId: string;
+  quote: string;
+  summary: string;
+  actor: string;
+  at: string;
+}
+export interface SceneVisit {
+  id: string;
+  attentionId: string;
+  at: string;
+  worked: boolean;
+  status: "watching" | "pending" | "checking" | "checked" | "failed";
+  attemptedAt?: string;
+  detail?: string;
 }
 export interface WorkspaceState {
   version: 2; name: string; projects: Project[]; workflows: Workflow[]; goals: Goal[];
@@ -86,7 +108,7 @@ export interface WorkspaceState {
     live?: LivePresence;
   };
 }
-export type CrewvaneCommand =
+type WorkspaceCommand =
   | { type: "snapshot" }
   | { type: "workspace.rename"; name: string }
   | { type: "workspace.recovery.dismiss" }
@@ -96,18 +118,22 @@ export type CrewvaneCommand =
   | { type: "project.policy.set"; projectId: string; policy: Pick<ProjectPolicy, "shipPolicy" | "approvers">; actor: string }
   | { type: "workflow.save"; workflow: Workflow }
   | { type: "goal.create"; input: { title: string; description?: string; projectId: string; workflowId?: string; mode: "concierge" | "manual"; next?: string; waitingFor?: string; remindAt?: string } }
-  | { type: "goal.intake"; text: string; projectId?: string; attachments?: GoalAttachment[] }
-  | { type: "goal.direct"; text: string; goalId?: string; projectId?: string; attachments?: GoalAttachment[] }
+  | { type: "goal.intake"; text: string; projectId?: string; handling?: IntakeHandling; remindAt?: string; attachments?: GoalAttachment[] }
+  | { type: "goal.direct"; text: string; goalId?: string; projectId?: string; handling?: IntakeHandling; attachments?: GoalAttachment[] }
   | { type: "goal.attachment.remove"; goalId: string; attachmentId: string; actor?: string }
   | { type: "attachments.cleanup"; retentionDays?: number; at?: string }
   | { type: "goal.delete"; goalId: string; actor?: string }
   | { type: "goal.update"; goalId: string; patch: { title?: string; description?: string; next?: string; owner?: string; stageId?: string; waitingFor?: string; remindAt?: string | null; status?: "active" | "waiting" } }
   | { type: "goal.message"; goalId: string; text: string; attachments?: GoalAttachment[]; actor?: string; routeToConcierge?: boolean }
+  | { type: "goal.scene-reply"; goalId: string; attentionId: string; quote: string; summary: string; actor: string }
+  | { type: "scene.visit"; goalId: string; retry?: boolean }
+  | { type: "scene.check"; goalId: string; visitId: string; status: "checking" | "checked" | "failed"; detail?: string }
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
   | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "failed"; detail?: string; requestId?: string }
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
   | { type: "goal.takeover"; goalId: string }
   | { type: "goal.delegate"; goalId: string }
+  | { type: "goal.restore"; goalId: string }
   | { type: "goal.followup"; goalId: string; note?: string }
   | { type: "goal.wait"; goalId: string; reason: string; owner?: string; remindAt?: string; actor?: string }
   | { type: "goal.decide"; goalId: string; question: string; next?: string; actor?: string; key?: string }
@@ -115,7 +141,7 @@ export type CrewvaneCommand =
   | { type: "goal.ship"; goalId: string; operation: "merge" | "deploy"; checksPassed: boolean; actor?: string }
   | { type: "goal.review"; goalId: string; delivery: Omit<Delivery, "submittedAt" | "submittedBy">; actor?: string }
   | { type: "goal.accept" | "goal.complete" | "goal.drop"; goalId: string; note?: string; actor?: string }
-  | { type: "goal.resolve"; goalId: string; note?: string; actor?: string; outcome?: DecisionOutcome; source?: "desktop" | "herdr" | "cli" }
+  | { type: "goal.resolve"; goalId: string; note?: string; actor?: string; outcome?: DecisionOutcome; source?: "desktop" | "herdr" | "cli" | "scene" }
   | { type: "goal.rework"; goalId: string; note: string; actor?: string }
   | { type: "goal.remind"; goalId: string; at: string; note?: string }
   | { type: "session.set"; goalId?: string; reference: HerdrReference }
@@ -126,3 +152,10 @@ export type CrewvaneCommand =
   | { type: "watchdog.inspect"; at: string }
   | { type: "watchdog.report"; goalId: string; at: string; basis: string; outcome: "contacted" | "failed"; detail?: string }
   | { type: "notification.sent"; goalId: string; kind: AttentionKind; at: string };
+
+// Optimistic guards bind a reply to the exact question and human response.
+// They are checked under the same lock as the state change.
+export type CrewvaneCommand = WorkspaceCommand & {
+  attentionId?: string;
+  sceneReplyId?: string;
+};

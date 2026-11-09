@@ -51,7 +51,10 @@ try {
   });
   const page = await app.firstWindow();
   page.on("pageerror", error => errors.push(String(error)));
+  // Keep the timed-out gate diagnosable without exposing environment or secrets.
+  const trace = (step) => console.log(JSON.stringify({onboarding:step,at:new Date().toISOString()}));
   await page.getByRole("button", { name: "选择存储位置并开始" }).waitFor();
+  trace("first-launch");
   // The app must install Herdr itself, with no Homebrew and no system Herdr.
   const installDeadline = Date.now() + 180_000;
   do {
@@ -147,6 +150,7 @@ try {
   await page.getByRole("button", { name: "保存偏好", exact: true }).click();
   await page.getByText("Agent 偏好已保存，将用于新启动的会话。", { exact: true }).waitFor();
   await page.getByRole("button", { name: "准备管家", exact: true }).click();
+  trace("custom-cli-concierge");
   await expect.poll(async () => (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).concierge.status, {timeout:90_000}).toBe("ready");
   let state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
   assert.equal(state.concierge.transport, "pane");
@@ -244,9 +248,13 @@ try {
     `${"请保留全部约束并完成端到端验收。".repeat(14)}完整正文末尾标记-${randomUUID()}`;
   const longGoalTitle = Array.from(longGoalRequest).slice(0, 80).join("");
   assert.ok(Array.from(longGoalRequest).length > 160);
+  trace("long-intake");
+  page.setDefaultTimeout(90_000);
+  // Onboarding installs tools, launches a CLI and performs many real IPC writes;
+  // CI hosts occasionally need longer than the Playwright interaction default.
   await page.locator(".top-actions").getByRole("button", { name:"新目标" }).click();
   await page.getByLabel("要交给管家的事情").fill(longGoalRequest);
-  await page.getByRole("button", { name:"交给管家", exact:true }).click();
+  await page.getByRole("button", { name:"确认交给管家", exact:true }).click();
   await expect.poll(async () => {
     const current = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
     return current.goals.some(goal => goal.title === longGoalTitle);
@@ -282,6 +290,7 @@ try {
     title:"等待审批后继续",projectId:"personal",mode:"concierge",
   }}));
   await page.evaluate(id => window.crewvane.command({ type:"goal.wait", goalId:id, reason:"等 YR 审批", owner:"YR", remindAt:"2030-01-01T00:00:00Z" }), waiting.id);
+  trace("waiting-reply");
   await page.getByRole("button", { name:"全部目标", exact:true }).click();
   await page.getByText("等待审批后继续", { exact:true }).click();
   await page.getByRole("button", { name:"告诉管家", exact:true }).click();
@@ -345,6 +354,7 @@ try {
     .goals.find(goal => goal.id === externalDecision.id);
   assert.equal(externalGoal.status, "active");
   assert.equal(externalGoal.waitingFor, undefined);
+  trace("external-cli-decision");
   await exec(join(home, ".local/bin/crewvane"), [
     "goal", "resolve", externalDecision.id,
     "--note", "外部 CLI 已批准只读权限",
@@ -462,6 +472,11 @@ try {
   ] }));
 } catch (error) {
   if (app) await (await app.firstWindow()).screenshot({path:join(home,"failure.png")}).catch(() => {});
+  const artifactDir = process.env.CREWVANE_ONBOARDING_ARTIFACTS;
+  if (artifactDir) {
+    await mkdir(artifactDir, { recursive: true });
+    await exec("cp", ["-R", `${home}/.`, artifactDir]).catch(() => {});
+  }
   console.error(JSON.stringify({ home, error: String(error), errors }));
   throw error;
 } finally {

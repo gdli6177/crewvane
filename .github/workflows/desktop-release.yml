@@ -40,6 +40,7 @@ jobs:
           # Avoid the shared, unauthenticated GitHub API quota on hosted runners.
           GITHUB_TOKEN: ${{ github.token }}
       - run: pnpm test:desktop
+      - run: pnpm test:task-pool
       - run: pnpm test:installers
       - name: Run packaged-app onboarding with authenticated Herdr download
         run: pnpm test:onboarding
@@ -74,17 +75,19 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Crewvane｜协航 0.6.4 · macOS Apple Silicon
+          Crewvane｜协航 0.6.5 · macOS Apple Silicon
 
           ## 本版更新
 
-          - 修复内嵌 Herdr 提示“copied to clipboard”，但 macOS 系统剪贴板为空、外部应用无法粘贴的问题。
-          - 支持 Herdr 用于复制选中文本的 OSC 52 剪贴板写入协议；普通拖动现在会自动写入系统剪贴板。
-          - 禁用 OSC 52 剪贴板读取，避免终端程序读取宿主剪贴板；移除不必要的 `⌥` 拖动选择提示，拖动文本即可自动复制。
-          - 设置中的 Herdr 卡片显示当前命名 Session，并可一键复制外部终端 attach 命令。
-          - 等待与到点跟进收敛为“告诉管家”自由输入框和“1 小时后提醒”；由管家读取明确原话后决定继续等待、推进、验收、完成或放弃，结束记录保留用户原话。
+          - 修复负责人 Agent 已停止输出，但目标仍被显示为持续执行、注意力不更新的问题。
+          - 终端 `idle` / `done` 只触发管家核对，不直接判成完成或失败；静默 90 秒后先由管家联系原负责人，失败或超时才升级给人。
+          - 识别 OMP 等 CLI 在工具执行期间仍报告 `idle` 的情况，避免运行中的任务被误判为停止。
+          - 活动目标分别显示“执行中”“待管家核对”“管家核对中”“待管家跟进”和“待分配”。
+          - 现场答复使用带注意力编号的回执，由管家核对原话后清除对应事项；迟到答复不会覆盖新状态。
+          - 加入轻量待办池：“先记下”和“我来做”不会启动 Agent，支持提醒、延期、备注、完成、移出和恢复。
+          - 负责人启动命令、环境初始化和长消息按终端输入上限安全拆分；启动失败会保留真实原因与下一步。
 
-          0.6.3 的终端选择、0.6.2 的 Webhook 去重、0.6.1 的长文本目标，以及 0.6.0 的注意力、场景优先、工作区恢复与 Herdr 同步能力保持不变。
+          0.6.4 的系统剪贴板、0.6.3 的终端选择、0.6.2 的 Webhook 去重、0.6.1 的长文本目标，以及 0.6.0 的注意力、场景优先、工作区恢复与 Herdr 同步能力保持不变。
 
           ## 安装
 

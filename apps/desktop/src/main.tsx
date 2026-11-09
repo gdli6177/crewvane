@@ -10,18 +10,17 @@ import {
   CircleAlert,
   Clock3,
   Folder,
-  ImagePlus,
   Inbox,
   LayoutDashboard,
   LayoutList,
   Moon,
+  NotebookPen,
   Copy,
   Plus,
   Settings2,
   Sparkles,
   SquareTerminal,
   Sun,
-  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -36,16 +35,21 @@ import type {
   AgentPreferences,
   Goal,
   GoalAttachment,
+  IntakeHandling,
   LiveState,
   Project,
   ShipPolicy,
   WorkspaceState,
 } from "../../../packages/core/src/types.js";
 import { api } from "./api.js";
+import { GoalIntakeForm } from "./features/intake/GoalIntakeForm.js";
+import { TaskPool } from "./features/tasks/TaskPool.js";
+import { TaskDetail } from "./features/tasks/TaskDetail.js";
+import { useReminderClock } from "./features/tasks/useReminderClock.js";
 import { GoalDetail } from "./features/goals/GoalDetail.js";
 import { GoalAttentionCard } from "./features/goals/GoalAttentionCard.js";
 import { goalEntryDestination } from "./features/goals/goalEntry.js";
-import { presentSceneContext } from "./features/goals/goalPresentation.js";
+import { goalProgressLabel, presentSceneContext, sceneSyncPresentation } from "./features/goals/goalPresentation.js";
 import type { GoalDetailService } from "./features/goals/goalService.js";
 import {
   Button,
@@ -70,11 +74,13 @@ import "./style.css";
 const HerdrTerminal = lazy(() => import("./terminal.js").then((module) => ({ default: module.HerdrTerminal })));
 const pages = {
   home: "注意力",
+  tasks: "待办池",
   goals: "全部目标",
   settings: "设置",
 } as const;
 const statusLabel = {
-  active: "进行中",
+  backlog: "暂存",
+  active: "跟进中",
   waiting: "等待中",
   review: "待验收",
   completed: "已完成",
@@ -82,6 +88,7 @@ const statusLabel = {
 };
 const goalStatusOptions = Object.entries(statusLabel) as [Goal["status"], string][];
 const goalStatusTone: Record<Goal["status"], BadgeTone> = {
+  backlog: "neutral",
   active: "mint",
   waiting: "warm",
   review: "accent",
@@ -94,6 +101,7 @@ function goalRowTone(item: Goal): BadgeTone {
   if (kind === "review") return "mint";
   if (kind === "follow_up") return "warm";
   if (kind === "intervention") return "danger";
+  if (item.recovery || item.watchdog?.contactedAt) return "warm";
   return goalStatusTone[item.status];
 }
 const attentionLabel = {
@@ -118,198 +126,6 @@ const time = (value?: string) =>
         minute: "2-digit",
       }).format(new Date(value))
     : "";
-type IntakeImage = { key: string; file: File; preview: string };
-const attachmentFormats = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-function imageFile(file: File) {
-  return attachmentFormats.has(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
-}
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-function GoalIntakeForm({
-  busy,
-  error,
-  onClose,
-  onSubmit,
-}: {
-  busy: boolean;
-  error: string;
-  onClose: () => void;
-  onSubmit: (text: string, files: File[]) => Promise<void>;
-}) {
-  const [images, setImages] = useState<IntakeImage[]>([]),
-    [validation, setValidation] = useState(""),
-    [dragging, setDragging] = useState(false),
-    input = useRef<HTMLInputElement>(null),
-    imagesRef = useRef(images);
-  imagesRef.current = images;
-  useEffect(() => () => {
-    imagesRef.current.forEach(item => URL.revokeObjectURL(item.preview));
-  }, []);
-  function addFiles(incoming: File[]) {
-    if (!incoming.length) return;
-    const supported = incoming.filter(imageFile);
-    let message = supported.length < incoming.length ? "只支持 PNG、JPEG、WebP 和 GIF 图片。" : "";
-    if (supported.some(file => file.size > 10 * 1024 * 1024)) {
-      setValidation("单张图片不能超过 10 MB。");
-      return;
-    }
-    const accepted: IntakeImage[] = [];
-    let total = images.reduce((sum, item) => sum + item.file.size, 0),
-      count = images.length;
-    for (const file of supported) {
-      if (count >= 8) {
-        message = "每个目标最多添加 8 张图片。";
-        break;
-      }
-      if (total + file.size > 30 * 1024 * 1024) {
-        message = "图片总计不能超过 30 MB。";
-        break;
-      }
-      total += file.size;
-      count += 1;
-      accepted.push({
-        key: `${file.name}-${file.size}-${file.lastModified}-${accepted.length}-${Date.now()}`,
-        file,
-        preview: URL.createObjectURL(file),
-      });
-    }
-    setValidation(message);
-    if (accepted.length) setImages(current => [...current, ...accepted]);
-  }
-  function removeImage(key: string) {
-    setImages(current => {
-      const removed = current.find(item => item.key === key);
-      if (removed) URL.revokeObjectURL(removed.preview);
-      return current.filter(item => item.key !== key);
-    });
-    setValidation("");
-  }
-  return (
-    <Modal
-      error={error}
-      title="把事情放下。"
-      description="文字、截图或图片一起交给管家。"
-      onClose={onClose}
-    >
-      <form
-        className="ui-form"
-        onSubmit={async event => {
-          event.preventDefault();
-          const data = new FormData(event.currentTarget);
-          setValidation("");
-          try {
-            await onSubmit(String(data.get("request")), images.map(item => item.file));
-          } catch {
-            /* The parent keeps the draft and reports the actual error. */
-          }
-        }}
-      >
-        <Field
-          label="要交给管家的事情"
-          htmlFor="goal-intake-input"
-          connect={false}
-          error={validation}
-        >
-        <div
-          className={`goal-intake-zone ${dragging ? "dragging" : ""}`}
-          onDragEnter={event => {
-            if (Array.from(event.dataTransfer.types).includes("Files")) {
-              event.preventDefault();
-              setDragging(true);
-            }
-          }}
-          onDragOver={event => {
-            if (Array.from(event.dataTransfer.types).includes("Files")) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "copy";
-            }
-          }}
-          onDragLeave={event => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
-          }}
-          onDrop={event => {
-            event.preventDefault();
-            setDragging(false);
-            addFiles(Array.from(event.dataTransfer.files));
-          }}
-        >
-          <TextArea
-            id="goal-intake-input"
-            className="goal-intake"
-            name="request"
-            required
-            autoFocus
-            maxLength={20000}
-            rows={5}
-            aria-invalid={validation ? true : undefined}
-            aria-describedby={validation ? "goal-intake-input-message" : undefined}
-            placeholder="直接说：要做什么、知道哪些背景、怎样算完成…"
-            onPaste={event => {
-              const files = Array.from(event.clipboardData.files);
-              if (!files.length) return;
-              addFiles(files);
-              if (!event.clipboardData.getData("text/plain").trim()) event.preventDefault();
-            }}
-            onKeyDown={event => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-          <div className="goal-intake-tools">
-            <Button size="sm" variant="secondary" disabled={busy} onClick={() => input.current?.click()} icon={<ImagePlus size={14} />}>
-              添加图片
-            </Button>
-            <span>{images.length ? `${images.length}/8 张 · 可直接在输入框粘贴或拖入` : "可粘贴截图、拖入图片，或从本机选择"}</span>
-          </div>
-          <input
-            ref={input}
-            className="visually-hidden"
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            multiple
-            aria-label="选择图片"
-            onChange={event => {
-              addFiles(Array.from(event.currentTarget.files ?? []));
-              event.currentTarget.value = "";
-            }}
-          />
-        </div>
-        </Field>
-        {images.length > 0 && (
-          <div className="intake-attachments" aria-label="待提交图片">
-            {images.map(item => (
-              <figure className="intake-attachment" key={item.key}>
-                <img src={item.preview} alt={item.file.name} />
-                <figcaption>
-                  <strong title={item.file.name}>{item.file.name}</strong>
-                  <span>{formatBytes(item.file.size)}</span>
-                </figcaption>
-                <button type="button" aria-label={`移除图片 ${item.file.name}`} disabled={busy} onClick={() => removeImage(item.key)}>
-                  <Trash2 size={13} />
-                </button>
-              </figure>
-            ))}
-          </div>
-        )}
-        <p className="ui-form__note">图片只保存在本机，目标结束 30 天后自动清理。⌘ / Ctrl + Enter 提交。</p>
-        {busy && <LoadingState label="正在保存图片并联系管家，首次准备可能需要几十秒…" />}
-        <div className="modal-actions">
-          <Button variant="secondary" disabled={busy} onClick={onClose}>
-            取消
-          </Button>
-          <Button type="submit" variant="primary" disabled={busy} icon={<Sparkles size={15} />}>
-            {busy ? "正在交给管家…" : "交给管家"}
-          </Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
 function App() {
   const [state, setState] = useState<WorkspaceState>(initialState),
     [workspace, setWorkspace] = useState<string>(),
@@ -323,9 +139,11 @@ function App() {
     [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all");
   const [modal, setModal] = useState<
-      "new" | "project" | "attention" | "goal" | "edit" | "delivery" | "workspace" | "webhook" | ""
+      "new" | "project" | "attention" | "goal" | "task" | "edit" | "delivery" | "workspace" | "webhook" | ""
     >(""),
     [goalId, setGoalId] = useState("");
+  const [intakeHandling, setIntakeHandling] = useState<IntakeHandling>("concierge");
+  const [taskSection, setTaskSection] = useState<"later" | "self">("later");
   const [error, setError] = useState(""),
     [toast, setToast] = useState(""),
     [busy, setBusy] = useState(false),
@@ -343,6 +161,7 @@ function App() {
   const [terminal, setTerminal] = useState<{ session: string; title: string; goalId?: string; visible: boolean }>();
   const stateRef = useRef(state);
   stateRef.current = state;
+  useReminderClock(state.goals);
   const pendingState = useRef<{ state: WorkspaceState; signature: string } | undefined>(undefined);
   const stateFrame = useRef<number | undefined>(undefined);
   const lastStateSignature = useRef("");
@@ -372,7 +191,7 @@ function App() {
     waiting = state.goals.filter(
       (item) => item.status === "waiting" && !attention.includes(item),
     );
-  const active = state.goals.filter((item) => item.status === "active"),
+  const active = state.goals.filter((item) => item.status === "active" && item.mode === "concierge"),
     selectedGoals = state.goals.filter(
       (item) =>
         (!projectId || item.projectId === projectId) &&
@@ -537,7 +356,7 @@ function App() {
       return;
     }
     setGoalId(item.id);
-    setModal(destination === "attention" ? "attention" : "goal");
+    setModal(destination === "task" ? "task" : destination === "attention" ? "attention" : "goal");
   }
   function attentionActionLabel(item: Goal) {
     const kind = attentionKind(item);
@@ -549,12 +368,19 @@ function App() {
   }
   function goalRowLabel(item: Goal) {
     const destination = goalEntryDestination(item);
+    if (destination === "task") return ["completed", "dropped"].includes(item.status)
+      ? "查看记录" : item.status === "backlog" ? "尚未开始" : "我来做";
     if (destination === "details" && (item.status === "completed" || item.status === "dropped")) return "查看记录";
-    if (destination === "scene") return "回到现场";
+    if (destination === "scene") return goalProgressLabel(item);
     if (destination === "attention") return attentionActionLabel(item);
     return "查看目标";
   }
-  async function saveGoal(text: string, files: File[]) {
+  function createIntake(handling: IntakeHandling = "concierge") {
+    setIntakeHandling(handling);
+    setError("");
+    setModal("new");
+  }
+  async function saveGoal(text: string, files: File[], handling: IntakeHandling) {
     setBusy(true);
     setError("");
     try {
@@ -566,13 +392,20 @@ function App() {
       const created = await api.command({
         type: "goal.intake",
         text,
+        handling,
         projectId: projectId || undefined,
         ...(attachments.length ? { attachments } : {}),
       }) as Goal;
       applyState(await api.command({ type: "snapshot" }));
       setGoalId(created.id);
-      setModal("goal");
-      notify(attachments.length ? `目标与 ${attachments.length} 张图片已保存，正在联系管家。` : "目标已保存，正在联系管家。");
+      setModal(handling === "concierge" ? "goal" : "");
+      if (handling !== "concierge") {
+        setTaskSection(handling === "later" ? "later" : "self");
+        setProjectId("");
+        setPage("tasks");
+      }
+      notify(handling === "later" ? "已记下，不会启动 Agent。" : handling === "self"
+        ? "已记到我来做，做完即可标记完成。" : "目标已保存，正在联系管家。");
     } catch (reason) {
       showError(reason);
       throw reason;
@@ -580,6 +413,8 @@ function App() {
       setBusy(false);
     }
   }
+  const taskModal = Boolean(goal && (modal === "task" ||
+    modal === "goal" && goal.mode === "manual" && goal.status !== "review"));
   return (
     <div className={`app ${collapsed ? "collapsed" : ""}`}>
       <aside className="sidebar">
@@ -627,6 +462,14 @@ function App() {
             <Inbox />
             <span>注意力</span>
             {attention.length > 0 && <b>{attention.length}</b>}
+          </button>
+          <button
+            className={page === "tasks" ? "active" : ""}
+            aria-label="待办池"
+            onClick={() => { setPage("tasks"); setProjectId(""); }}
+          >
+            <NotebookPen />
+            <span>待办池</span>
           </button>
           <button
             className={page === "goals" && !projectId ? "active" : ""}
@@ -719,11 +562,11 @@ function App() {
             </span>
             <Button
               variant="primary"
-              onClick={() => setModal("new")}
+              onClick={() => createIntake(page === "tasks" ? taskSection : "concierge")}
               disabled={!workspace}
               icon={<Plus size={16} />}
             >
-              新目标
+              {page === "tasks" ? "记一件事" : "新目标"}
             </Button>
           </div>
         </header>
@@ -839,6 +682,7 @@ function App() {
                   <div className="attention-list">
                     {attention.map((item) => {
                       const kind = attentionKind(item)!;
+                      const sceneSync = sceneSyncPresentation(item);
                       return (
                         <button
                           className={`attention-card ${kind}`}
@@ -861,10 +705,10 @@ function App() {
                                   (p) => p.id === item.projectId,
                                 )?.name
                               }{" "}
-                              · {attentionLabel[kind]}
+                              · {sceneSync?.label || attentionLabel[kind]}
                             </span>
                             <h3>{item.title}</h3>
-                            <p>{item.attention?.summary ?? item.next}</p>
+                            <p>{sceneSync?.summary || item.attention?.summary || item.next}</p>
                           </div>
                           <span className="card-link">
                             <span className="card-link-label">
@@ -882,7 +726,7 @@ function App() {
                     tone="mint"
                     icon={<Sparkles size={18} />}
                     title="此刻，没有等你处理的事。"
-                    description={`${waiting.length ? `${waiting.length} 件在等待` : "没有被搁置的事项"}${active.length ? `，${active.length} 件正在推进` : ""}。到了该出现的时候再告诉你。`}
+                    description={`${waiting.length ? `${waiting.length} 件在等待` : "没有被搁置的事项"}${active.length ? `，${active.length} 件由管家跟进` : ""}。到了该出现的时候再告诉你。`}
                   />
                 )}
               </section>
@@ -919,10 +763,10 @@ function App() {
                 <div className="running">
                   <span className="pulse" />
                   <span>
-                    <strong>{active.length} 个目标</strong>正在推进
+                    <strong>{active.length} 个目标</strong>由管家跟进
                   </span>
                   <span>·</span>
-                  <span>工作时不会打扰你</span>
+                  <span>{active.some(item => item.recovery) ? "空闲结果正在核对" : "有需要时再打扰你"}</span>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -937,6 +781,9 @@ function App() {
                 </div>
               )}
             </div>
+          ) : page === "tasks" ? (
+            <TaskPool goals={state.goals} open={openGoal} create={createIntake}
+              section={taskSection} onSection={setTaskSection} />
           ) : page === "goals" ? (
             <div className="content">
               <section className="intro">
@@ -958,8 +805,10 @@ function App() {
                     ["all", "全部"],
                     ["attention", "需要处理"],
                     ["waiting", "等待中"],
-                    ["active", "进行中"],
+                    ["active", "跟进中"],
+                    ["backlog", "暂存"],
                     ["completed", "已完成"],
+                    ["dropped", "已放弃"],
                   ] as [string, string][]
                 ).map(([value, label]) => (
                   <button
@@ -1008,7 +857,7 @@ function App() {
                         variant="secondary"
                         size="sm"
                         icon={<Plus size={14} />}
-                        onClick={() => setModal("new")}
+                        onClick={() => createIntake()}
                       >
                         记录第一个目标
                       </Button>
@@ -1025,7 +874,7 @@ function App() {
                         variant="secondary"
                         size="sm"
                         icon={<Plus size={14} />}
-                        onClick={() => setModal("new")}
+                        onClick={() => createIntake()}
                       >
                         记录第一个目标
                       </Button>
@@ -1268,11 +1117,16 @@ function App() {
         <GoalIntakeForm
           error={error}
           busy={busy}
+          initialHandling={intakeHandling}
           onClose={() => setModal("")}
           onSubmit={saveGoal}
         />
       )}
-      {modal === "attention" && goal && (
+      {taskModal && goal && goalEntryDestination(goal) !== "attention" && (
+        <TaskDetail key={goal.id} goal={goal} service={goalDetailService} busy={busy} error={error}
+          close={() => setModal("")} notify={notify} delegated={() => setModal("goal")} />
+      )}
+      {(modal === "attention" || taskModal && goal && goalEntryDestination(goal) === "attention") && goal && (
         <GoalAttentionCard
           key={goal.id}
           goal={goal}
@@ -1355,7 +1209,7 @@ function App() {
           </form>
         </Modal>
       )}
-      {modal === "goal" && goal && (
+      {modal === "goal" && !taskModal && goal && (
         <GoalDetail
           key={goal.id}
           goal={goal}

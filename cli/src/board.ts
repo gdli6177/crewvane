@@ -4,8 +4,10 @@ import { emitKeypressEvents } from "node:readline";
 import { promisify } from "node:util";
 import {
   attentionGoals,
+  attentionKind,
   type AttentionKind,
   type Goal,
+  type IntakeHandling,
   type WorkspaceService,
   type WorkspaceState,
 } from "../../packages/core/src/index.js";
@@ -47,19 +49,24 @@ function truncate(value: string, width: number) {
 }
 
 function attentionMarker(goal: Goal) {
-  if (!goal.attention) return goal.status === "waiting" ? "等" : "行";
-  return kindLabel[goal.attention.kind];
+  const kind = attentionKind(goal);
+  if (kind) return kindLabel[kind];
+  if (goal.status === "backlog") return "暂";
+  if (goal.mode === "manual") return "我";
+  return goal.status === "waiting" ? "等" : "行";
 }
 
 export function renderBoard(state: WorkspaceState, selectedId?: string, message?: string) {
   const goals = openGoals(state), attention = attentionGoals(state.goals);
   const waiting = goals.filter(goal => goal.status === "waiting" && !goal.attention).length;
-  const active = goals.length - attention.length - waiting;
+  const deferred = goals.filter(goal => goal.status === "backlog").length;
+  const personal = goals.filter(goal => goal.mode === "manual" && goal.status !== "backlog").length;
+  const active = goals.filter(goal => goal.mode === "concierge" && goal.status === "active" && !attention.includes(goal)).length;
   const lines = [
     `${ESC}38;5;111m╭────────────────────────────────────────────────────────────╮${ESC}0m`,
     `${ESC}38;5;111m│${ESC}0m  ${ESC}1mCREWVANE${ESC}0m  ${ESC}38;5;79m注意力控制台${ESC}0m  ${ESC}2mHerdr plugin${ESC}0m                 ${ESC}38;5;111m│${ESC}0m`,
     `${ESC}38;5;111m╰────────────────────────────────────────────────────────────╯${ESC}0m`,
-    `  ${ESC}38;5;214m${attention.length} 件需要你${ESC}0m   ${ESC}38;5;110m${waiting} 件在等${ESC}0m   ${ESC}2m${active} 件推进中${ESC}0m`,
+    `  ${ESC}38;5;214m${attention.length} 件需要你${ESC}0m   ${ESC}38;5;110m${waiting} 件在等${ESC}0m   ${ESC}2m${active} 件推进中 · ${deferred} 件暂存 · ${personal} 件我来做${ESC}0m`,
     "",
   ];
   if (!goals.length) {
@@ -97,11 +104,14 @@ export function renderBoard(state: WorkspaceState, selectedId?: string, message?
     }
   }
   const contextual = [
-    ...(selected?.status === "waiting" ? ["u 交给管家推进", "m 我来处理"] : []),
+    ...(selected?.status === "waiting" || selected?.status === "backlog" || selected?.mode === "manual"
+      ? ["u 交给管家推进", "m 我来处理"] : []),
     ...(selected?.status === "review" ? ["a 验收通过", "r 退回修改"] : []),
+    ...(selected?.mode === "manual" && selected.status !== "backlog" && selected.status !== "review" ? ["a 标记完成"] : []),
   ];
   lines.push("", ...(message ? [`  ${ESC}38;5;79m${message}${ESC}0m`, ""] : []),
     `${ESC}2m↑↓ 选择  enter 详情  n 新目标  c 补充/决定  f 跟进  o 打开现场  g 回到管家${ESC}0m`,
+    `${ESC}2mt 先记下  p 我来做${ESC}0m`,
     `${ESC}2m${contextual.length ? `${contextual.join("  ")}  ` : ""}q 关闭${ESC}0m`);
   return lines.join("\n");
 }
@@ -197,13 +207,14 @@ export async function runBoard(
     enableRaw();
     redraw();
   });
-  const createGoal = async () => {
-    const text = await askText(`${ESC}38;5;111m要处理什么？${ESC}0m `);
+  const createGoal = async (handling: IntakeHandling = "concierge") => {
+    const text = await askText(`${ESC}38;5;111m${handling === "concierge" ? "要处理什么？" : "记下什么？"}${ESC}0m `);
     if (!text) return;
     await act(async () => {
-      const goal = await service.execute({ type: "goal.intake", text }) as Goal;
+      const goal = await service.execute({ type: "goal.intake", text, handling }) as Goal;
       selectedId = goal.id;
-      return "已交给管家。Crewvane 打开时会自动派发，桌面未运行时请求会保留。";
+      return handling === "concierge" ? "已交给管家。Crewvane 打开时会自动派发，桌面未运行时请求会保留。"
+        : handling === "later" ? "已暂存，不会启动 Agent。" : "已记录，由你安排，做完即可标记完成。";
     });
   };
   const comment = async () => {
@@ -224,7 +235,8 @@ export async function runBoard(
       }
       else
         await service.execute({ type: "goal.message", goalId: goal.id, text, actor: "你" });
-      return decision ? "决定已写入账本，正在交给管家。" : "补充意见已保存，正在交给管家。";
+      return decision ? "决定已写入账本，正在交给管家。" : goal.mode === "concierge"
+        ? "补充意见已保存，正在交给管家。" : "补充说明已记录，不会启动 Agent。";
     });
   };
   const followUp = async () => {
@@ -240,6 +252,14 @@ export async function runBoard(
   const resume = async (mode: "concierge" | "manual") => {
     const goal = selected();
     if (!goal) return;
+    if (goal.status === "backlog" || goal.mode === "manual" && goal.status !== "waiting") {
+      paused = false;
+      await act(async () => {
+        await service.execute({ type: mode === "concierge" ? "goal.delegate" : "goal.takeover", goalId: goal.id });
+        return mode === "concierge" ? "已交给管家。" : "已记到我来做。";
+      });
+      return;
+    }
     if (goal.status !== "waiting")
       return setMessage("只有等待中的事项可以继续推进。");
     const note = await askText("最新结果与下一步： ");
@@ -252,6 +272,13 @@ export async function runBoard(
   const accept = async () => {
     const goal = selected();
     if (!goal) return;
+    if (goal.mode === "manual" && goal.status !== "backlog" && goal.status !== "review") {
+      await act(async () => {
+        await service.execute({ type: "goal.complete", goalId: goal.id, note: "你在 Herdr 注意力控制台确认完成。" });
+        return "已完成。";
+      });
+      return;
+    }
     if (goal.status !== "review")
       return setMessage("只有待验收事项可以验收通过。");
     await act(async () => {
@@ -274,6 +301,8 @@ export async function runBoard(
   const openScene = async () => {
     const goal = selected();
     if (!goal) return;
+    if (goal.mode === "manual" && !goal.herdr)
+      return setMessage("这件事没有 Agent 现场；需要 Agent 执行时，请先交给管家。");
     if (process.env.HERDR_ENV !== "1")
       return setMessage("请从 Herdr 中的 Crewvane 面板打开现场。");
     const reference = goal.herdr ?? state.concierge;
@@ -309,6 +338,8 @@ export async function runBoard(
       return redraw();
     }
     if (key.name === "n") { paused = true; void createGoal(); return; }
+    if (key.name === "t") { paused = true; void createGoal("later"); return; }
+    if (key.name === "p") { paused = true; void createGoal("self"); return; }
     if (key.name === "c") { paused = true; void comment(); return; }
     if (key.name === "f") { paused = true; void followUp(); return; }
     if (key.name === "u") { paused = true; void resume("concierge"); return; }

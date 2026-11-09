@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   WorkspaceService,
   type Goal,
@@ -100,16 +102,22 @@ test("launches the configured agent with an isolated owner environment", async (
 
   assert.equal(result.reference.agent, "case-owner");
   assert.equal(result.reference.workspaceId, "w7");
-  const environmentCall = mock.calls.find(
+  const environmentCalls = mock.calls.filter(
     (args) => args[0] === "pane" && args[1] === "run",
   );
-  assert.ok(environmentCall);
-  assert.match(environmentCall[3]!, /unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE/);
+  const environmentScript = environmentCalls.map(args => args[3]).join("; ");
+  assert.ok(environmentCalls.length);
+  assert.match(environmentScript, /unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE/);
   assert.match(
-    environmentCall[3]!,
+    environmentScript,
     new RegExp(`CREWVANE_WORKSPACE='${await realpath(root)}'`),
   );
-  assert.match(environmentCall[3]!, /CREWVANE_AGENT_NAME='case-owner'/);
+  assert.match(environmentScript, /CREWVANE_AGENT_NAME='case-owner'/);
+  const exported = await promisify(execFile)("/bin/sh", ["-c", `${environmentScript}; /usr/bin/env`],
+    { env: { PATH: "/usr/bin:/bin", CREWVANE_COORDINATOR: "1", CREWVANE_COORDINATOR_SCOPE_FILE: "old-scope" } });
+  assert.match(exported.stdout, new RegExp(`CREWVANE_GOAL_ID=${goal.id}`));
+  assert.match(exported.stdout, new RegExp(`CREWVANE_WORKSPACE=${await realpath(root)}`));
+  assert.doesNotMatch(exported.stdout, /CREWVANE_COORDINATOR=/);
   const start = mock.calls.find(
     (args) =>
       args[0] === "agent" &&
@@ -128,6 +136,8 @@ test("launches the configured agent with an isolated owner environment", async (
   assert.ok(prompt);
   assert.match(prompt[3]!, /隔离负责人/);
   assert.match(prompt[3]!, /完整目标原文/);
+  assert.match(prompt[3]!, /goal scene-reply/);
+  assert.match(prompt[3]!, /不等于批准、验收或目标完成/);
   assert.deepEqual(prompt.slice(-3), ["--wait", "--until", "working"]);
 
   const state = await service.read();
@@ -179,12 +189,36 @@ test("launches a custom interactive CLI and records its real foreground process"
   const launches = mock.calls.filter(
     (args) => args[0] === "pane" && args[1] === "run",
   );
-  assert.equal(launches.length, 3);
-  assert.match(launches[1]![3]!, /My Agent/);
-  assert.deepEqual(launches.at(-1)!.slice(2), ["w7:p3", "执行自定义任务"]);
+  assert.ok(launches.length > 3);
+  assert.ok(launches.some(args => /My Agent/.test(args[3]!)));
+  assert.equal(launches.at(-1)![2], "w7:p3");
+  assert.match(launches.at(-1)![3]!, /^执行自定义任务\n/);
+  assert.match(launches.at(-1)![3]!, /goal scene-reply/);
   const state = await service.read();
   assert.equal(state.goals[0]?.herdr?.transport, "pane");
   assert.equal(state.goals[0]?.herdr?.processId, 42);
+});
+
+test("environment setup never sends one oversized line through a canonical terminal", async () => {
+  const { root, service } = await fixture();
+  const goal = await service.execute({ type:"goal.create", input:{
+    title:"长路径终端", projectId:"personal", mode:"concierge",
+  } }) as Goal;
+  const mock = fakeRunner();
+  await launchOwner(service, { goalId:goal.id, name:"long-path-owner" }, {
+    environment:{ HERDR_ENV:"1", HERDR_SESSION:"crewvane-test", HOME:root,
+      PATH:Array.from({length:40},(_,index)=>`/opt/${"a".repeat(90)}/${index}`).join(":") },
+    run:mock.run,
+  });
+  const initialization = mock.calls.filter(args => args[0]==="pane" && args[1]==="run")
+    .filter(args => !args.includes("agent"));
+  assert.ok(initialization.length > 8);
+  for (const args of initialization) assert.ok(Buffer.byteLength(args[3]!) <= 768);
+  const exported = await promisify(execFile)("/bin/sh", ["-c",
+    `${initialization.map(args=>args[3]).join("; ")}; /usr/bin/env`],
+    {env:{PATH:"/usr/bin:/bin"}});
+  for (let index=0; index<40; index+=1)
+    assert.ok(exported.stdout.includes(`/opt/${"a".repeat(90)}/${index}`));
 });
 
 test("keeps a bound owner site when Herdr reports a stalled prompt", async () => {
@@ -219,4 +253,32 @@ test("keeps a bound owner site when Herdr reports a stalled prompt", async () =>
     false,
   );
   assert.equal((await service.read()).goals[0]?.herdr?.agent, "stalled-owner");
+});
+
+test("a failed launch is recorded rather than presented as ongoing execution", async () => {
+  const { service } = await fixture();
+  const goal = await service.execute({ type:"goal.create", input:{
+    title:"启动失败可见", projectId:"personal", mode:"concierge",
+  } }) as Goal;
+  const calls: string[][] = [];
+  await assert.rejects(launchOwner(service, {goalId:goal.id, name:"failed-owner"}, {
+    environment:{HERDR_ENV:"1",HERDR_SESSION:"crewvane-test",PATH:"/usr/bin:/bin"},
+    run:async args => {
+      calls.push(args);
+      if (args[0]==="agent" && args[1]==="start" && args.includes("--help"))
+        return "[possible values: codex]";
+      if (args[0]==="tab" && args[1]==="create") return JSON.stringify({result:{
+        workspace:{workspace_id:"w1"},tab:{tab_id:"w1:t2"},root_pane:{pane_id:"w1:p2"},
+      }});
+      if (args[0]==="pane" && args[1]==="run")
+        throw new Error("input contains a 2460-byte line");
+      return "{}";
+    },
+  }),/2460-byte/);
+  assert.ok(calls.some(args => args[0]==="tab" && args[1]==="close"));
+  const saved = (await service.read()).goals[0]!;
+  assert.equal(saved.herdr,undefined);
+  assert.equal(saved.status,"active");
+  assert.match(saved.next,/尚未开始执行/);
+  assert.match(saved.activities.at(-1)!.text,/负责人启动未完成/);
 });

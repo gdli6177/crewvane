@@ -25,6 +25,8 @@ import { Button, IconButton, StatusPill } from "../../ui/index.js";
 import type { BadgeTone } from "../../ui/index.js";
 import type { GoalReplyMode } from "./GoalReplyComposer.js";
 import { presentGoal, time } from "./goalPresentation.js";
+import { GoalSceneSync } from "./GoalSceneSync.js";
+import { attentionRequest } from "../../../../../packages/core/src/model.js";
 import type { GoalTone } from "./goalPresentation.js";
 import type { GoalDetailService } from "./goalService.js";
 
@@ -222,6 +224,7 @@ export function GoalDetail({
                 </div>
               </section>
 
+              <GoalSceneSync goal={goal} view={view} service={service} busy={busy} />
               {showContext && (
                 <section className="goal-handoff" aria-label="最近一次交接">
                   <header>
@@ -363,6 +366,7 @@ export function GoalDetail({
 
           <footer className={`goal-action-dock ${view.tone}`}>
             <GoalActionDock
+              key={attentionRequest(goal)?.id}
               goal={goal}
               view={view}
               service={service}

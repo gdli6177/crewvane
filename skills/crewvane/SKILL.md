@@ -26,6 +26,8 @@ crewvane status --root "$WORKSPACE" --json
 crewvane goal list --root "$WORKSPACE" --json
 crewvane goal show "$GOAL_ID" --root "$WORKSPACE" --json
 crewvane ask "$VERBATIM_REQUEST" --project "$PROJECT_ID" --root "$WORKSPACE"
+crewvane capture "$VERBATIM_FUTURE_IDEA" --root "$WORKSPACE"
+crewvane capture "$VERBATIM_PERSONAL_TASK" --self --root "$WORKSPACE"
 crewvane goal message "$GOAL_ID" --text "$VERBATIM_MESSAGE" --root "$WORKSPACE"
 ```
 
@@ -33,13 +35,18 @@ Use repeatable `--attachment <absolute-path>` for PNG, JPEG, WebP, or GIF contex
 
 If the user asks to create work, prefer one `ask` call with the complete natural-language request. Do not split it into a progress form. Report the returned goal ID and the saved next step, then stop unless the user asked for further execution.
 
+When the user explicitly says to save for later or not to start, use `capture` instead of `ask`. Use `capture --self` for work the human will do. Neither starts an agent; add `--remind-at <ISO>` only for an explicit, unambiguous time. Do not change a deferred item to active just because notes were added. Starting it later requires explicit user intent and `goal start ID --by self|concierge`; delegation keeps the same record and attachments. The managed concierge cannot use these human intake commands to escape its current-case scope.
+
+The managed concierge can persist a new request it has already received in its terminal using `direct --new --handling later|self "$VERBATIM_REQUEST"`. This creates no dispatch. Existing-case `direct` only appends notes; `--handling` must not be used to change an existing goal's arrangement.
+
 ## Agent execution protocol
 
 Only use status-changing commands when this agent is the registered owner or the concierge for that goal and the stated fact has actually happened. Read [references/cli-protocol.md](references/cli-protocol.md) before using `goal progress`, `goal wait`, `goal review`, `goal decide`, `goal risk`, `goal ship`, `session set`, or any acceptance command.
 
-- Never call `goal accept`, `goal drop`, or `goal resolve` on the human's behalf.
+- An owner records a direct human answer using `goal scene-reply`, bound to the current `attentionRequest.id`; it does not approve or dismiss the question. The current-case concierge may apply an explicit human decision using `resolve`, `accept`, `complete`, `rework`, or `drop`, preserving the human's exact words. An external submitting agent must not make these decisions.
 - Never report a check, file, deployment, approval, or message as complete unless it was actually observed.
 - Ask the concierge to coordinate before escalating a routine implementation choice to the human.
 - Treat an empty or idle terminal as unknown, not successful.
+- After a human answers in the owner's Herdr scene, write the receipt before ending the turn. Do not ask the human to repeat the same answer in the desktop app. Never treat a Crewvane system check as a human reply.
 
 Return concise results to the caller, including the goal ID and any unresolved human decision. Do not paste secrets, credentials, or unrelated workspace state into Crewvane.
