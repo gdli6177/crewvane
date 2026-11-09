@@ -9,6 +9,7 @@ import type {
 export type GoalTone = "running" | "waiting" | "review" | "reply" | "blocked" | "done";
 
 export const statusLabel = {
+  backlog: "暂存",
   active: "进行中",
   waiting: "等待中",
   review: "待验收",
@@ -143,7 +144,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const needsDecision = !ended && kind === "decision";
   const dispatchFailed = !ended && goal.attention?.source === "dispatch";
   const needsIntervention = !ended && kind === "intervention" && !dispatchFailed;
-  const dueFollowUp = !ended && goal.status === "waiting" && kind === "follow_up";
+  const dueFollowUp = !ended && kind === "follow_up";
   const sceneSync = !ended ? sceneSyncPresentation(goal) : undefined;
   const latest = [...goal.activities]
     .reverse()
@@ -180,6 +181,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     detail = goal.status === "completed" ? "已经验收完成。" : "已经放弃，只保留记录。";
     brief = goal.delivery?.summary || goal.next || detail;
     nextLabel = "最后记录";
+  } else if (goal.status === "backlog") {
+    tone = "waiting";
+    label = dueFollowUp ? "到点安排" : "尚未开始";
+    detail = "只记录，不会启动 Agent。准备好后再决定由谁来做。";
+    brief = goal.description;
+    nextLabel = "准备好再开始";
   } else if (goal.status === "review") {
     tone = "review";
     label = "等你验收";
@@ -225,7 +232,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   } else if (goal.mode === "manual") {
     tone = "running";
     label = "由你处理";
-    detail = "这个目标由你推进：补充进展、提交成果，需要协作时可以交回管家。";
+    detail = "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。";
     brief = goal.next;
   }
   if (sceneSync) {

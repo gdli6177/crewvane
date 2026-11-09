@@ -102,7 +102,9 @@ Crewvane 工作区
 
 状态中的 `workflows` 与 `steps` 只作为旧快照结构占位读取，不再出现在产品入口、CLI、目标详情或管家提示词中。
 
-生命周期使用 `active | waiting | review | completed | dropped`。`active` 表示正在推进或管家可以下一步处理；`waiting` 表示等待对象或未来时间；`review` 表示已提交给人验收。是否进入注意力队列由 `attention` 字段单独决定，不能从 Herdr 空闲状态推断。
+生命周期使用 `backlog | active | waiting | review | completed | dropped`。`backlog` 表示仅暂存、尚未授权执行；`active` 表示正在推进或管家可以下一步处理；`waiting` 表示等待真实外部结果；`review` 表示已提交给人验收。是否进入注意力队列由独立注意力或明确到期提醒决定，不能从 Herdr 空闲状态推断。
+
+待办池是同一份 `Goal` 的投影：“先记下”为 `backlog/manual`，“我来做”为 `active/manual`。统一输入框通过 `goal.intake.handling` 选择 `later | self | concierge`。前两者不启动 Agent，也不参与停滞巡检；提醒是独立可选字段，不要求把人工事项改为等待别人。查看和追加备注不清除个人提醒。准备好后通过 `takeover` 或 `delegate` 复用原记录开始；人工完成不要求提交 Agent 验收材料。详见 [待办池开发说明](task-pool-proposal.md)。
 
 `attention` 为 `null` 或：
 
@@ -120,7 +122,7 @@ Crewvane 工作区
 | 管家 / 负责人明确请求人决定；上线策略要求审批 | 是，`decision` | 是，决定账本命中时除外 |
 | 删除数据、停服、花钱、外部发消息、改产品方向、新建或轮换密钥、改权限、改上线策略 | 是，`decision` | 是，任何 ship policy 都相同；决定账本命中时直接沿用 |
 | 提交了真实交付记录 | 是，`review` | 是 |
-| `waiting.remindAt <= now` | 是，`follow_up` | 每个提醒时间最多一次 |
+| 等待、暂存或个人执行的 `remindAt <= now` | 是，`follow_up` | 每个提醒时间最多一次，不自动启动 Agent |
 | Herdr 对应 Agent 为 `blocked` / 不可达 | 先由巡检联系管家 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | 活跃目标 30 分钟未写回实质进展 | 先由巡检联系管家，不以终端忙闲判定失败 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | Herdr 为 `working` / `idle` / `done` / `unknown` | 否 | 否 |
@@ -231,7 +233,7 @@ crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
 
 管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind、session；不得 list、attention、ask、message 或跨目标访问。这个应用层闸门不冒充操作系统文件沙箱。
 
-等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。`goal.message` 立即清除已处理的到期注意力与旧提醒，但保持 `waiting` 和等待对象不变；管家收到唯一 `feedback` 请求后，依据用户明确语义调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发，已结束的目标不能恢复。
+等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。交给管家的 `goal.message` 清除已处理的到期注意力与旧提醒，但保持 `waiting` 和等待对象不变；个人事项的普通备注不清提醒；管家收到唯一 `feedback` 请求后，依据用户明确语义调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发；已移出且没有现场的个人记录允许显式恢复到暂存，不恢复任何 Agent 执行状态。
 
 高级手动操作必须区分补充进展、编辑目标与提交成果。补充进展只写事实，不默认覆盖下一步；编辑目标调整安排但不提交验收；提交成果必须包含可核对成果与真实检查。等待中的直接操作与这些高级表单不能互相覆盖输入或改变原定安排。
 

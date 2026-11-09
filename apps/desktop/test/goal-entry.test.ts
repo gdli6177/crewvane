@@ -56,3 +56,14 @@ test("dispatch failures remain retry cards and ended goals retain their history"
   assert.equal(goalEntryDestination(goal({ status: "completed" })), "details");
   assert.equal(goalEntryDestination(goal({ status: "dropped" })), "details");
 });
+
+test("captured and personal tasks open their own controls rather than waking the concierge", () => {
+  for (const status of ["backlog", "active", "waiting", "completed", "dropped"] as const)
+    assert.equal(goalEntryDestination(goal({ status, mode: "manual" })), "task");
+  assert.equal(goalEntryDestination(goal({
+    mode: "manual", status: "active", remindAt: "2020-01-01T00:00:00.000Z",
+  })), "task");
+  assert.equal(goalEntryDestination(goal({
+    mode: "manual", attention: { kind: "decision", summary: "仍需授权", since: at, source: "governance" },
+  })), "attention", "personal ownership must not hide an outstanding explicit decision");
+});

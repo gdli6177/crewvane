@@ -8,7 +8,7 @@ export async function deliverGoalUpdate(
   send: (goal: Goal) => Promise<void>,
 ) {
   let item = (await target.read()).goals.find(goal => goal.id === goalId);
-  if (!item || ["completed", "dropped"].includes(item.status)) return;
+  if (!item || item.mode !== "concierge" || ["backlog", "completed", "dropped"].includes(item.status)) return;
   if (item.dispatch?.status !== "pending" || !item.dispatch.id) {
     await target.execute({ type: "goal.dispatch", goalId, status: "pending" });
   }

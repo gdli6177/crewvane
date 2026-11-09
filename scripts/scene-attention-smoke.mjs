@@ -46,10 +46,17 @@ try {
   await expect.poll(async () => (await page.evaluate(() => window.crewvane.environment())).workspace).toBe(workspace);
   goal = await page.evaluate(projectId => window.crewvane.command({
     type: "goal.intake",
+    handling: "later",
     projectId,
     text: "隔离验收：请安排独立负责人帮我确定下一步采用方案 A 还是方案 B。负责人先提出明确的选择问题，等我在负责人现场答复。确认后只记录我选的方案与下一步，本次不要写业务代码、不要结束目标、不要另提新问题。",
   }), projectEntry.id);
-  console.log(JSON.stringify({ step: "created", trial, session, goalId: goal.id }));
+  assert.equal(goal.status, "backlog");
+  assert.equal(goal.dispatch, undefined, "capturing must not start the real model");
+  assert.equal((await state()).concierge.status, "not_ready");
+  const firstHandoff = await page.evaluate(id => window.crewvane.command({ type: "goal.delegate", goalId: id }), goal.id);
+  const repeatedHandoff = await page.evaluate(id => window.crewvane.command({ type: "goal.delegate", goalId: id }), goal.id);
+  assert.equal(firstHandoff.dispatch.id, repeatedHandoff.dispatch.id, "repeated delegation must not create another request");
+  console.log(JSON.stringify({ step: "captured-then-delegated", trial, session, goalId: goal.id }));
   await expect.poll(async () => {
     const current = await state();
     const item = current.goals.find(item => item.id === goal.id);

@@ -1,4 +1,5 @@
-export type GoalStatus = "active" | "waiting" | "review" | "completed" | "dropped";
+export type GoalStatus = "backlog" | "active" | "waiting" | "review" | "completed" | "dropped";
+export type IntakeHandling = "concierge" | "later" | "self";
 export type AttentionKind = "decision" | "review" | "follow_up" | "intervention";
 export type LiveState = "working" | "idle" | "done" | "blocked" | "unknown";
 export type ShipPolicy = "auto" | "auto-merge-manual-deploy" | "external-approval";
@@ -116,8 +117,8 @@ type WorkspaceCommand =
   | { type: "project.policy.set"; projectId: string; policy: Pick<ProjectPolicy, "shipPolicy" | "approvers">; actor: string }
   | { type: "workflow.save"; workflow: Workflow }
   | { type: "goal.create"; input: { title: string; description?: string; projectId: string; workflowId?: string; mode: "concierge" | "manual"; next?: string; waitingFor?: string; remindAt?: string } }
-  | { type: "goal.intake"; text: string; projectId?: string; attachments?: GoalAttachment[] }
-  | { type: "goal.direct"; text: string; goalId?: string; projectId?: string; attachments?: GoalAttachment[] }
+  | { type: "goal.intake"; text: string; projectId?: string; handling?: IntakeHandling; remindAt?: string; attachments?: GoalAttachment[] }
+  | { type: "goal.direct"; text: string; goalId?: string; projectId?: string; handling?: IntakeHandling; attachments?: GoalAttachment[] }
   | { type: "goal.attachment.remove"; goalId: string; attachmentId: string; actor?: string }
   | { type: "attachments.cleanup"; retentionDays?: number; at?: string }
   | { type: "goal.delete"; goalId: string; actor?: string }
@@ -131,6 +132,7 @@ type WorkspaceCommand =
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
   | { type: "goal.takeover"; goalId: string }
   | { type: "goal.delegate"; goalId: string }
+  | { type: "goal.restore"; goalId: string }
   | { type: "goal.followup"; goalId: string; note?: string }
   | { type: "goal.wait"; goalId: string; reason: string; owner?: string; remindAt?: string; actor?: string }
   | { type: "goal.decide"; goalId: string; question: string; next?: string; actor?: string; key?: string }

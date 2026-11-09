@@ -18,6 +18,10 @@ crewvane attention --json
 crewvane board
 crewvane ask "检查发布流程并补齐证据"
 crewvane ask "按截图修复布局" --attachment /path/to/screenshot.png
+crewvane capture "以后研究这件事" --attachment /path/to/reference.png
+crewvane capture "我去办理手续" --self --remind-at 2030-01-01T09:30:00+08:00
+crewvane goal start <ID> --by self
+crewvane goal start <ID> --by concierge
 crewvane goal list --json
 crewvane goal show <ID> --json
 crewvane goal message <ID> --text "增加回滚验证"
@@ -26,6 +30,16 @@ crewvane goal risk <ID> --category delete-data --summary "删除生产数据库"
 crewvane goal ship <ID> --operation deploy --checks passed
 HERDR_PLUGIN_EVENT_JSON='…' crewvane event herdr --json
 ```
+
+`capture` 默认保存到待办池的“先记下”，`--self` 保存到“我来做”。两者都不联系管家、
+不创建 Herdr 会话；可附带项目、图片和明确提醒。`goal start` 复用同一目标，只有
+`--by concierge` 才派发，重复调用不会重复创建请求。个人事项用
+`goal complete ID --note "我已做完"` 直接完成；`goal drop` 保留移出记录，未绑定现场的
+个人事项可用 `goal restore ID` 恢复到暂存。自由文本不会自动开始暂存事项。
+
+受管管家在终端里收到明确的“先记下”或“我亲自做”的新事项时，使用
+`direct --new --handling later|self "<原话>"`，记录不会被再次派发。已有事项的
+`direct --current` 只补充原文，不能使用 `--handling` 改变状态。
 
 指定工作区：
 

@@ -126,7 +126,7 @@ test("a manual active goal is presented as owned by the human", async () => {
   const view = presentGoal(current, state);
   assert.equal(current.mode, "manual");
   assert.equal(view.label, "由你处理");
-  assert.match(view.detail, /提交成果/);
+  assert.match(view.detail, /标记完成/);
 });
 
 test("decision context uses the latest agent handoff while keeping transport events out of conversation", async () => {

@@ -146,6 +146,8 @@ export async function launchOwner(
   if (!goal) throw new Error("找不到当前案卷");
   if (!["active", "waiting"].includes(goal.status))
     throw new Error("已结束的目标不能启动负责人");
+  if (goal.mode !== "concierge")
+    throw new Error("这件事由人安排，请先明确交给管家再启动负责人");
   if (goal.herdr)
     throw new Error("该目标已经有负责人现场；请直接联系原负责人");
   const project = state.projects.find((item) => item.id === goal.projectId);

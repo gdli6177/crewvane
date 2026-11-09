@@ -18,6 +18,7 @@ import {
 import { attentionRequest, defaultProjectPolicy, pendingSceneReply } from "./model.js";
 import { observeSceneWork } from "./scene.js";
 import { inspectWatchdog, reportWatchdog } from "./watchdog.js";
+import { hasDueReminder, intakeArrangement } from "./task-pool.js";
 export const nowIso = () => new Date().toISOString();
 function text(value: unknown, label: string, limit = 20_000): string {
   if (
@@ -54,11 +55,13 @@ function steps(value: unknown): WorkflowStep[] {
     prompt: text(step.prompt, "提示词", 12_000),
   }));
 }
-function ongoing(item: Goal, allowReview = false) {
+function ongoing(item: Goal, allowReview = false, allowBacklog = false) {
   if (["completed", "dropped"].includes(item.status))
     throw new Error("已结束的目标不能继续修改");
   if (item.status === "review" && !allowReview)
     throw new Error("目标正在等待验收，请先验收或退回修改");
+  if (item.status === "backlog" && !allowBacklog)
+    throw new Error("这件事尚未开始，请先选择我来做或交给管家");
 }
 function attachmentActivity(text: string, attachments: GoalAttachment[]): string {
   if (!attachments.length) return text;
@@ -334,6 +337,9 @@ export class WorkspaceService {
         }
         case "goal.intake": {
           const request = text(command.text, "事情说明", 20_000);
+          const arrangement = intakeArrangement(command.handling ?? "concierge");
+          if (command.remindAt && arrangement.mode === "concierge")
+            throw new Error("交给管家的目标请在明确等待时再设置提醒");
           const goalAttachments = await validateGoalAttachments(this.root, command.attachments);
           const projectId = command.projectId && command.projectId !== "personal" ? command.projectId : "personal";
           const project = state.projects.find(item => item.id === id(projectId));
@@ -342,10 +348,13 @@ export class WorkspaceService {
           const item: Goal = {
             id: newId("goal"), projectId: project.id,
             title: automaticGoalTitle(request), description: request,
-            mode: "concierge", status: "active",
-            steps: [], next: "管家正在理解原文并整理目标。", owner: "待分配负责人",
+            ...arrangement,
+            steps: [],
             attention: null,
-            dispatch: { id: newId("handoff"), kind: "feedback", status: "pending", at },
+            ...(arrangement.mode === "concierge"
+              ? { dispatch: { id: newId("handoff"), kind: "feedback" as const, status: "pending" as const, at } }
+              : {}),
+            ...(command.remindAt ? { remindAt: iso(command.remindAt) } : {}),
             ...(goalAttachments.length ? { attachments: goalAttachments } : {}),
             activities: [{ id: newId("act"), at, actor: "你", kind: "created", text: request }],
             createdAt: at, updatedAt: at,
@@ -358,6 +367,8 @@ export class WorkspaceService {
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           if (command.goalId) {
             const item = goal(command.goalId);
+            if (command.handling)
+              throw new Error("终端补充消息不能改变执行安排，请使用明确的开始命令");
             if (["completed", "dropped"].includes(item.status))
               throw new Error("目标已结束，不能再追加终端消息");
             delete item.sceneReply;
@@ -384,16 +395,21 @@ export class WorkspaceService {
           const projectId = command.projectId && command.projectId !== "personal" ? command.projectId : "personal";
           const project = state.projects.find(item => item.id === id(projectId));
           if (!project) throw new Error("请选择有效项目");
+          const arrangement = intakeArrangement(command.handling ?? "concierge");
           const at = nowIso();
           const item: Goal = {
             id: newId("goal"), projectId: project.id,
             title: automaticGoalTitle(request), description: request,
-            mode: "concierge", status: "active",
-            steps: [], next: "管家正在理解 Herdr 终端中的原文并整理目标。", owner: "待分配负责人",
+            ...arrangement,
+            steps: [],
+            next: arrangement.mode === "concierge"
+              ? "管家正在理解 Herdr 终端中的原文并整理目标。" : arrangement.next,
             attention: null,
             // The concierge already received this message in its terminal turn.
             // Mark it as delivered so desktop dispatch does not replay the same text.
-            dispatch: { id: newId("handoff"), kind: "feedback", status: "sent", at, detail: "已从 Herdr 终端直接送达管家" },
+            ...(arrangement.mode === "concierge"
+              ? { dispatch: { id: newId("handoff"), kind: "feedback" as const, status: "sent" as const, at, detail: "已从 Herdr 终端直接送达管家" } }
+              : {}),
             ...(incomingAttachments.length ? { attachments: incomingAttachments } : {}),
             activities: [{ id: newId("act"), at, actor: "你 · Herdr 直聊", kind: "created", text: request }],
             createdAt: at, updatedAt: at,
@@ -460,6 +476,8 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (["completed", "dropped"].includes(item.status))
             throw new Error("目标已结束，不能再发送消息");
+          if (item.status === "backlog" && command.routeToConcierge)
+            throw new Error("这件事尚未开始，请先明确交给管家");
           const message = text(command.text, "消息", 12_000);
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           const combined = await validateGoalAttachments(this.root, [
@@ -468,10 +486,10 @@ export class WorkspaceService {
           ]);
           if (combined.length) item.attachments = combined;
           if (item.attention?.source === "dispatch") item.attention = null;
-          if (
+          if ((item.mode === "concierge" || command.routeToConcierge) && (
             item.attention?.kind === "follow_up" ||
-            (item.status === "waiting" && item.remindAt && Date.parse(item.remindAt) <= Date.now())
-          ) {
+            hasDueReminder(item)
+          )) {
             item.attention = null;
             item.remindAt = undefined;
           }
@@ -502,14 +520,19 @@ export class WorkspaceService {
         }
         case "goal.takeover": {
           const item = goal(command.goalId);
-          ongoing(item);
-          if (item.mode === "manual") return item;
+          ongoing(item, false, true);
+          if (item.mode === "manual" && item.status !== "backlog") return item;
+          const fromBacklog = item.status === "backlog";
+          if (fromBacklog && hasDueReminder(item)) {
+            item.remindAt = undefined;
+            if (item.attention?.kind === "follow_up") item.attention = null;
+          }
           item.mode = "manual";
           item.status = "active";
           item.owner = "你";
-          item.next = "由你继续处理；可补充进展、更新安排或提交成果。";
+          item.next = "由你安排；做完即可标记完成。";
           item.waitingFor = undefined;
-          item.remindAt = undefined;
+          if (!fromBacklog) item.remindAt = undefined;
           if (item.attention?.source === "dispatch") item.attention = null;
           delete item.dispatch;
           delete item.sceneVisit;
@@ -521,7 +544,10 @@ export class WorkspaceService {
         }
         case "goal.delegate": {
           const item = goal(command.goalId);
-          ongoing(item);
+          ongoing(item, false, true);
+          if (item.mode === "concierge" && item.status !== "backlog") return item;
+          if (item.attention && item.attention.kind !== "follow_up" && item.attention.source !== "dispatch")
+            throw new Error("请先处理当前待决定或介入事项，再交给管家");
           item.mode = "concierge";
           item.status = "active";
           item.owner = "待分配负责人";
@@ -534,9 +560,24 @@ export class WorkspaceService {
           activity(item, "session", "已重新交给管家统筹。", "你");
           return item;
         }
+        case "goal.restore": {
+          const item = goal(command.goalId);
+          if (item.status !== "dropped" || item.mode !== "manual" || item.herdr)
+            throw new Error("只有已移出且没有执行现场的个人事项可以恢复到待办池");
+          Object.assign(item, intakeArrangement("later"));
+          item.attention = null;
+          delete item.remindAt;
+          delete item.waitingFor;
+          delete item.dispatch;
+          delete item.watchdog;
+          delete item.sceneVisit;
+          delete item.sceneReply;
+          activity(item, "progress", "已恢复到待办池，尚未开始执行。");
+          return item;
+        }
         case "goal.update": {
           const item = goal(command.goalId);
-          ongoing(item, true);
+          ongoing(item, true, true);
           for (const field of [
             "title",
             "description",
@@ -559,6 +600,8 @@ export class WorkspaceService {
               command.patch.remindAt === null
                 ? undefined
                 : iso(command.patch.remindAt);
+          if (command.patch.remindAt !== undefined && item.attention?.kind === "follow_up")
+            item.attention = null;
           if (command.patch.status !== undefined) {
             ongoing(item);
             if (!["active", "waiting"].includes(command.patch.status))
@@ -576,7 +619,7 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (command.requestId && item.dispatch?.id !== command.requestId) return item;
           ongoing(item, true);
-          if (command.status === "pending" && item.mode !== "concierge")
+          if (item.mode !== "concierge")
             throw new Error("这个目标已由你接管");
           if (!["pending", "sent", "failed"].includes(command.status)) throw new Error("无效的派送状态");
           const at = nowIso(), detail = command.detail ? text(command.detail, "派送说明", 2000) : undefined;
@@ -868,7 +911,7 @@ export class WorkspaceService {
         }
         case "goal.complete": {
           const item = goal(command.goalId);
-          ongoing(item, true);
+          ongoing(item, true, true);
           const actor = command.actor || "你";
           const note = text(command.note, "用户确认完成的原话", 4000);
           item.status = "completed";
@@ -891,7 +934,7 @@ export class WorkspaceService {
         }
         case "goal.drop": {
           const item = goal(command.goalId);
-          ongoing(item, true);
+          ongoing(item, true, true);
           const actor = command.actor || "你";
           if (actor !== "你" && !command.note?.trim())
             throw new Error("管家放弃目标时必须记录用户明确放弃的原话");
@@ -904,10 +947,10 @@ export class WorkspaceService {
         }
         case "goal.resolve": {
           const item = goal(command.goalId);
-          ongoing(item, true);
+          ongoing(item, true, true);
           if (item.attention?.kind === "review")
             throw new Error("成果请使用验收通过或退回修改");
-          if (!item.attention && !(item.status === "waiting" && item.remindAt))
+          if (!item.attention && !hasDueReminder(item))
             throw new Error("当前没有需要解决的注意力事项");
           const at = nowIso(), note = command.note?.trim() ? text(command.note, "决定", 4000) : "";
           const decisionAttention = item.attention?.kind === "decision" ? item.attention : undefined;
@@ -962,8 +1005,8 @@ export class WorkspaceService {
         }
         case "goal.remind": {
           const item = goal(command.goalId);
-          ongoing(item);
-          item.status = "waiting";
+          ongoing(item, false, true);
+          if (item.mode === "concierge") item.status = "waiting";
           item.remindAt = iso(command.at);
           if (item.attention?.kind === "follow_up") item.attention = null;
           if (command.note) item.next = text(command.note, "提醒说明", 2000);
@@ -988,6 +1031,8 @@ export class WorkspaceService {
             throw new Error("自定义 CLI 现场需要真实 Pane 与前台进程 ID");
           if (command.goalId) {
             const item = goal(command.goalId);
+            if (item.status === "backlog")
+              throw new Error("暂存事项不能关联执行现场，请先交给管家");
             const sameSite = (other: typeof reference) => other.session === reference.session &&
               (!!reference.paneId && reference.paneId === other.paneId ||
                !!reference.tabId && reference.tabId === other.tabId ||
@@ -1170,6 +1215,7 @@ export class WorkspaceService {
         case "notification.sent": {
           const item = goal(command.goalId),
             kind = command.kind;
+          if (attentionRequest(item)?.kind !== kind) return true;
           if (item.attention?.kind === kind)
             item.attention.notifiedAt = iso(command.at);
           else if (kind === "follow_up")

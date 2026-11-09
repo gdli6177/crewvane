@@ -1,5 +1,11 @@
 :root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; color: #ecf0f8; background: #111520; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; color-scheme: dark; --bg: #111520; --sidebar: #151a26; --surface: #1b2130; --surface-soft: #222a3a; --surface-hover: #252f40; --surface-raised: #1b2130; --text: #ecf0f8; --secondary: #b2bdcf; --muted: #8b98ae; --line: #2b3546; --accent: #a9b8ff; --accent-strong: #8398fc; --accent-soft: #29324f; --on-accent: #182039; --mint: #83e4c2; --mint-soft: #1f3938; --warm: #ebc894; --warm-soft: #3d342a; --danger: #eda5ad; --shadow: 0 24px 80px #05081266; --shadow-card: none; --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-8: 32px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 20px; --fs-caption: 11px; --lh-caption: 16px; --fs-meta: 12px; --lh-meta: 18px; --fs-body: 13px; --lh-body: 20px; --fs-body-strong: 14px; --lh-body-strong: 21px; --fs-subtitle: 15px; --lh-subtitle: 22px; --fs-title: 20px; --lh-title: 28px; --fs-display: 30px; --lh-display: 38px; --fs-hero: 48px; --lh-hero: 56px; }
 :root[data-theme="light"] { color: #252e42; background: #f7f8fb; color-scheme: light; --bg: #f7f8fb; --sidebar: #f0f2f7; --surface: #fff; --surface-soft: #eef1f7; --surface-hover: #eaedf5; --surface-raised: #fff; --text: #252e42; --secondary: #4a5568; --muted: #626b79; --line: #ccd4e0; --accent: #4d61bb; --accent-strong: #435abb; --accent-soft: #e8ecfb; --on-accent: #fff; --mint: #24725e; --mint-soft: #e2f2eb; --warm: #8d5e27; --warm-soft: #f7eddf; --danger: #873b48; --shadow: 0 24px 80px #27324a22; --shadow-card: 0 1px 2px #1820390d, 0 10px 28px #1820390f; }
+.ui-choice-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); padding: var(--space-1); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg); }
+.ui-choice-group .ui-button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.task-meta, .task-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.task-meta > span:not(.ui-badge) { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--secondary); font-size: var(--fs-meta); }
+.task-description { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--secondary); font-size: var(--fs-body-strong); line-height: var(--lh-subtitle); }
+.task-actions { margin-top: var(--space-3); }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 900px; }
 .terminal-panel { position: fixed; z-index: 9; right: 18px; bottom: 18px; left: 254px; height: min(56vh, 560px); min-width: 480px; min-height: 260px; display: flex; flex-direction: column; padding: 0 10px 10px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
@@ -210,7 +216,7 @@ h1 em { color: var(--accent); font-style: normal; }
 .running button { display: flex; align-items: center; gap: 6px; min-height: 32px; margin-left: auto; padding: 5px 7px; color: var(--accent); font-size: var(--fs-caption); border-radius: 7px; }
 .running button:hover { background: var(--accent-soft); }
 .pulse { width: 5px; height: 5px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 4px var(--mint-soft); }
-.filter-bar { display: flex; align-items: center; gap: 6px; margin: 32px 0 21px; }
+.filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 32px 0 21px; }
 .filter-bar button { padding: 8px 12px; border-radius: 6px; color: var(--muted); font-size: var(--fs-meta); }
 .filter-bar button.active { background: var(--surface); border: 1px solid var(--line); color: var(--text); }
 .filter-bar input { width: 190px; min-height: 35px; margin-left: auto; padding: 8px 10px; font-size: var(--fs-meta); }

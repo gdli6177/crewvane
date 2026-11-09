@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   attentionGoals,
   attentionKind,
+  attentionRequest,
   attachmentAbsolutePath,
   importAttachmentBytes,
   validateGoalAttachments,
@@ -462,7 +463,8 @@ async function deliverAttentionNotifications(target: WorkspaceService, state: Aw
         const notification = new Notification({ title: kind === "review" ? "有一份成果等你验收" : kind === "follow_up" ? "到了该跟进的时候" : "Crewvane · 需要你处理", body: `${goal.title}\n${goal.attention?.summary ?? goal.next}`.slice(0, 220) });
         notification.on("click", () => { window.show(); window.webContents.send("crewvane:event", { type: "open-goal", goalId: goal.id }); });
         notification.show();
-        await target.execute({ type: "notification.sent", goalId: goal.id, kind, at: new Date().toISOString() });
+        await target.execute({ type: "notification.sent", goalId: goal.id, kind,
+          attentionId: attentionRequest(goal)?.id, at: new Date().toISOString() });
       } catch {
         // The external channel and inbox remain available if system notification persistence fails.
       }

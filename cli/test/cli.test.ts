@@ -39,6 +39,32 @@ async function coordinator<T>(root: string, goalId: string, task: () => Promise<
     else process.env.CREWVANE_AGENT_NAME = previousActor;
   }
 }
+test("capture records future or personal work and explicit start reuses the same record", async () => {
+  const root = await fixture("cv-cli-pool-");
+  const saved = await call(root, ["capture", "先记下，等有空再整理"]);
+  assert.equal(saved.code, 0, saved.stderr);
+  assert.equal(saved.json.status, "backlog");
+  assert.equal(saved.json.dispatch, undefined);
+  assert.equal((await call(root, ["goal", "message", saved.json.id, "--text", "再留一点背景"])).code, 0);
+  assert.equal((await call(root, ["goal", "start", saved.json.id, "--by", "wrong"])).code, 1);
+  const started = await call(root, ["goal", "start", saved.json.id, "--by", "concierge"]);
+  assert.equal(started.json.id, saved.json.id);
+  assert.equal(started.json.mode, "concierge");
+  assert.equal(started.json.dispatch.status, "pending");
+  const repeated = await call(root, ["goal", "start", saved.json.id, "--by", "concierge"]);
+  assert.equal(repeated.json.dispatch.id, started.json.dispatch.id);
+  const self = await call(root, ["capture", "我明天去银行", "--self",
+    "--remind-at", new Date(Date.now() + 86400_000).toISOString()]);
+  assert.equal(self.code, 0, self.stderr);
+  assert.equal(self.json.mode, "manual");
+  assert.equal(self.json.status, "active");
+  assert.equal(self.json.dispatch, undefined);
+  assert.equal((await call(root, ["attention"])).json.length, 0);
+  const completed = await call(root, ["goal", "complete", self.json.id, "--note", "银行的事已办完"]);
+  assert.equal(completed.json.status, "completed");
+  assert.equal(completed.json.delivery, undefined);
+  assert.equal((await call(root, ["goal", "list", "--all"])).json.length, 2);
+});
 test("real CLI writes goals that desktop service can read", async () => {
   const root = await fixture("crewvane-cli-");
   const created = await call(root, ["goal", "create", "--title", "从 CLI 交给管家", "--project", "personal"]);
@@ -402,6 +428,29 @@ test("a scoped concierge with no active case can still record a direct new task"
   }
 });
 
+test("a managed concierge preserves explicit future and human-only intake without launching execution", async () => {
+  const root = await fixture("cv-direct-pool-");
+  const existing = (await call(root, ["ask", "当前案卷"])).json as Goal;
+  await coordinator(root, existing.id, async () => {
+    const saved = await call(root, ["direct", "--new", "--handling", "later", "先记下，周末再研究"]);
+    assert.equal(saved.code, 0, saved.stderr);
+    assert.equal(saved.json.status, "backlog");
+    assert.equal(saved.json.dispatch, undefined);
+    const illicit = await call(root, ["goal", "progress", saved.json.id, "--summary", "现在偷偷开始"]);
+    assert.equal(illicit.code, 1);
+    assert.match(illicit.stderr, /尚未开始/);
+    const personal = await call(root, ["direct", "--new", "--handling", "self", "这件事我亲自处理"]);
+    assert.equal(personal.code, 0, personal.stderr);
+    assert.equal(personal.json.mode, "manual");
+    assert.equal(personal.json.owner, "你");
+    assert.equal(personal.json.dispatch, undefined);
+    const changeViaMessage = await call(root, ["direct", "--current", "--handling", "concierge", "补充备注"]);
+    assert.equal(changeViaMessage.code, 1);
+    assert.match(changeViaMessage.stderr, /不能改变执行安排/);
+  });
+  assert.equal((await new WorkspaceService(root).read()).goals.length, 3);
+});
+
 test("Herdr board renders actionable attention without terminal escape codes", async () => {
   const root = await fixture("crewvane-cli-board-");
   const service = new WorkspaceService(root);
@@ -483,7 +532,8 @@ test("coordinator CLI is limited to the current case and cannot read or mutate a
     assert.equal(crossDirect.code, 1);
     assert.match(crossDirect.stderr, /当前只处理目标/);
 
-    for (const argv of [["goal", "list"], ["attention"], ["ask", "新目标"], ["goal", "message", first.id, "--text", "回环"]]) {
+    for (const argv of [["goal", "list"], ["attention"], ["ask", "新目标"], ["capture", "暂存"],
+      ["goal", "start", second.id, "--by", "concierge"], ["goal", "message", first.id, "--text", "回环"]]) {
       const denied = await call(root, argv);
       assert.equal(denied.code, 1, `${argv.join(" ")} should be denied`);
     }
@@ -528,4 +578,11 @@ test("spawned CLI updates an item and rejects a late update after cancellation",
   assert.equal(state.goals[0]?.next, "等待审批");
   await cli("goal", "drop", goal.id, "--reason", "无需继续");
   await assert.rejects(() => cli("goal", "progress", goal.id, "--summary", "迟到写回"), /已结束/);
+  const deferred = JSON.parse((await cli("capture", "跨进程记录的想法")).stdout);
+  assert.equal(deferred.status, "backlog");
+  assert.equal(deferred.dispatch, undefined);
+  const personal = JSON.parse((await cli("goal", "start", deferred.id, "--by", "self")).stdout);
+  assert.equal(personal.id, deferred.id);
+  assert.equal(personal.mode, "manual");
+  assert.equal(personal.status, "active");
 });
