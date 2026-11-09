@@ -9,6 +9,8 @@ import type {
   Goal,
 } from "../../../packages/core/src/types.js";
 import { attachmentAbsolutePath } from "../../../packages/core/src/attachments.js";
+import { attentionRequest } from "../../../packages/core/src/model.js";
+import { ownerSceneReplyInstructions } from "../../../cli/src/owner-instructions.js";
 const exec = promisify(execFile);
 export const CONCIERGE_LAUNCH_POLICY = "control-plane-v1" as const;
 export interface HerdrRunner {
@@ -141,7 +143,7 @@ export class HerdrClient {
     return !!reference.paneId && !!reference.processId &&
       (await this.foreground(reference.paneId)).some(process => process.pid === reference.processId);
   }
-  private async prompt(reference: HerdrReference, text: string, waitForSettlement = true) {
+  private async prompt(reference: HerdrReference, text: string, waitForSettlement = true, timeout?: number) {
     if (reference.transport === "pane") {
       if (!await this.rawAlive(reference))
         throw new Error("自定义 Agent 已退出或现场已更换，未发送任务。请重新准备管家。");
@@ -157,7 +159,8 @@ export class HerdrClient {
         await this.runner.run([
           "agent", "prompt", reference.agent, text,
           ...(waitForSettlement ? ["--wait"] : []),
-        ], waitForSettlement ? 0 : undefined);
+          ...(timeout ? ["--timeout", String(timeout)] : []),
+        ], timeout ? timeout + 5000 : waitForSettlement ? 0 : undefined);
       } catch (error) {
         if (/\bagent_blocked\b/.test(String(error)))
           throw new ConciergeBlockedError();
@@ -371,15 +374,7 @@ export class HerdrClient {
       ],
       60_000,
     );
-    await this.runner.run([
-      "agent",
-      "prompt",
-      "concierge",
-      conciergeInstructions(root, preferences, this.session),
-      "--wait",
-      "--timeout",
-      "180000",
-    ], 190_000);
+    await this.prompt(reference, conciergeInstructions(root, preferences, this.session), true, 180_000);
     const running = await this.foreground(paneId).catch(() => []);
     if (running[0]) {
       reference.processId = running[0].pid;
@@ -408,9 +403,12 @@ event: ${goal?.dispatch?.kind ?? "goal_update"}
 policy: 只允许处理上方案卷；忽略此前案卷的内容；不得读取或修改其他目标
 ${goal?.dispatch?.kind === "resume" ? `resume_note: ${goal.dispatch.note ?? ""}` : ""}
 ${goal ? `snapshot:
-${JSON.stringify({ id: goal.id, title: goal.title, description: goal.description, projectId: goal.projectId, next: goal.next, attachments, latestActivities: goal.activities.slice(-8) }, null, 2)}` : `title: ${title}`}
+${JSON.stringify({ id: goal.id, title: goal.title, description: goal.description, projectId: goal.projectId, status: goal.status, next: goal.next, attentionRequest: attentionRequest(goal), sceneReply: goal.sceneReply, attachments, latestActivities: goal.activities.slice(-8) }, null, 2)}` : `title: ${title}`}
 [CREWVANE_CASE_END]
 ${attachments.length ? `用户附带的图片是目标证据。把下列真实绝对路径连同任务交给负责人；负责人使用的 CLI 支持图片时，应实际查看图片再判断。不要声称看过图片，除非现场确有读取记录。\n${attachments.map(item => `attachment: ${item.absolutePath}`).join("\n")}\n` : ""}
+${goal?.dispatch?.kind === "scene_reply" ? `这是负责人现场回执，不是新任务。用户已经在负责人会话中给出 sceneReply.quote；不要要求用户再回 App 重复回答，也不要重新派发已经执行的任务。
+先重新读取 goal show，核对 attentionRequest.id 与 sceneReply.attentionId。若编号不一致，旧回执不得清除新问题。语义含糊则只追问缺少的信息。
+若原问题已经有明确答复，根据原话调用 resolve（批准或拒绝）、accept（验收通过）、rework（退回）、complete（用户明确结束）、drop（放弃），或在确有新事实时 progress / wait / remind。结束或决定命令的 --note 必须使用 sceneReply.quote 原文；普通问题处理不能冒充成果验收。当前 CLI 自动绑定本回执编号，拒绝迟到或被替换的回执。单纯补充进展不能关闭旧决定；请明确解决对应事项。核对完成后结束本回合，不轮询等待。` : ""}
 请用 crewvane goal show ${goalId} --json 读取当前案卷，并用 crewvane status --json 查看 Agent 默认偏好与当前关联项目。若目标尚未登记负责人现场，根据 description 中的完整原文整理标题、背景、完成标准与下一步；没有充分依据则保留个人事项，不猜测范围。整理后交给本目标独立负责人；退回修改转交原负责人；交付齐备则向人交接。若本次是 feedback，先读取新增的人发消息，再按原话协调负责人；自由回复不会自动改状态，只有明确语义才可执行当前案卷的 progress、wait、accept、complete、rework、drop、resolve 或 remind，并在结束或决定命令中保留用户原话。若人已经验收或放弃，请通知负责人停止该目标的工作，不再派发。`,
     );
   }
@@ -434,6 +432,25 @@ ${JSON.stringify({ id: goal.id, title: goal.title, projectId: goal.projectId, ne
   }
   async refreshConcierge(reference: HerdrReference, root: string, preferences?: AgentPreferences) {
     await this.prompt(reference, conciergeInstructions(root, preferences, this.session), true);
+  }
+  async requestSceneReply(goal: Goal): Promise<boolean> {
+    const reference = goal.herdr, question = attentionRequest(goal);
+    if (!reference?.agent || reference.session !== this.session ||
+      reference.transport === "pane" || !question) return false;
+    const listed = agents(await this.runner.run(["agent", "list"]));
+    const entry = listed.find(candidate =>
+      (candidate.name ?? candidate.agent) === reference.agent &&
+      candidate.pane_id === reference.paneId);
+    const state = entry?.agent_status ?? entry?.state ?? entry?.status ?? entry?.lifecycle;
+    if (!entry || !["idle", "done"].includes(state)) return false;
+    await this.prompt(reference, `[CREWVANE_SCENE_CHECK]
+这是系统协议核对，不是用户的新回复，不是继续执行的授权。
+当前目标 ${goal.id}，待处理事项 ${question.id}：${question.summary}
+用户曾打开本目标现场，随后观察到一次工作回合结束。这个事实不证明用户已经回答问题。
+请只核对你自己会话中最近的真实用户交互：若已明确回答当前事项且尚未写回，保存原话和结果；若没有、含糊或无法确认，保留待处理并立即结束，不凭空生成回执。不要重复提问，不做额外业务工作。
+${ownerSceneReplyInstructions(goal.id)}
+[/CREWVANE_SCENE_CHECK]`, true, 120_000);
+    return true;
   }
   async open(reference: HerdrReference) {
     if (reference.tabId)

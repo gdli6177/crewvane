@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { ownerSceneReplyInstructions } from "./owner-instructions.js";
 import {
   parseAgentCommand,
   WorkspaceService,
@@ -85,7 +86,7 @@ function automaticTask(goal: {
     `目标 ID：${goal.id}`,
     `完整目标原文：\n${goal.description}`,
     goal.next.trim() ? `当前下一步：\n${goal.next}` : "",
-    "请直接执行目标要求的实际工作。完成后必须运行真实检查，并用 crewvane goal review 提交成果摘要、成果位置、实际检查命令或操作及观察到的结果；不要只声称完成。",
+    `实际执行由你完成；咨询用 crewvane goal progress ${goal.id} --summary "<具体答案>" 写回，等待用 crewvane goal wait ${goal.id} --reason "<实际等待>"，需要人选择用 crewvane goal decide ${goal.id} --question "<具体问题>" 提出问题并结束本回合。只有有实际可验收成果时才运行真实检查并用 crewvane goal review 提交成果摘要、位置与检查记录；不要为等待或咨询伪造交付。`,
   ].filter(Boolean).join("\n\n");
 }
 
@@ -153,7 +154,7 @@ export async function launchOwner(
     throw new Error("目标关联项目不是有效目录");
 
   const run = options.run ?? createRunner(environment);
-  const task = await resolveTask(service, goal, input);
+  const task = `${await resolveTask(service, goal, input)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
   const configured =
     state.agents?.owner?.trim() ||
     state.agents?.concierge?.trim() ||
@@ -214,17 +215,18 @@ export async function launchOwner(
     const ownerEnvironment = [
       "unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE",
       `export CREWVANE_ROLE=owner CREWVANE_AGENT_NAME=${quoteShell(input.name)}`,
-      `CREWVANE_WORKSPACE=${quoteShell(await realpath(service.root))}`,
-      `CREWVANE_HERDR_BINARY=${quoteShell(
+      `export CREWVANE_GOAL_ID=${quoteShell(goal.id)}`,
+      `export CREWVANE_WORKSPACE=${quoteShell(await realpath(service.root))}`,
+      `export CREWVANE_HERDR_BINARY=${quoteShell(
         environment.CREWVANE_HERDR_BINARY?.trim() ||
         environment.HERDR_BIN_PATH?.trim() ||
         "herdr",
       )}`,
-      `HERDR_ENV=1 HERDR_SESSION=${quoteShell(session)}`,
-      `HERDR_WORKSPACE_ID=${quoteShell(workspaceId)}`,
-      `HERDR_TAB_ID=${quoteShell(tabId)}`,
-      `HERDR_PANE_ID=${quoteShell(paneId)}`,
-      `PATH=${quoteShell(path)}:"$PATH"`,
+      `export HERDR_ENV=1 HERDR_SESSION=${quoteShell(session)}`,
+      `export HERDR_WORKSPACE_ID=${quoteShell(workspaceId)}`,
+      `export HERDR_TAB_ID=${quoteShell(tabId)}`,
+      `export HERDR_PANE_ID=${quoteShell(paneId)}`,
+      `export PATH=${quoteShell(path)}:"$PATH"`,
       "printf '\\n__CREWVANE_OWNER_ENV_READY__\\n'",
     ].join("; ");
     await run(["pane", "run", paneId, ownerEnvironment]);

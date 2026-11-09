@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   WorkspaceService,
   type Goal,
@@ -110,6 +112,11 @@ test("launches the configured agent with an isolated owner environment", async (
     new RegExp(`CREWVANE_WORKSPACE='${await realpath(root)}'`),
   );
   assert.match(environmentCall[3]!, /CREWVANE_AGENT_NAME='case-owner'/);
+  const exported = await promisify(execFile)("/bin/sh", ["-c", `${environmentCall[3]}; /usr/bin/env`],
+    { env: { PATH: "/usr/bin:/bin", CREWVANE_COORDINATOR: "1", CREWVANE_COORDINATOR_SCOPE_FILE: "old-scope" } });
+  assert.match(exported.stdout, new RegExp(`CREWVANE_GOAL_ID=${goal.id}`));
+  assert.match(exported.stdout, new RegExp(`CREWVANE_WORKSPACE=${await realpath(root)}`));
+  assert.doesNotMatch(exported.stdout, /CREWVANE_COORDINATOR=/);
   const start = mock.calls.find(
     (args) =>
       args[0] === "agent" &&
@@ -128,6 +135,8 @@ test("launches the configured agent with an isolated owner environment", async (
   assert.ok(prompt);
   assert.match(prompt[3]!, /隔离负责人/);
   assert.match(prompt[3]!, /完整目标原文/);
+  assert.match(prompt[3]!, /goal scene-reply/);
+  assert.match(prompt[3]!, /不等于批准、验收或目标完成/);
   assert.deepEqual(prompt.slice(-3), ["--wait", "--until", "working"]);
 
   const state = await service.read();
@@ -181,7 +190,9 @@ test("launches a custom interactive CLI and records its real foreground process"
   );
   assert.equal(launches.length, 3);
   assert.match(launches[1]![3]!, /My Agent/);
-  assert.deepEqual(launches.at(-1)!.slice(2), ["w7:p3", "执行自定义任务"]);
+  assert.equal(launches.at(-1)![2], "w7:p3");
+  assert.match(launches.at(-1)![3]!, /^执行自定义任务\n/);
+  assert.match(launches.at(-1)![3]!, /goal scene-reply/);
   const state = await service.read();
   assert.equal(state.goals[0]?.herdr?.transport, "pane");
   assert.equal(state.goals[0]?.herdr?.processId, 42);

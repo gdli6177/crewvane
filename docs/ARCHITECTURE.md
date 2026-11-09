@@ -41,6 +41,8 @@ Crewvane 不运行模型，不扫描或适配 Agent 协议，不管理模型凭�
 
 `done` 只是 Agent 空闲，Crewvane 只有在交付检查记录通过且人验收后才把目标设为完成。
 
+负责人现场答复通过 `goal.scene-reply` 保存原话和实际结果，再由唯一管家提交状态命令。注意力与回执分别具有独立编号；管家 scope 绑定二者并在状态事务内校验，防止迟到回复清除新问题。现场访问和工作回合仅触发空闲时的一次协议补核对，不构成审批事实；失败保持事项和重试入口。细节见 [人工交互同步](product/herdr-interaction-sync.md)。
+
 ### 场景优先导航
 
 注意力中的真实现场介入与有真实引用的普通活动目标直接打开 Herdr；决定、验收、到期跟进与派发失败使用轻量动作卡。已完成和已放弃目标只打开历史记录。完整记录继续承担附件、消息历史和目标管理，现场条仅展示结构化目标事实并提供回到注意力的入口。
@@ -65,7 +67,7 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind 和 session；`goal list`、attention、ask、message 和跨目标读写会被拒绝。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
-首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、写入负责人署名与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
+首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
 
 ## 上线策略与决定账本
 

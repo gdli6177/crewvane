@@ -1,4 +1,4 @@
-import type { AttentionKind, Goal, ProjectPolicy, WorkspaceRecovery, WorkspaceState } from "./types.js";
+import type { Attention, AttentionKind, Goal, ProjectPolicy, WorkspaceRecovery, WorkspaceState } from "./types.js";
 export const newId = (prefix: string) => `${prefix}_${globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 export const defaultProjectPolicy = (): ProjectPolicy => ({
   shipPolicy: "external-approval",
@@ -22,4 +22,22 @@ export function attentionGoals(goals: Goal[], now = Date.now()): Goal[] {
 export function attentionKind(goal: Goal, now = Date.now()): AttentionKind | undefined {
   if (goal.attention) return goal.attention.kind;
   return goal.status === "waiting" && goal.remindAt && Date.parse(goal.remindAt) <= now ? "follow_up" : undefined;
+}
+export function attentionRequest(goal: Goal, now = Date.now()): (Attention & { id: string }) | undefined {
+  if (["completed", "dropped"].includes(goal.status)) return undefined;
+  if (goal.attention) return {
+    ...goal.attention,
+    // Stable identity for pre-existing questions; a newly raised question
+    // always gets its own random ID, even within the same millisecond.
+    id: goal.attention.id ?? `legacy_${goal.id}_${Date.parse(goal.attention.since)}`,
+  };
+  if (attentionKind(goal, now) === "follow_up") return {
+    id: `reminder_${goal.id}_${Date.parse(goal.remindAt!)}`,
+    kind: "follow_up", summary: goal.next, since: goal.remindAt!,
+  };
+}
+export function pendingSceneReply(goal: Goal) {
+  return goal.mode === "concierge" && goal.sceneReply?.attentionId === attentionRequest(goal)?.id
+    ? goal.sceneReply
+    : undefined;
 }

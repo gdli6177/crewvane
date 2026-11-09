@@ -4,11 +4,13 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 const marker = ".crewvane-managed.json";
 const managedBy = "crewvane";
@@ -65,6 +67,19 @@ async function managedVersion(path: string) {
     return undefined;
   }
 }
+async function sourceDigest(directory: string): Promise<string> {
+  const hash = createHash("sha256");
+  async function visit(relative: string) {
+    for (const entry of (await readdir(join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === marker) continue;
+      const path = join(relative, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) hash.update(path).update("\0").update(await readFile(join(directory, path))).update("\0");
+    }
+  }
+  await visit("");
+  return hash.digest("hex");
+}
 
 export class CrewvaneSkillInstaller {
   constructor(
@@ -79,17 +94,19 @@ export class CrewvaneSkillInstaller {
 
   async status(): Promise<SkillsStatus> {
     const targets: SkillTargetStatus[] = [];
+    const digest = await sourceDigest(this.sourceDirectory);
     for (const target of targetDefinitions) {
       const detected = target.always || await exists(join(this.homeDirectory, target.parent));
       if (!detected) continue;
       const path = this.targetPath(target.parent);
       const present = await exists(path);
       const storedVersion = present ? await managedVersion(path) : undefined;
+      const storedDigest = present ? await readFile(join(path, marker), "utf8").then(text => JSON.parse(text).sourceDigest).catch(() => undefined) : undefined;
       const phase: SkillTargetPhase = !present
         ? "not-installed"
         : storedVersion === undefined
           ? "conflict"
-          : storedVersion === this.version ? "installed" : "outdated";
+          : storedVersion === this.version && storedDigest === digest ? "installed" : "outdated";
       targets.push({
         id: target.id,
         label: target.label,
@@ -143,6 +160,7 @@ export class CrewvaneSkillInstaller {
         `${JSON.stringify({
           managedBy,
           version: this.version,
+          sourceDigest: await sourceDigest(this.sourceDirectory),
           installedAt: new Date().toISOString(),
         }, null, 2)}\n`,
         { mode: 0o600 },

@@ -573,6 +573,37 @@ try {
   assert.match(ledger, /只允许只读权限/);
   assert.match(ledger, /change-permissions/);
   await page.locator(".goal-attention-modal").waitFor({ state: "detached" });
+  // A persisted scene reply refreshes the UI without pretending it resolved
+  // the decision. The separate concierge state command closes the old card.
+  const sceneAnswer = await service.execute({ type: "goal.direct", text: "现场答复同步回归" });
+  await service.execute({ type: "session.set", goalId: sceneAnswer.id,
+    reference: { session: "cv-ui-scene", agent: "scene-owner", paneId: "w1:p9", tabId: "w1:t9" } });
+  const sceneQuestion = await service.execute({
+    type: "goal.decide", goalId: sceneAnswer.id, question: "先做核心范围？",
+  });
+  const sceneReceipt = await service.execute({
+    type: "goal.scene-reply", goalId: sceneAnswer.id, attentionId: sceneQuestion.attention.id,
+    quote: "先做核心范围，其他内容稍后再做。", summary: "已确认本轮范围，等管家记录后继续。", actor: "scene-owner",
+  });
+  await page.locator(".attention-card").filter({ hasText: "现场答复同步回归" }).click();
+  await page.getByRole("region", { name: "现场答复同步" }).getByText("先做核心范围，其他内容稍后再做。", { exact: true }).waitFor();
+  assert.equal((await service.read()).goals.find(item => item.id === sceneAnswer.id).attention.id, sceneQuestion.attention.id);
+  await page.waitForFunction(() => {
+    const card = document.querySelector(".goal-attention-modal");
+    return card && getComputedStyle(card).opacity === "1" &&
+      card.getAnimations().every(animation => animation.playState === "finished");
+  });
+  await page.screenshot({ path: join(home, "scene-reply-pending-light.png") });
+  assert.equal(await page.getByLabel("你的决定", { exact: true }).count(), 0,
+    "a saved scene answer should not ask the human to submit it again");
+  await page.getByRole("button", { name: "直接处理", exact: true }).click();
+  await page.getByLabel("你的决定", { exact: true }).waitFor();
+  await service.execute({ type: "goal.resolve", goalId: sceneAnswer.id,
+    attentionId: sceneReceipt.sceneReply.attentionId, sceneReplyId: sceneReceipt.sceneReply.id,
+    note: sceneReceipt.sceneReply.quote, actor: "concierge", outcome: "approved" });
+  await page.locator(".goal-attention-modal").waitFor({ state: "detached" });
+  // Stop the artificial transport fixture from entering a real runtime.
+  await service.execute({ type: "goal.takeover", goalId: sceneAnswer.id });
   await page.screenshot({ path: join(home, "home-light.png") });
   // A personal item must be manageable without asking an Agent or using CLI.
   await page.locator(".top-actions").getByRole("button", { name: "新目标" }).click();

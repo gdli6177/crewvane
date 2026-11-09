@@ -100,3 +100,21 @@ test("install status remains readable before the skills folder exists", async ()
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("protocol changes update managed skills even when the app version is unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crewvane-skill-protocol-"));
+  try {
+    const source = join(root, "source"), home = join(root, "home");
+    await mkdir(join(source, "references"), { recursive: true });
+    await writeFile(join(source, "SKILL.md"), "# Crewvane\n");
+    await writeFile(join(source, "references/cli-protocol.md"), "# Previous protocol\n");
+    const installer = new CrewvaneSkillInstaller(source, home, "0.6.4");
+    await installer.install();
+    assert.equal((await installer.status()).targets[0]!.phase, "installed");
+    await writeFile(join(source, "references/cli-protocol.md"), "# Scene receipts\n");
+    assert.equal((await installer.status()).targets[0]!.phase, "outdated");
+    await installer.install();
+    assert.match(await readFile(join(home, ".agents/skills/crewvane/references/cli-protocol.md"), "utf8"), /Scene receipts/);
+    assert.equal((await installer.status()).targets[0]!.phase, "installed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

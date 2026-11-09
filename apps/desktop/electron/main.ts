@@ -28,6 +28,7 @@ import { Executables } from "./executables.js";
 import { HerdrInstallation, type HerdrStatus } from "./herdr-install.js";
 import { HerdrPlugin } from "./herdr-plugin.js";
 import { deliverGoalUpdate } from "./goal-delivery.js";
+import { reconcileSceneReply } from "./scene-reconciliation.js";
 import { CoordinatorQueue } from "./coordinator-queue.js";
 import { WebhookNotifier, type WebhookSaveInput } from "./webhook-notifications.js";
 import { CrewvaneSkillInstaller } from "./skill-installer.js";
@@ -207,9 +208,11 @@ function coordinate<T>(target: WorkspaceService, task: () => Promise<T>): Promis
 function coordinatorScope(target: WorkspaceService) {
   return join(target.root, ".crewvane", "coordinator-scope.json");
 }
-async function setCoordinatorScope(target: WorkspaceService, goalId: string, requestId?: string) {
+async function setCoordinatorScope(target: WorkspaceService, goalId: string, requestId?: string,
+  sceneReply?: import("../../../packages/core/src/index.js").SceneReply) {
   await writeFile(coordinatorScope(target), `${JSON.stringify({
     goalId, requestId, setAt: new Date().toISOString(),
+    ...(sceneReply ? { attentionId: sceneReply.attentionId, sceneReplyId: sceneReply.id } : {}),
   }, null, 2)}\n`, { mode: 0o600 });
 }
 async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<void> {
@@ -226,7 +229,8 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
         if (!status.executable) throw new Error("Herdr 尚未准备好");
         const herdrExecutable = status.executable;
         const messenger = client(herdrExecutable, target.root);
-        await setCoordinatorScope(target, item.id, item.dispatch?.id);
+        await setCoordinatorScope(target, item.id, item.dispatch?.id,
+          item.dispatch?.kind === "scene_reply" ? item.sceneReply : undefined);
         if (item.dispatch?.kind === "follow_up")
           await messenger.notifyFollowUp(reference, item.id, item.dispatch.note || "", item, target.root);
         else await messenger.notifyGoal(reference, item.id, item.title, item, target.root);
@@ -341,6 +345,9 @@ async function openHerdr(reference?: HerdrReference, goalId?: string) {
   await connection.ensureSession();
   if (reference?.tabId || reference?.agent) await connection.open(reference);
   else await connection.ensureWorkspace();
+  if (goalId && reference?.agent && reference.agent !== "concierge") {
+    await target.execute({ type: "scene.visit", goalId });
+  }
   await terminals.attach(status.executable, session, target.root);
   if (root === target.root) window.webContents.send("crewvane:event", {
     type: "terminal-open", session, title: reference?.agent === "concierge" ? "全局管家" : "工作现场", goalId,
@@ -524,7 +531,8 @@ async function synchronize() {
       !["completed", "dropped"].includes(goal.status))) {
       void dispatchGoal(target, goal.id).catch(() => {});
     }
-    const tracked = state.goals.filter(goal => goal.status === "active" && (goal.herdr?.agent || goal.herdr?.transport === "pane"));
+    const tracked = state.goals.filter(goal => !["completed", "dropped"].includes(goal.status) &&
+      (goal.herdr?.agent || goal.herdr?.transport === "pane"));
     if (status.executable && tracked.length) {
       try {
         const all = await client(status.executable, workspace).presences(tracked);
@@ -539,6 +547,12 @@ async function synchronize() {
           .map(goal => [goal.id, { state: "unknown" as const, reachable: false, checkedAt: new Date().toISOString() }]));
         if (Object.keys(presences).length) await target.execute({ type: "live.sync", presences });
       }
+    }
+    if (status.executable) {
+      const connection = client(status.executable, workspace);
+      // This runs outside the coordinator queue: it talks only to the owner.
+      for (const item of (await target.read()).goals.filter(goal => goal.sceneVisit?.status === "pending"))
+        void reconcileSceneReply(target, item.id, connection).catch(() => {});
     }
     const requests = (await target.execute({ type: "watchdog.inspect", at: new Date().toISOString() }) as WatchdogRequest[]).slice(0, 10);
     state = await target.read();
@@ -665,6 +679,10 @@ app.whenReady().then(async () => {
         await closeEndedGoalSession(target, item.id);
     }
     const result = await target.execute(command);
+    if (command.type === "scene.visit" && command.retry) {
+      const status = await herdrStatus();
+      if (status.executable) void reconcileSceneReply(target, command.goalId, client(status.executable, target.root)).catch(() => {});
+    }
     if (command.type === "goal.intake" || command.type === "goal.message" || (command.type === "goal.create" && command.input.mode === "concierge") ||
       command.type === "goal.followup" || command.type === "goal.delegate" || (command.type === "goal.resume" && command.mode === "concierge") ||
       command.type === "goal.resolve" ||

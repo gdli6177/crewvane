@@ -1,4 +1,4 @@
-import { attentionKind } from "../../../../../packages/core/src/model.js";
+import { attentionKind, attentionRequest, pendingSceneReply } from "../../../../../packages/core/src/model.js";
 import type {
   Activity,
   Goal,
@@ -83,6 +83,39 @@ export interface GoalPresentation {
   needsIntervention: boolean;
   dispatchFailed: boolean;
   dueFollowUp: boolean;
+  sceneSync?: ReturnType<typeof sceneSyncPresentation>;
+}
+export function sceneSyncPresentation(goal: Goal) {
+  if (goal.mode !== "concierge" || ["completed", "dropped"].includes(goal.status)) return undefined;
+  const reply = pendingSceneReply(goal);
+  const delivered = goal.dispatch?.kind === "scene_reply" && goal.dispatch.status === "sent";
+  if (reply) return {
+    label: goal.dispatch?.status === "failed" ? "现场答复同步失败"
+      : delivered ? "答复已送达，事项尚未解决" : "现场已答复，管家核对中",
+    detail: goal.dispatch?.status === "failed"
+      ? goal.dispatch.detail || "答复已保存，恢复管家连接后可以重试。"
+      : delivered ? "管家已收到你的原话；当前问题尚未明确解决，可以继续在现场沟通或补充说明。"
+      : "你的原话已保存；管家正在核对这条事项，无需重复答复。",
+    quote: reply.quote,
+    summary: reply.summary,
+    retry: goal.dispatch?.status === "failed" ? "dispatch" as const : undefined,
+  };
+  const visit = goal.sceneVisit;
+  if (!visit || visit.attentionId !== attentionRequest(goal)?.id ||
+    visit.status === "watching") return undefined;
+  const expired = visit.status === "checking" &&
+    Date.now() - Date.parse(visit.attemptedAt || visit.at) >= 150_000;
+  const checking = visit.status === "pending" || visit.status === "checking" && !expired;
+  return {
+    label: checking ? "正在核对现场" : "现场尚未确认处理结果",
+    detail: checking
+      ? "负责人正在核对最近的真实交互；原事项在确认前仍会保留。"
+      : expired ? "上次现场核对中断或超时；原事项仍保留，可以重试同步。"
+      : visit.detail || "尚未收到明确答复的回执，原事项仍待处理。可以继续在现场沟通或重试同步。",
+    quote: undefined,
+    summary: undefined,
+    retry: checking ? undefined : "scene" as const,
+  };
 }
 
 export interface GoalSceneContext {
@@ -100,7 +133,7 @@ export function presentSceneContext(goal: Goal, state: WorkspaceState): GoalScen
     title: goal.title,
     projectName: view.projectName,
     label: view.label,
-    currentAction: goal.attention?.summary || goal.next || view.brief,
+    currentAction: view.sceneSync?.detail || goal.attention?.summary || goal.next || view.brief,
   };
 }
 
@@ -111,6 +144,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const dispatchFailed = !ended && goal.attention?.source === "dispatch";
   const needsIntervention = !ended && kind === "intervention" && !dispatchFailed;
   const dueFollowUp = !ended && goal.status === "waiting" && kind === "follow_up";
+  const sceneSync = !ended ? sceneSyncPresentation(goal) : undefined;
   const latest = [...goal.activities]
     .reverse()
     .find((activity) => contentKinds.has(activity.kind));
@@ -194,6 +228,11 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     detail = "这个目标由你推进：补充进展、提交成果，需要协作时可以交回管家。";
     brief = goal.next;
   }
+  if (sceneSync) {
+    label = sceneSync.label;
+    detail = sceneSync.detail;
+    brief = sceneSync.summary || brief;
+  }
 
   return {
     tone,
@@ -215,6 +254,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     needsIntervention,
     dispatchFailed,
     dueFollowUp,
+    sceneSync,
   };
 }
 

@@ -387,6 +387,7 @@ h1 em { color: var(--accent); font-style: normal; }
 .goal-handoff strong { font-size: var(--fs-caption); font-weight: 650; }
 .goal-handoff small { color: var(--muted); font-size: var(--fs-caption); }
 .goal-handoff > p { margin: 12px 0 0; color: var(--secondary); font-size: var(--fs-body); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.goal-handoff > blockquote { margin: 12px 0; padding: 8px 14px; border-left: 2px solid var(--accent); color: var(--text); font-size: var(--fs-body); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .context-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 .context-attachments button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--secondary); background: var(--surface); font-size: var(--fs-caption); }
 .context-attachments button:hover { border-color: var(--accent); color: var(--accent); }

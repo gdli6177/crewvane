@@ -12,6 +12,7 @@ import {
   goalSystemActivities,
   presentGoal,
 } from "../src/features/goals/goalPresentation.ts";
+import { pendingSceneReply } from "../../../packages/core/src/model.ts";
 
 async function fixture() {
   return mkdtemp(join(tmpdir(), "crewvane-goal-presentation-"));
@@ -183,4 +184,26 @@ test("decision context uses the latest agent handoff while keeping transport eve
         Date.parse(conversation[index - 1]!.at) >= Date.parse(activity.at),
     ),
   );
+});
+
+test("scene receipts show synchronization separately from the unanswered decision and offer retry on failure", async () => {
+  const service = new WorkspaceService(await fixture());
+  const item = await service.execute({ type: "goal.intake", text: "现场答复显示" }) as Goal;
+  await service.execute({ type: "session.set", goalId: item.id,
+    reference: { session: "cv-test", agent: "owner-a", paneId: "w1:p2" } });
+  const request = await service.execute({ type: "goal.decide", goalId: item.id, question: "先做核心范围？" }) as Goal;
+  await service.execute({ type: "goal.scene-reply", goalId: item.id, attentionId: request.attention!.id!,
+    quote: "先做核心范围。", summary: "已确认范围，等管家记录决定。", actor: "owner-a" });
+  let state = await service.read(), current = state.goals[0]!;
+  assert.equal(presentGoal(current, state).label, "现场已答复，管家核对中");
+  await service.execute({ type: "goal.dispatch", goalId: item.id, requestId: current.dispatch!.id,
+    status: "failed", detail: "管家暂时离线" });
+  state = await service.read(); current = state.goals[0]!;
+  const view = presentGoal(current, state);
+  assert.equal(view.needsDecision, true);
+  assert.equal(view.sceneSync?.quote, "先做核心范围。");
+  assert.equal(view.sceneSync?.retry, "dispatch");
+  assert.equal(view.label, "现场答复同步失败");
+  await service.execute({ type: "goal.takeover", goalId: item.id });
+  assert.equal(pendingSceneReply((await service.read()).goals[0]!), undefined);
 });

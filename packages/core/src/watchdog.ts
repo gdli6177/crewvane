@@ -41,6 +41,7 @@ export function inspectWatchdog(goals: Goal[], at: string): WatchdogRequest[] {
     if (watch.contactedAt && now - Date.parse(watch.contactedAt) >= ESCALATE_AFTER && !watch.escalatedAt) {
       watch.escalatedAt = at;
       if (!goal.attention) goal.attention = {
+        id: newId("attention"),
         kind: "intervention", source: "watchdog", since: at,
         summary: reason === "unassigned" ? "巡检已请管家分配负责人，但 10 分钟仍没有独立执行现场，请查看管家。" :
           "巡检已请管家处理，但 10 分钟仍未收到恢复进展，请查看现场。",
@@ -66,6 +67,7 @@ export function reportWatchdog(goal: Goal, at: string, basis: string, outcome: "
   } else {
     watch.lastError = detail || "管家暂时不可达";
     if (!goal.attention) goal.attention = {
+      id: newId("attention"),
       kind: "intervention", source: "watchdog", since: at,
       summary: `巡检未能联系管家：${watch.lastError}。请重新连接管家。`,
     };

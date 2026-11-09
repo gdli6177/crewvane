@@ -56,6 +56,32 @@ test("real CLI writes goals that desktop service can read", async () => {
   assert.equal((await call(root, ["goal", "accept", item.id])).json.status, "completed");
   assert.equal((await call(root, ["goal", "show", item.id])).json.activities.length, 7);
 });
+test("real owner CLI receipts and concierge scope bind resolution to the latest human answer", async () => {
+  const root = await fixture("crewvane-cli-scene-");
+  const service = new WorkspaceService(root);
+  const goal = (await call(root, ["ask", "现场决定"])).json as Goal;
+  await call(root, ["session", "set", goal.id, "--agent", "owner-a", "--pane", "w1:p2"]);
+  await call(root, ["goal", "decide", goal.id, "--question", "先做核心范围吗？"]);
+  const question = (await call(root, ["goal", "show", goal.id])).json.attentionRequest;
+  const receipt = await call(root, ["goal", "scene-reply", goal.id, "--actor", "owner-a",
+    "--attention-id", question.id, "--quote", "先做核心范围。", "--summary", "已确认范围，待管家记录决定。"]);
+  assert.equal(receipt.code, 0, receipt.stderr);
+  const first = receipt.json.sceneReply;
+  await coordinator(root, goal.id, async () => {
+    const scope = join(root, ".crewvane/coordinator-scope.json");
+    await writeFile(scope, JSON.stringify({ goalId: goal.id, attentionId: question.id, sceneReplyId: first.id }));
+    const fabricated = await call(root, ["goal", "resolve", goal.id, "--note", "Agent 自己决定"]);
+    assert.equal(fabricated.code, 1);
+    assert.match(fabricated.stderr, /必须记录用户原话/);
+    const resolved = await call(root, ["goal", "resolve", goal.id, "--note", first.quote, "--outcome", "approved"]);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    await service.execute({ type: "goal.decide", goalId: goal.id, question: "可以删除旧数据吗？" });
+    const late = await call(root, ["goal", "resolve", goal.id, "--note", first.quote]);
+    assert.equal(late.code, 1);
+    assert.match(late.stderr, /待处理事项已经变化/);
+  });
+  assert.equal((await service.read()).decisions[0]!.source, "Herdr 负责人现场");
+});
 test("CLI reports an automatically protected legacy workspace", async () => {
   const root = await fixture("crewvane-cli-recovery-");
   await mkdir(join(root, ".crewvane"), { recursive: true });

@@ -15,7 +15,8 @@ import {
   riskCategoryForText,
   riskSummary,
 } from "./governance.js";
-import { defaultProjectPolicy } from "./model.js";
+import { attentionRequest, defaultProjectPolicy, pendingSceneReply } from "./model.js";
+import { observeSceneWork } from "./scene.js";
 import { inspectWatchdog, reportWatchdog } from "./watchdog.js";
 export const nowIso = () => new Date().toISOString();
 function text(value: unknown, label: string, limit = 20_000): string {
@@ -185,6 +186,20 @@ export class WorkspaceService {
         });
         stamp(item);
       };
+      if ("goalId" in command && command.goalId && command.type !== "goal.scene-reply") {
+        const item = goal(command.goalId);
+        if (command.attentionId && command.attentionId !== attentionRequest(item)?.id)
+          throw new Error("待处理事项已经变化；请重新读取当前目标，不能用旧回复处理新问题");
+        if (command.sceneReplyId && command.sceneReplyId !== item.sceneReply?.id)
+          throw new Error("现场回复已经更新；请重新读取用户最新原话");
+        if (command.sceneReplyId) {
+          if (!command.attentionId || command.attentionId !== item.sceneReply?.attentionId)
+            throw new Error("现场回执必须绑定对应的待处理事项");
+          if (["goal.accept", "goal.complete", "goal.drop", "goal.resolve", "goal.rework"].includes(command.type) &&
+            (!("note" in command) || command.note?.trim() !== item.sceneReply.quote))
+            throw new Error("处理现场回执时必须记录用户原话，不能替换成 Agent 自己的结论");
+        }
+      }
       switch (command.type) {
         case "workspace.rename":
           state.name = text(command.name, "工作区名称", 80);
@@ -345,6 +360,7 @@ export class WorkspaceService {
             const item = goal(command.goalId);
             if (["completed", "dropped"].includes(item.status))
               throw new Error("目标已结束，不能再追加终端消息");
+            delete item.sceneReply;
             const combined = await validateGoalAttachments(this.root, [
               ...(item.attachments ?? []),
               ...incomingAttachments,
@@ -385,6 +401,61 @@ export class WorkspaceService {
           state.goals.push(item);
           return item;
         }
+        case "scene.visit": {
+          const item = goal(command.goalId), request = attentionRequest(item);
+          if (!request || item.mode !== "concierge" || !item.herdr?.agent ||
+            item.herdr.transport === "pane" || pendingSceneReply(item)) return item;
+          if (item.sceneVisit?.attentionId === request.id &&
+            (item.sceneVisit.status === "pending" ||
+              item.sceneVisit.status === "checking" &&
+              (!command.retry || Date.now() - Date.parse(item.sceneVisit.attemptedAt || item.sceneVisit.at) < 150_000))) return item;
+          item.sceneVisit = {
+            id: newId("visit"), attentionId: request.id, at: nowIso(),
+            worked: item.live?.state === "working",
+            status: command.retry ? "pending" : "watching",
+          };
+          return item;
+        }
+        case "scene.check": {
+          const item = goal(command.goalId), visit = item.sceneVisit;
+          if (!visit || visit.id !== command.visitId ||
+            visit.attentionId !== attentionRequest(item)?.id || pendingSceneReply(item) ||
+            item.mode !== "concierge" ||
+            (command.status === "checking" ? visit.status !== "pending" : visit.status !== "checking")) return false;
+          if (!["checking", "checked", "failed"].includes(command.status)) throw new Error("无效的现场核对状态");
+          visit.status = command.status;
+          if (command.status === "checking") visit.attemptedAt = nowIso();
+          if (command.detail) visit.detail = text(command.detail, "现场核对说明", 1000);
+          return true;
+        }
+        case "goal.scene-reply": {
+          const item = goal(command.goalId);
+          ongoing(item, true);
+          if (item.mode !== "concierge")
+            throw new Error("目标已由你接管，现场回执不能重新派发给管家");
+          const actor = text(command.actor, "现场负责人", 120);
+          if (actor !== item.herdr?.agent && actor !== state.concierge.agent)
+            throw new Error("只有本目标登记的负责人或管家可以提交现场回执");
+          const quote = text(command.quote, "用户在现场的原话", 4000);
+          const summary = substantiveAgentText(command.summary, "现场处理结果", 4000);
+          if (!command.attentionId || command.attentionId !== attentionRequest(item)?.id)
+            throw new Error("待处理事项已经变化；请重新读取当前目标，不能用旧回复处理新问题");
+          const previous = item.sceneReply;
+          if (previous?.attentionId === command.attentionId &&
+            previous.quote === quote && previous.summary === summary && previous.actor === actor)
+            return item;
+          const at = nowIso();
+          item.sceneReply = {
+            id: newId("reply"), attentionId: command.attentionId, quote, summary, actor, at,
+          };
+          activity(item, "message", quote, "你 · Herdr 现场");
+          activity(item, "message", summary, actor);
+          item.dispatch = {
+            id: newId("handoff"), kind: "scene_reply", status: "pending", at,
+            note: "用户已在负责人现场答复。请核对原话并关闭对应事项，不要要求用户重复处理。",
+          };
+          return item;
+        }
         case "goal.message": {
           const item = goal(command.goalId);
           if (["completed", "dropped"].includes(item.status))
@@ -415,6 +486,7 @@ export class WorkspaceService {
             };
           const at = nowIso(),
             actor = command.actor?.trim() ? text(command.actor, "操作者", 120) : "你";
+          if (actor.startsWith("你")) delete item.sceneReply;
           item.activities.push({
             id: newId("act"),
             at,
@@ -440,6 +512,8 @@ export class WorkspaceService {
           item.remindAt = undefined;
           if (item.attention?.source === "dispatch") item.attention = null;
           delete item.dispatch;
+          delete item.sceneVisit;
+          delete item.sceneReply;
           delete item.watchdog;
           delete item.live;
           activity(item, "session", "你已接管这个目标，不再向管家发送后续更新。", "你");
@@ -512,7 +586,8 @@ export class WorkspaceService {
             status: command.status, at, detail };
           if (command.status !== "failed" && item.attention?.source === "dispatch")
             item.attention = null;
-          if (command.status === "failed" && !item.attention) item.attention = {
+          if (command.status === "failed" && !attentionRequest(item)) item.attention = {
+            id: newId("attention"),
             kind: "intervention", source: "dispatch", summary: detail || "目标尚未送达管家，请重试。", since: at,
           };
           if (command.status === "sent" && item.attention?.source === "dispatch") item.attention = null;
@@ -603,6 +678,7 @@ export class WorkspaceService {
           }
           const riskCategory = riskCategoryForText(question);
           item.attention = {
+            id: newId("attention"),
             kind: "decision",
             summary: riskCategory ? riskSummary(riskCategory, question) : question,
             since: nowIso(),
@@ -634,6 +710,7 @@ export class WorkspaceService {
             return item;
           }
           item.attention = {
+            id: newId("attention"),
             kind: "decision",
             summary: riskSummary(command.category, summary),
             since: at,
@@ -672,6 +749,7 @@ export class WorkspaceService {
             (policy.shipPolicy === "auto-merge-manual-deploy" && command.operation === "deploy"));
           if (requiresHuman) {
             item.attention = {
+              id: newId("attention"),
               kind: "decision",
               summary: [
                 `上线策略 ${policy.shipPolicy} 要求你确认${command.operation === "merge" ? "合并" : "部署"}。`,
@@ -726,6 +804,7 @@ export class WorkspaceService {
             reviewLimit = item.reviewLimit ?? 3;
           if (reviewRounds >= reviewLimit) {
             item.attention = {
+              id: newId("attention"),
               kind: "intervention",
               summary: `审查已达到 ${reviewLimit} 轮上限，需要你决定是否增加一轮。`,
               since: at,
@@ -750,6 +829,7 @@ export class WorkspaceService {
           item.reviewRounds = reviewRounds + 1;
           item.reviewLimit = reviewLimit;
           item.attention = {
+            id: newId("attention"),
             kind: "review",
             summary: "成果已提交，等待你的验收。",
             since: at,
@@ -843,7 +923,9 @@ export class WorkspaceService {
               actionKey: text(decisionAttention!.decisionKey || decisionAttention!.summary, "决定键", 4000),
               outcome,
               quote: note,
-              source: command.source === "herdr"
+              source: command.sceneReplyId || command.source === "scene"
+                ? "Herdr 负责人现场"
+                : command.source === "herdr"
                 ? "Herdr 注意力面板"
                 : command.source === "cli" ? "Crewvane CLI" : "Crewvane 桌面",
               goalId: item.id,
@@ -869,6 +951,10 @@ export class WorkspaceService {
           }
           item.attention = null;
           item.remindAt = undefined;
+          if (command.sceneReplyId && item.mode === "concierge" && !isDecision)
+            item.dispatch = {
+              id: newId("handoff"), kind: "feedback", note, status: "pending", at,
+            };
           if (note && !isDecision) item.next = note;
           if (note) activity(item, "resolved", note, command.actor || "你");
           else stamp(item);
@@ -912,6 +998,7 @@ export class WorkspaceService {
               !["completed","dropped"].includes(other.status) && other.herdr && sameSite(other.herdr)))
               throw new Error("该现场属于其他目标，请为当前目标创建独立负责人 Tab");
             item.herdr = structuredClone(reference);
+            delete item.sceneVisit;
             delete item.live;
             if (item.mode === "concierge" && item.status === "active")
               item.owner = reference.agent || "独立负责人";
@@ -983,6 +1070,7 @@ export class WorkspaceService {
               checkedAt: iso(presence.checkedAt),
               ...(presence.reachable === undefined ? {} : { reachable: Boolean(presence.reachable) }),
             };
+            observeSceneWork(item, item.live);
             if (
               presence.state !== "blocked" &&
               item.attention?.source === "live"
@@ -1029,6 +1117,7 @@ export class WorkspaceService {
               checkedAt: iso(command.presence.checkedAt),
               ...(command.presence.reachable === undefined ? {} : { reachable: Boolean(command.presence.reachable) }),
             };
+            observeSceneWork(item, item.live);
             if (command.reference)
               item.herdr = { ...reference, ...structuredClone(command.reference) };
             if (command.presence.state !== "blocked" && item.attention?.source === "live")
@@ -1085,6 +1174,7 @@ export class WorkspaceService {
             item.attention.notifiedAt = iso(command.at);
           else if (kind === "follow_up")
             item.attention = {
+              id: attentionRequest(item)?.id ?? newId("attention"),
               kind,
               summary: item.next,
               since: iso(command.at),

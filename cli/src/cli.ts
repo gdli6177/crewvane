@@ -1,6 +1,7 @@
 import {
   WorkspaceService,
   attentionGoals,
+  attentionRequest,
   importAttachmentFiles,
   type CrewvaneCommand,
   type GoalAttachment,
@@ -25,6 +26,8 @@ const usage = `Crewvane — 把所有事整理成清晰的下一步
   crewvane goal list [--all] [--json]
   crewvane goal show ID [--json]
   crewvane goal message ID --text TEXT [--attachment PATH ...]
+  crewvane goal scene-reply ID --attention-id ID --quote "用户现场原话"
+    --summary "现场已如何处理" [--json]
 
 Agent 状态协议（仅在明确事实发生后使用）：
   crewvane event herdr [--json]
@@ -45,6 +48,7 @@ Agent 状态协议（仅在明确事实发生后使用）：
   crewvane goal resolve ID --note TEXT [--outcome approved|rejected]
   crewvane goal drop ID --reason TEXT
   crewvane goal remind ID --at ISO [--note TEXT]
+    状态命令可用 --attention-id ID --scene-reply-id ID 防止旧回执覆盖新问题
   crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
     [--transport pane --process-id PID]（自定义 CLI）
   crewvane owner launch ID --name NAME [--task TEXT | --task-file FILE]
@@ -97,7 +101,11 @@ async function coordinatorCaseId(allowMissing = false) {
   const value = JSON.parse(raw) as { goalId?: unknown };
   if (typeof value.goalId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.goalId))
     throw new Error("管家当前案卷范围无效，请重新准备管家");
-  return value.goalId;
+  const context = value as { goalId: string; attentionId?: string; sceneReplyId?: string };
+  for (const token of [context.attentionId, context.sceneReplyId])
+    if (token !== undefined && (typeof token !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(token)))
+      throw new Error("管家现场回执范围无效，请重新派发");
+  return context;
 }
 async function advanceCoordinatorCase(goal: { id: string; dispatch?: { id?: string } }) {
   const file = process.env.CREWVANE_COORDINATOR_SCOPE_FILE;
@@ -237,7 +245,8 @@ export async function run(argv: string[], io = { out: console.log, error: consol
     if (args.has("help") || !group) { io.out(usage); return 0; }
     const service = new WorkspaceService(args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd())),
       coordinatorMode = process.env.CREWVANE_COORDINATOR === "1",
-      coordinatorCase = await coordinatorCaseId(group === "direct" && args.has("new")),
+      coordinatorContext = await coordinatorCaseId(group === "direct" && args.has("new")),
+      coordinatorCase = coordinatorContext?.goalId,
       actor = args.one("actor") ?? (process.env.CREWVANE_AGENT_NAME?.trim() || undefined);
     if (group === "board" && !coordinatorCase) {
       await runBoard(service, io, { once: args.has("once"), startWithNewGoal: args.has("new") });
@@ -264,6 +273,7 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       } else if (group === "goal" && [
         "update", "progress", "wait", "decide", "risk", "ship",
         "accept", "complete", "rework", "drop", "resolve", "remind",
+        "scene-reply",
       ].includes(action ?? "")) {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "session" && action === "set") {
@@ -351,6 +361,13 @@ export async function run(argv: string[], io = { out: console.log, error: consol
           ...(attachments.length ? { attachments } : {}),
         };
       }
+      else if (group === "goal" && action === "scene-reply") command = {
+        type: "goal.scene-reply", goalId: target!,
+        attentionId: textArg(args.one("attention-id"), "--attention-id"),
+        quote: textArg(args.one("quote"), "--quote"),
+        summary: textArg(args.one("summary"), "--summary"),
+        actor: textArg(actor, "已登记的 Agent 身份"),
+      };
       else if (group === "goal" && action === "wait") command = { type: "goal.wait", goalId: target!, reason: args.one("reason")!, owner: args.one("owner"), remindAt: args.one("remind-at"), actor };
       else if (group === "goal" && action === "decide") command = { type: "goal.decide", goalId: target!, question: args.one("question")!, next: args.one("next"), actor, key: args.one("key") };
       else if (group === "goal" && action === "risk") command = {
@@ -405,12 +422,25 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         };
       else throw new Error(`不支持的命令：${args.positional.join(" ")}\n\n${usage}`);
     }
+    if (command && "goalId" in command && command.type !== "goal.scene-reply") {
+      const attentionId = args.one("attention-id") ?? coordinatorContext?.attentionId;
+      const sceneReplyId = args.one("scene-reply-id") ?? coordinatorContext?.sceneReplyId;
+      if (coordinatorContext?.attentionId && attentionId !== coordinatorContext.attentionId)
+        throw new Error("不能替换当前案卷绑定的待处理事项");
+      if (coordinatorContext?.sceneReplyId && sceneReplyId !== coordinatorContext.sceneReplyId)
+        throw new Error("不能替换当前案卷绑定的现场回执");
+      command = { ...command, ...(attentionId ? { attentionId } : {}), ...(sceneReplyId ? { sceneReplyId } : {}) };
+    }
     if (ownerLaunch) {
       if (!target) throw new Error("owner launch 必须指定当前目标 ID");
       result = await launchOwner(service, { goalId: target, ...ownerLaunch });
     } else if (command) result = await service.execute(command);
     if (coordinatorMode && group === "direct" && args.has("new") && command?.type === "goal.direct")
       await advanceCoordinatorCase(result as import("../../packages/core/src/index.js").Goal);
+    if (group === "goal" && action === "show") {
+      const goal = result as import("../../packages/core/src/index.js").Goal;
+      result = { ...goal, attentionRequest: attentionRequest(goal) };
+    }
     if (args.has("json")) io.out(JSON.stringify(result, null, 2));
     else if (group === "status" && coordinatorRead) {
       const current = result as { name: string; project?: { name?: string } };

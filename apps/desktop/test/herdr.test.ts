@@ -267,6 +267,24 @@ test("a stalled lifecycle probe does not duplicate a prompt that already reached
   assert.deepEqual(mock.calls[0]!.slice(0, 3), ["agent", "prompt", "concierge"]);
 });
 
+test("initial concierge identity delivery also tolerates a missed short lifecycle transition without resending", async () => {
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [] } }),
+    "workspace create": JSON.stringify({ result: {
+      workspace: { workspace_id: "w8" }, tab: { tab_id: "w8:t1" }, root_pane: { pane_id: "w8:p1" },
+    } }),
+    "pane run": "{}", "pane wait-output": "{}", "agent start": "{}",
+    "pane process-info": '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":42}]}}}',
+    "agent prompt": '!Herdr agent prompt：{"code":"agent_prompt_stalled","message":"short turn already settled"}',
+    "tab focus": "{}",
+  });
+  const reference = await new HerdrClient(mock.runner, "cv-test", "/tmp/workspace").prepareConcierge("/tmp/workspace");
+  assert.equal(reference.agent, "concierge");
+  assert.equal(reference.processId, 42);
+  assert.equal(mock.calls.filter(args => args[1] === "prompt").length, 1);
+  assert.equal(mock.calls.filter(args => args[1] === "start").length, 1);
+});
+
 test("surfaces a stopped server without inventing a session", async () => {
   const mock = fake({ "agent list": '!Herdr agent list：{"error":"server_not_running"}' });
   await assert.rejects(

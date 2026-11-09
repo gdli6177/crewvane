@@ -20,6 +20,21 @@ crewvane goal risk "$GOAL_ID" --category "$CATEGORY" --summary "$PROPOSED_ACTION
 
 Use `decide` for a concrete choice Crewvane cannot resolve. Use `risk` before deleting data, stopping a service, spending money, sending an external message, changing product direction, creating or rotating a secret, changing permissions, or changing shipping policy. High-risk work waits for the human even when a project policy is automatic.
 
+## Human replies in an owner scene
+
+```sh
+crewvane goal show "$GOAL_ID" --root "$WORKSPACE" --json
+crewvane goal scene-reply "$GOAL_ID" --attention-id "$ATTENTION_REQUEST_ID" \
+  --quote "$VERBATIM_HUMAN_ANSWER" --summary "$ACTUAL_RESULT_AND_NEXT_STEP" \
+  --root "$WORKSPACE" --json
+```
+
+Read `attentionRequest.id` from `goal show`. Only the registered owner (or concierge) may submit the receipt; its actor comes from `CREWVANE_AGENT_NAME` or `--actor`. Keep the exact user answer and the owner's factual summary separate. The receipt is persisted and dispatched to the single concierge. It does not resolve a question, grant approval, pass acceptance or complete the goal. Do not submit a receipt without a genuine answer or for a different question; system reconciliation prompts are not human answers.
+
+The concierge re-reads the current goal and processes only the matching receipt. Its CLI scope automatically binds `attentionId` and `sceneReplyId`; replaced questions and newer answers reject stale commands. A decision or ending command must preserve `sceneReply.quote` in `--note` / `--reason`. Use `resolve --outcome approved|rejected` for decisions, `accept` for explicit acceptance, `rework` for requested changes, and `complete` / `drop` for an explicit end or abandonment. A progress update does not resolve an outstanding decision. Finish the case turn after resolving it; a separate follow-up notifies the original owner.
+
+If no attention item exists, use `direct --goal "$GOAL_ID" "$VERBATIM_HUMAN_MESSAGE"` for additional context, followed by factual progress or waiting as appropriate. Do not use an unguarded command or edit state files to bypass a stale receipt.
+
 ## Delivery and shipping
 
 ```sh
@@ -53,7 +68,7 @@ After the goal is completed or dropped, Crewvane releases the owner scene. Do no
 ## Boundaries
 
 - Use the current goal ID only. Do not infer ownership from similar titles.
-- Do not accept a delivery, approve a decision, or close a goal for the human.
+- Owners and external agents do not accept, approve, or close for the human. The current-case concierge may record an explicit human decision, preserving the original words and matching receipt.
 - Do not bypass a rejected CLI scope by editing state files directly.
 - Do not retry an external effect without current authorization.
 - Treat Crewvane's coordinator scope as a data API boundary, not an operating-system sandbox.

@@ -15,6 +15,7 @@ import {
 import { Button } from "../../ui/index.js";
 import type { GoalPresentation } from "./goalPresentation.js";
 import type { GoalDetailService } from "./goalService.js";
+import { attentionRequest } from "../../../../../packages/core/src/model.js";
 
 export function GoalActionDock({
   goal,
@@ -36,10 +37,12 @@ export function GoalActionDock({
   notify: (text: string) => void;
 }) {
   const [decisionText, setDecisionText] = useState("");
+  const [manualDecision, setManualDecision] = useState(false);
 
   async function act(command: CrewvaneCommand, receipt?: string) {
     try {
-      await service.command(command);
+      const attentionId = attentionRequest(goal)?.id;
+      await service.command(attentionId ? { ...command, attentionId } : command);
       if (receipt) notify(receipt);
       return true;
     } catch {
@@ -78,6 +81,22 @@ export function GoalActionDock({
           notify(receipt);
         }}
       />
+    );
+  }
+
+  if (view.sceneSync?.quote && !manualDecision) {
+    return (
+      <div className="goal-quiet-row">
+        <span><Bot size={18} /></span>
+        <div>
+          <strong>现场答复已保存</strong>
+          <small>由管家核对并更新状态，无需再填一遍。你仍可补充情况或直接处理。</small>
+        </div>
+        <div className="goal-action-buttons">
+          <Button variant="secondary" onClick={() => setReplyMode("message")}>补充意见</Button>
+          <Button variant="ghost" onClick={() => setManualDecision(true)}>直接处理</Button>
+        </div>
+      </div>
     );
   }
 

@@ -23,6 +23,7 @@
     "test:terminal": "node scripts/herdr-terminal-smoke.mjs",
     "test:onboarding": "tsx scripts/onboarding-smoke.mjs",
     "test:delegation": "tsx scripts/delegation-smoke.mjs",
+    "test:scene-sync": "tsx scripts/scene-attention-smoke.mjs",
     "desktop": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
     "package:mac": "pnpm --dir apps/desktop package"

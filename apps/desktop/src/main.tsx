@@ -45,7 +45,7 @@ import { api } from "./api.js";
 import { GoalDetail } from "./features/goals/GoalDetail.js";
 import { GoalAttentionCard } from "./features/goals/GoalAttentionCard.js";
 import { goalEntryDestination } from "./features/goals/goalEntry.js";
-import { presentSceneContext } from "./features/goals/goalPresentation.js";
+import { presentSceneContext, sceneSyncPresentation } from "./features/goals/goalPresentation.js";
 import type { GoalDetailService } from "./features/goals/goalService.js";
 import {
   Button,
@@ -839,6 +839,7 @@ function App() {
                   <div className="attention-list">
                     {attention.map((item) => {
                       const kind = attentionKind(item)!;
+                      const sceneSync = sceneSyncPresentation(item);
                       return (
                         <button
                           className={`attention-card ${kind}`}
@@ -861,10 +862,10 @@ function App() {
                                   (p) => p.id === item.projectId,
                                 )?.name
                               }{" "}
-                              · {attentionLabel[kind]}
+                              · {sceneSync?.label || attentionLabel[kind]}
                             </span>
                             <h3>{item.title}</h3>
-                            <p>{item.attention?.summary ?? item.next}</p>
+                            <p>{sceneSync?.summary || item.attention?.summary || item.next}</p>
                           </div>
                           <span className="card-link">
                             <span className="card-link-label">

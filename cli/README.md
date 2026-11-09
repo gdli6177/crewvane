@@ -9,6 +9,8 @@ Crewvane 桌面应用在“设置”中安装自包含 CLI，管家和负责人�
 
 人的自由文本不会由 core 按关键词自动改变状态。管家收到消息后，只能在语义明确时调用当前目标的 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`；完成、放弃和决定必须把用户原话写入 `--note` / `--reason`。语义含糊时先追问，不能从顺承词或一般认可中猜测。
 
+人在负责人 Herdr 现场直接答复时，负责人先用 `goal show ID --json` 读取 `attentionRequest.id`，再提交 `goal scene-reply ID --attention-id REQUEST_ID --quote "用户完整原话" --summary "实际结果与下一步"`。回执持久保存并交给唯一管家核对，本身不改变注意力。管家案卷自动绑定事项和回执编号，旧答复不能清除新问题；决定与结束命令必须保留回执中的原话。仅查看现场、Agent 空闲或普通进展都不视为已经处理。
+
 ```sh
 crewvane --help
 crewvane status --json

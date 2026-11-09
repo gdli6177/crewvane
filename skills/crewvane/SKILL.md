@@ -37,9 +37,10 @@ If the user asks to create work, prefer one `ask` call with the complete natural
 
 Only use status-changing commands when this agent is the registered owner or the concierge for that goal and the stated fact has actually happened. Read [references/cli-protocol.md](references/cli-protocol.md) before using `goal progress`, `goal wait`, `goal review`, `goal decide`, `goal risk`, `goal ship`, `session set`, or any acceptance command.
 
-- Never call `goal accept`, `goal drop`, or `goal resolve` on the human's behalf.
+- An owner records a direct human answer using `goal scene-reply`, bound to the current `attentionRequest.id`; it does not approve or dismiss the question. The current-case concierge may apply an explicit human decision using `resolve`, `accept`, `complete`, `rework`, or `drop`, preserving the human's exact words. An external submitting agent must not make these decisions.
 - Never report a check, file, deployment, approval, or message as complete unless it was actually observed.
 - Ask the concierge to coordinate before escalating a routine implementation choice to the human.
 - Treat an empty or idle terminal as unknown, not successful.
+- After a human answers in the owner's Herdr scene, write the receipt before ending the turn. Do not ask the human to repeat the same answer in the desktop app. Never treat a Crewvane system check as a human reply.
 
 Return concise results to the caller, including the goal ID and any unresolved human decision. Do not paste secrets, credentials, or unrelated workspace state into Crewvane.
