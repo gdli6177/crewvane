@@ -589,6 +589,7 @@ function App() {
             </Button>
           </div>
         </header>
+        <main>
         {error && (
           <div className="error" role="alert">
             <CircleAlert size={16} />
@@ -628,7 +629,6 @@ function App() {
             }}>重试准备 Herdr</Button>}
           </div>
         )}
-        <main>
           {!workspace ? (
             <section className="welcome">
               <img src={pixelMark} alt="Crewvane" />

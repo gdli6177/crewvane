@@ -527,11 +527,26 @@ try {
     await page
       .locator(".main")
       .evaluate((element) => getComputedStyle(element).overflowY),
-    "auto",
+    "hidden",
   );
+  const topbarBeforeScroll = await page.locator(".topbar").boundingBox();
   await page.locator("main").evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
+  await page.waitForFunction(() => {
+    const content = document.querySelector(".main > main");
+    return content && content.scrollTop > 0;
+  });
+  assert.deepEqual(
+    await page.locator(".topbar").boundingBox(),
+    topbarBeforeScroll,
+    "scrolling long content must keep the application top bar fixed",
+  );
+  assert.equal(
+    await page.locator("main").evaluate((element) => getComputedStyle(element).overflowY),
+    "auto",
+  );
+  await page.screenshot({ path: join(home, "settings-scrolled-fixed-topbar-dark.png"), animations: "disabled" });
   await page.getByText(new RegExp(`Crewvane ${appVersion.replaceAll(".", "\\.")} · 一位管家`)).waitFor();
   await page.getByRole("button", { name: "浅色模式" }).click();
   await page.getByRole("button", { name: "注意力", exact: true }).click();
