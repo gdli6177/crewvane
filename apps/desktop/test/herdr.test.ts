@@ -285,6 +285,36 @@ test("a stalled lifecycle probe does not duplicate a prompt that already reached
   assert.deepEqual(mock.calls[0]!.slice(0, 3), ["agent", "prompt", "concierge"]);
 });
 
+test("restart notifications carry the user's note and restored-owner context", async () => {
+  const mock = fake({ "agent prompt": "{}" });
+  await new HerdrClient(mock.runner, "crewvane-test").notifyGoal(
+    { session: "crewvane-test", agent: "concierge" },
+    "goal_restart",
+    "继续原目标",
+    {
+      id: "goal_restart",
+      title: "继续原目标",
+      description: "原有目标说明",
+      projectId: "personal",
+      status: "active",
+      next: "恢复原负责人",
+      attention: null,
+      attachments: [],
+      activities: [],
+      dispatch: {
+        kind: "restart",
+        note: "补齐异常场景",
+        status: "pending",
+        at: new Date().toISOString(),
+      },
+    } as any,
+  );
+  const prompt = mock.calls.find(args => args[0] === "agent" && args[1] === "prompt")![3]!;
+  assert.match(prompt, /event: restart/);
+  assert.match(prompt, /restart_note: 补齐异常场景/);
+  assert.match(prompt, /桌面已经优先恢复原负责人会话/);
+});
+
 test("initial concierge identity delivery also tolerates a missed short lifecycle transition without resending", async () => {
   const mock = fake({
     "agent list": JSON.stringify({ result: { agents: [] } }),
@@ -436,6 +466,56 @@ test("completed goal scenes close their dedicated Herdr tab and recover a moved 
     ["agent", "list"],
     ["tab", "close", "w1:t9"],
   ]);
+});
+test("captures the owner's resumable Agent identity before the tab closes", async () => {
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner-a",
+      agent: "owner-a",
+      agent_session: {
+        source: "herdr:codex",
+        agent: "codex",
+        kind: "id",
+        value: "session-123",
+      },
+      agent_status: "idle",
+      workspace_id: "w1",
+      tab_id: "w1:t2",
+      pane_id: "w1:p2",
+      cwd: "/tmp/project",
+    }] } }),
+  });
+  const resume = await new HerdrClient(mock.runner, "crewvane-test").captureOwnerResume({
+    session: "crewvane-test",
+    workspaceId: "w1",
+    tabId: "w1:t2",
+    paneId: "w1:p2",
+    agent: "owner-a",
+  });
+  assert.equal(resume?.owner, "owner-a");
+  assert.equal(resume?.cwd, "/tmp/project");
+  assert.deepEqual(resume?.agentSession, {
+    source: "herdr:codex",
+    agent: "codex",
+    kind: "id",
+    value: "session-123",
+  });
+  assert.ok(resume?.savedAt);
+});
+test("does not capture a resume identity from a replaced or foreign session", async () => {
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "other-owner", agent_status: "idle", workspace_id: "w1",
+      tab_id: "w1:t8", pane_id: "w1:p8",
+    }] } }),
+  });
+  const client = new HerdrClient(mock.runner, "crewvane-test");
+  assert.equal(await client.captureOwnerResume({
+    session: "crewvane-test", paneId: "w1:p2", agent: "owner-a",
+  }), undefined);
+  assert.equal(await client.captureOwnerResume({
+    session: "someone-else", paneId: "w1:p8", agent: "other-owner",
+  }), undefined);
 });
 test("custom CLI prompt fits canonical terminal lines and preserves Unicode content", () => {
   const text = "长提示词✨".repeat(400);

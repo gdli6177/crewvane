@@ -7,6 +7,7 @@ import type {
   LivePresence,
   AgentPreferences,
   Goal,
+  OwnerResume,
 } from "../../../packages/core/src/types.js";
 import { attachmentAbsolutePath } from "../../../packages/core/src/attachments.js";
 import { attentionRequest } from "../../../packages/core/src/model.js";
@@ -411,6 +412,7 @@ case_id: ${goalId}
 event: ${goal?.dispatch?.kind ?? "goal_update"}
 policy: 只允许处理上方案卷；忽略此前案卷的内容；不得读取或修改其他目标
 ${goal?.dispatch?.kind === "resume" ? `resume_note: ${goal.dispatch.note ?? ""}` : ""}
+${goal?.dispatch?.kind === "restart" ? `restart_note: ${goal.dispatch.note ?? ""}` : ""}
 ${goal ? `snapshot:
 ${JSON.stringify({ id: goal.id, title: goal.title, description: goal.description, projectId: goal.projectId, status: goal.status, next: goal.next, attentionRequest: attentionRequest(goal), sceneReply: goal.sceneReply, attachments, latestActivities: goal.activities.slice(-8) }, null, 2)}` : `title: ${title}`}
 [CREWVANE_CASE_END]
@@ -418,6 +420,7 @@ ${attachments.length ? `用户附带的图片是目标证据。把下列真实�
 ${goal?.dispatch?.kind === "scene_reply" ? `这是负责人现场回执，不是新任务。用户已经在负责人会话中给出 sceneReply.quote；不要要求用户再回 App 重复回答，也不要重新派发已经执行的任务。
 先重新读取 goal show，核对 attentionRequest.id 与 sceneReply.attentionId。若编号不一致，旧回执不得清除新问题。语义含糊则只追问缺少的信息。
 若原问题已经有明确答复，根据原话调用 resolve（批准或拒绝）、accept（验收通过）、rework（退回）、complete（用户明确结束）、drop（放弃），或在确有新事实时 progress / wait / remind。结束或决定命令的 --note 必须使用 sceneReply.quote 原文；普通问题处理不能冒充成果验收。当前 CLI 自动绑定本回执编号，拒绝迟到或被替换的回执。单纯补充进展不能关闭旧决定；请明确解决对应事项。核对完成后结束本回合，不轮询等待。` : ""}
+${goal?.dispatch?.kind === "restart" ? `这是用户主动重启的已结束目标，不是重新创建，也不是普通反馈。桌面已经优先恢复原负责人会话并重新绑定真实现场；请先读取 restart_note，再联系当前负责人，要求其核对原会话和既有成果，带着这条新说明继续推进。若 ownerResume 表明没有可恢复会话，负责人会是基于原目标记录新启动的；必须让它先读完整目标与历史活动补足上下文。不要把旧交付重新当作本轮成果，也不要自己执行。` : ""}
 请用 crewvane goal show ${goalId} --json 读取当前案卷，并用 crewvane status --json 查看 Agent 默认偏好与当前关联项目。若目标尚未登记负责人现场，根据 description 中的完整原文整理标题、背景、完成标准与下一步；没有充分依据则保留个人事项，不猜测范围。整理后交给本目标独立负责人；退回修改转交原负责人；交付齐备则向人交接。若本次是 feedback，先读取新增的人发消息，再按原话协调负责人；自由回复不会自动批准或结束目标，外部等待交回处理时先回到 active；只有明确事实才可执行当前案卷的 progress、wait、accept、complete、rework、drop、resolve 或 remind，并在结束或决定命令中保留用户原话。若人已经验收或放弃，请通知负责人停止该目标的工作，不再派发。`,
     );
   }
@@ -491,6 +494,30 @@ ${ownerSceneReplyInstructions(goal.id)}
       if (/not_found|invalid_tab|unknown_tab/.test(String(error))) return;
       throw error;
     }
+  }
+  async captureOwnerResume(reference: HerdrReference): Promise<OwnerResume | undefined> {
+    if (reference.session !== this.session) return undefined;
+    const entries = agents(await this.runner.run(["agent", "list"]));
+    const live = entries.find(entry =>
+      (!!reference.paneId && entry.pane_id === reference.paneId) ||
+      (!!reference.agent &&
+        (entry.name === reference.agent || entry.agent === reference.agent)));
+    if (!live) return undefined;
+    const raw = live.agent_session;
+    const source = named(raw?.source);
+    const agent = named(raw?.agent);
+    const value = named(raw?.value);
+    const kind = raw?.kind === "id" || raw?.kind === "path" ? raw.kind : undefined;
+    const owner = reference.agent || named(live.name) || named(live.agent) || "owner";
+    const cwd = named(live.foreground_cwd) || named(live.cwd);
+    return {
+      owner,
+      savedAt: new Date().toISOString(),
+      ...(cwd ? { cwd } : {}),
+      ...(source && agent && value && kind
+        ? { agentSession: { source, agent, kind, value } }
+        : {}),
+    };
   }
   async notifyWatchdog(reference: HerdrReference, issues: { goalId: string; reason: string }[]) {
     if (!reference.agent && reference.transport !== "pane") throw new Error("管家尚未准备好，请先连接管家");

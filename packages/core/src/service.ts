@@ -45,6 +45,37 @@ function iso(value: unknown): string {
     throw new Error("请提供有效的 ISO 时间");
   return new Date(value).toISOString();
 }
+function preservedOwnerResume(value: unknown): NonNullable<Goal["ownerResume"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("请提供有效的负责人恢复信息");
+  const resume = value as NonNullable<Goal["ownerResume"]>;
+  const owner = text(resume.owner, "负责人名称", 120);
+  const savedAt = iso(resume.savedAt);
+  const cwd = resume.cwd === undefined
+    ? undefined
+    : text(resume.cwd, "负责人工作目录", 4096);
+  if (cwd !== undefined && !cwd.startsWith("/"))
+    throw new Error("负责人工作目录必须是绝对路径");
+  const session = resume.agentSession;
+  if (session === undefined) return { owner, savedAt, ...(cwd ? { cwd } : {}) };
+  if (!session || typeof session !== "object" || Array.isArray(session))
+    throw new Error("负责人会话信息无效");
+  const source = text(session.source, "Agent 会话来源", 160);
+  const agent = text(session.agent, "Agent 类型", 64);
+  if (!/^[A-Za-z0-9:_-]+$/.test(source) || !/^[a-z][a-z0-9_-]{0,31}$/.test(agent))
+    throw new Error("负责人会话来源或 Agent 类型无效");
+  if (session.kind !== "id" && session.kind !== "path")
+    throw new Error("负责人会话标识类型无效");
+  const sessionValue = text(session.value, "Agent 会话标识", 4096);
+  if (/[\x00-\x1f\x7f]/.test(sessionValue))
+    throw new Error("Agent 会话标识包含无效字符");
+  return {
+    owner,
+    savedAt,
+    ...(cwd ? { cwd } : {}),
+    agentSession: { source, agent, kind: session.kind, value: sessionValue },
+  };
+}
 function steps(value: unknown): WorkflowStep[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 30)
     throw new Error("工序至少需要一步");
@@ -672,6 +703,42 @@ export class WorkspaceService {
           activity(item, "resolved", `等待已结束。${note}`, "你");
           return item;
         }
+        case "goal.restart": {
+          const item = goal(command.goalId);
+          if (!["completed", "dropped"].includes(item.status))
+            throw new Error("只有已完成或已放弃的目标可以重启");
+          if (item.mode !== "concierge")
+            throw new Error("个人事项请恢复到待办池，不需要重启 Agent");
+          const note = text(command.note, "交给管家的重启说明", 12_000);
+          item.status = "active";
+          item.attention = null;
+          item.waitingFor = undefined;
+          item.remindAt = undefined;
+          item.owner = item.ownerResume?.owner || item.herdr?.agent || "待分配负责人";
+          item.next = item.ownerResume?.agentSession
+            ? "正在恢复原负责人会话，并把你的消息交给管家。"
+            : "正在重新启动负责人，并把你的消息交给管家。";
+          item.dispatch = {
+            id: newId("handoff"),
+            kind: "restart",
+            note,
+            status: "pending",
+            at: nowIso(),
+          };
+          delete item.delivery;
+          delete item.risk;
+          delete item.reviewRounds;
+          delete item.reviewLimit;
+          delete item.herdr;
+          delete item.live;
+          delete item.sceneVisit;
+          delete item.sceneReply;
+          delete item.watchdog;
+          delete item.recovery;
+          activity(item, "message", note, "你");
+          activity(item, "session", item.next, "系统");
+          return item;
+        }
         case "goal.followup": {
           const item = goal(command.goalId); ongoing(item);
           if (item.status !== "waiting") throw new Error("只有等待中的目标可以请求跟进");
@@ -1093,6 +1160,16 @@ export class WorkspaceService {
           delete item.herdr;
           delete item.live;
           activity(item, "session", "目标已结束，负责人现场已关闭。", "系统");
+          return item;
+        }
+        case "session.preserve": {
+          const item = goal(command.goalId);
+          if (!["completed", "dropped"].includes(item.status))
+            throw new Error("只有已结束的目标可以保存负责人恢复信息");
+          if (!item.herdr)
+            throw new Error("当前目标没有可保存的负责人现场");
+          item.ownerResume = preservedOwnerResume(command.resume);
+          stamp(item);
           return item;
         }
         case "concierge.status": {

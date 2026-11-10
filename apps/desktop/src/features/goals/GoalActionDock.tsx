@@ -4,6 +4,7 @@ import {
   Check,
   CircleAlert,
   Clock3,
+  RotateCcw,
   SquareTerminal,
   UserRound,
 } from "lucide-react";
@@ -330,7 +331,25 @@ export function GoalActionDock({
         </span>
         <div>
           <strong>{view.label}</strong>
-          <small>目标记录和附件仍可回看。</small>
+          <small>
+            {goal.mode === "concierge"
+              ? goal.ownerResume?.agentSession
+                ? "原负责人会话已保留，可以带着新的说明继续。"
+                : "可以重新联系管家；旧记录没有可恢复的会话标识时会启动新负责人。"
+              : "目标记录和附件仍可回看。"}
+          </small>
+        </div>
+        <div className="goal-action-buttons">
+          {goal.mode === "concierge" && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              icon={<RotateCcw size={15} />}
+              onClick={() => setReplyMode("restart")}
+            >
+              重启目标
+            </Button>
+          )}
         </div>
       </div>
     );

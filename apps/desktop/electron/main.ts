@@ -15,6 +15,7 @@ import {
   validateGoalAttachments,
   WorkspaceService,
   type CrewvaneCommand,
+  type Goal,
   type GoalStatus,
   type HerdrReference,
   type LivePresence,
@@ -33,6 +34,7 @@ import { reconcileSceneReply } from "./scene-reconciliation.js";
 import { CoordinatorQueue } from "./coordinator-queue.js";
 import { WebhookNotifier, type WebhookSaveInput } from "./webhook-notifications.js";
 import { CrewvaneSkillInstaller } from "./skill-installer.js";
+import { launchOwner, type HerdrCommandRunner } from "../../../cli/src/owner-launch.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -192,9 +194,38 @@ async function closeEndedGoalSession(target: WorkspaceService, goalId: string, e
   if (!item || !["completed", "dropped"].includes(item.status) || !item.herdr) return false;
   const herdrExecutable = executable ?? (await herdrStatus()).executable;
   if (!herdrExecutable) throw new Error("Herdr 当前不可用，负责人现场将在恢复后自动关闭");
-  await client(herdrExecutable, target.root).closeGoal(item.herdr);
+  const connection = client(herdrExecutable, target.root);
+  const resume = await connection.captureOwnerResume(item.herdr).catch(() => undefined);
+  if (resume)
+    await target.execute({ type: "session.preserve", goalId, resume });
+  await connection.closeGoal(item.herdr);
   await target.execute({ type: "session.release", goalId });
   return true;
+}
+async function restartEndedGoal(target: WorkspaceService, goalId: string, note: string) {
+  const item = (await target.read()).goals.find(goal => goal.id === goalId);
+  if (!item) throw new Error("找不到目标");
+  if (!["completed", "dropped"].includes(item.status))
+    throw new Error("只有已完成或已放弃的目标可以重启");
+  if (item.mode !== "concierge")
+    throw new Error("个人事项请恢复到待办池，不需要重启 Agent");
+  // A previous close may have failed. Preserve the resumable identity before
+  // removing its stale tab so restart cannot orphan the old owner.
+  if (item.herdr)
+    await closeEndedGoalSession(target, item.id);
+  const restarted = await target.execute({ type: "goal.restart", goalId, note }) as Goal;
+  void dispatchGoal(target, goalId).catch(error => {
+    if (root === target.root && !window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `目标已重新打开，负责人恢复暂未完成：${error instanceof Error ? error.message : String(error)}`,
+    });
+  });
+  if (root === target.root) {
+    const state = await target.read();
+    deliverGoalStatusChanges(target, state, target.root);
+    broadcastSnapshot(state, target.root);
+  }
+  return restarted;
 }
 const preparations = new Map<string, Promise<HerdrReference>>();
 const refreshedConcierges = new Map<string, string>();
@@ -221,6 +252,23 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
   const pending = handoffs.get(key); if (pending) return pending;
   const work = coordinate(target, async () => {
     try {
+      const current = (await target.read()).goals.find(goal => goal.id === goalId);
+      if (current?.dispatch?.kind === "restart" && !current.herdr) {
+        try {
+          await restartOwnerSession(target, current);
+        } catch (error) {
+          const detail = (error instanceof Error ? error.message : String(error))
+            .replace(/[。.!！]\s*$/, "");
+          await target.execute({
+            type: "goal.dispatch",
+            goalId,
+            status: "failed",
+            requestId: current.dispatch.id,
+            detail: `原负责人重启失败：${detail}`,
+          });
+          throw error;
+        }
+      }
       await deliverGoalUpdate(target, goalId, async item => {
         const reference = await prepareConcierge(target);
         const latest = (await target.read()).goals.find(goal => goal.id === goalId);
@@ -242,6 +290,53 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
   });
   handoffs.set(key, work);
   try { await work; } finally { handoffs.delete(key); }
+}
+function restartOwnerName(goal: Goal) {
+  const candidate = goal.ownerResume?.owner?.trim();
+  return candidate && /^[a-z][a-z0-9_-]{0,31}$/.test(candidate)
+    ? candidate
+    : `owner-${goal.id.slice(-8)}`;
+}
+function restartOwnerTask(goal: Goal) {
+  return [
+    `目标「${goal.title}」已由用户从 Crewvane 重新启动。`,
+    `目标 ID：${goal.id}`,
+    "这是续接原目标，不是新任务。先运行 crewvane goal show " + goal.id +
+      " --json 核对当前记录、上次成果和原会话上下文；不要重复已经完成的工作。",
+    "用户的新消息会由管家在下一条通知中交给你。现在只恢复状态并等待管家转交，不要自行扩大范围或直接结束目标。",
+  ].join("\n\n");
+}
+async function restartOwnerSession(target: WorkspaceService, goal: Goal) {
+  const status = await herdrStatus();
+  if (!status.executable) throw new Error(status.detail || "Herdr 尚未准备好");
+  const session = sessionName(target.root);
+  const run: HerdrCommandRunner = async args => {
+    const { stdout } = await exec(status.executable!, ["--session", session, ...args], {
+      timeout: 190_000,
+      maxBuffer: 1_000_000,
+      env: { ...process.env, HERDR_SESSION: session },
+    });
+    return stdout;
+  };
+  return launchOwner(
+    target,
+    {
+      goalId: goal.id,
+      name: restartOwnerName(goal),
+      task: restartOwnerTask(goal),
+      ...(goal.ownerResume ? { resume: goal.ownerResume } : {}),
+    },
+    {
+      environment: {
+        ...process.env,
+        HERDR_ENV: "1",
+        HERDR_SESSION: session,
+        CREWVANE_HERDR_BINARY: status.executable,
+        HOME: app.getPath("home"),
+      },
+      run,
+    },
+  );
 }
 async function prepareConcierge(target = activeService()) {
   const pending = preparations.get(target.root);
@@ -753,6 +848,12 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("crewvane:prepare-concierge", (event) => { sender(event); return prepareConcierge(); });
   ipcMain.handle("crewvane:dispatch-goal", (event, goalId: string) => { sender(event); return dispatchGoal(activeService(), goalId); });
+  ipcMain.handle("crewvane:restart-goal", (event, goalId: string, note: string) => {
+    sender(event);
+    if (typeof goalId !== "string" || typeof note !== "string")
+      throw new Error("重启参数无效");
+    return restartEndedGoal(activeService(), goalId, note);
+  });
   ipcMain.handle("crewvane:open-terminal", async event => { sender(event); await openHerdr(); });
   ipcMain.handle("crewvane:open-herdr", async (event, goalId?: string) => {
     sender(event);

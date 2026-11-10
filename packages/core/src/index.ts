@@ -7,5 +7,6 @@ export * from "./service.js";
 export * from "./watchdog.js";
 export * from "./attachments.js";
 export * from "./agent-command.js";
+export * from "./agent-resume.js";
 export * from "./task-pool.js";
 export { readEvents, withLock } from "./storage.js";

@@ -30,6 +30,7 @@ import {
   initialState,
   newId,
 } from "../../../packages/core/src/model.js";
+import { taskPoolGoals } from "../../../packages/core/src/task-pool.js";
 import type {
   CrewvaneCommand,
   AgentPreferences,
@@ -188,6 +189,7 @@ function App() {
       ? conciergeLive ? conciergeLiveLabel[conciergeLive] : "管家在线"
       : state.concierge.status === "error" ? "管家需要恢复" : "管家已离线";
   const attention = attentionGoals(state.goals),
+    taskPoolCount = taskPoolGoals(state.goals, "later").length + taskPoolGoals(state.goals, "self").length,
     waiting = state.goals.filter(
       (item) => item.status === "waiting" && !attention.includes(item),
     );
@@ -318,6 +320,20 @@ function App() {
       try {
         await api.dispatchGoal(currentGoalId);
         applyState(await api.command({ type: "snapshot" }));
+      } catch (reason) {
+        showError(reason);
+        throw reason;
+      } finally {
+        setBusy(false);
+      }
+    },
+    restartGoal: async (currentGoalId, note) => {
+      setBusy(true);
+      setError("");
+      try {
+        const result = await api.restartGoal(currentGoalId, note);
+        applyState(await api.command({ type: "snapshot" }));
+        return result;
       } catch (reason) {
         showError(reason);
         throw reason;
@@ -467,10 +483,12 @@ function App() {
           <button
             className={page === "tasks" ? "active" : ""}
             aria-label="待办池"
+            title={`${taskPoolCount} 件待办`}
             onClick={() => { setPage("tasks"); setProjectId(""); }}
           >
             <NotebookPen />
             <span>待办池</span>
+            <b>{taskPoolCount}</b>
           </button>
           <button
             className={page === "goals" && !projectId ? "active" : ""}

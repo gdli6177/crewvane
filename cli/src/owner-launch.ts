@@ -5,8 +5,10 @@ import { promisify } from "node:util";
 import { ownerSceneReplyInstructions } from "./owner-instructions.js";
 import {
   parseAgentCommand,
+  resumeAgentArgs,
   WorkspaceService,
   type HerdrReference,
+  type OwnerResume,
 } from "../../packages/core/src/index.js";
 
 const exec = promisify(execFile);
@@ -18,6 +20,7 @@ export interface OwnerLaunchInput {
   name: string;
   task?: string;
   taskFile?: string;
+  resume?: OwnerResume;
 }
 
 export interface OwnerLaunchResult {
@@ -204,18 +207,21 @@ export async function launchOwner(
   if (goal.herdr)
     throw new Error("该目标已经有负责人现场；请直接联系原负责人");
   const project = state.projects.find((item) => item.id === goal.projectId);
-  const cwd = await realpath(project?.path?.trim() || service.root);
+  const cwd = await realpath(input.resume?.cwd || project?.path?.trim() || service.root);
   if (!(await stat(cwd)).isDirectory())
     throw new Error("目标关联项目不是有效目录");
 
   const run = options.run ?? createRunner(environment);
   const task = `${await resolveTask(service, goal, input)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
-  const configured =
-    state.agents?.owner?.trim() ||
-    state.agents?.concierge?.trim() ||
-    "codex";
-  const kinds = await supportedKinds(run);
-  const command = parseAgentCommand(configured, kinds);
+  const restoredArgs = resumeAgentArgs(input.resume?.agentSession);
+  const configured = state.agents?.owner?.trim() || state.agents?.concierge?.trim() || "codex";
+  const command = restoredArgs
+    ? {
+        executable: input.resume!.agentSession!.agent,
+        kind: input.resume!.agentSession!.agent,
+        args: restoredArgs,
+      }
+    : parseAgentCommand(configured, await supportedKinds(run));
   const executable = expandHome(
     command.executable,
     environment.HOME || "",
@@ -362,7 +368,7 @@ export async function launchOwner(
         if (!/\bagent_prompt_stalled\b/.test(String(error))) throw error;
         return {
           goalId: goal.id,
-          runtime: configured,
+          runtime: input.resume?.agentSession?.agent || configured,
           reference,
           warning:
             "Herdr 已接收任务，但没有及时观察到 working；现场已保留，请先核对，禁止重复发送。",
@@ -373,7 +379,11 @@ export async function launchOwner(
       await new Promise((resolve) => setTimeout(resolve, 750));
     }
 
-    return { goalId: goal.id, runtime: configured, reference };
+    return {
+      goalId: goal.id,
+      runtime: input.resume?.agentSession?.agent || configured,
+      reference,
+    };
   } catch (error) {
     if (!bound) {
       await closeTab(run, tabId);

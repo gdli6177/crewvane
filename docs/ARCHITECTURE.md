@@ -97,6 +97,8 @@ Herdr 的 `pane.agent_status_changed`、`pane.exited`、`pane.closed`、`pane.mo
 
 `goal.accept`、`goal.complete`、`goal.drop` 和已结束目标的永久删除会释放负责人现场。桌面立即关闭对应 Herdr Tab，并通过 `session.release` 清理已结束目标的引用；关闭请求失败时保留引用，巡检恢复后继续重试。永久删除会先尝试关闭现场，关闭失败时不执行删除。目标删除只开放给 `completed` / `dropped`，同时删除附件文件；项目决定账本不随目标删除。
 
+关闭负责人前，桌面读取 Herdr 提供的真实 `agent_session`（来源、Agent 类型、ID 或路径）与工作目录，经 `session.preserve` 保存为目标的恢复信息，再关闭 Tab 并释放活动现场。已完成或已放弃的管家目标可以在详情中输入一条新说明并点击“重启目标”：`goal.restart` 保留原消息、附件、交付和验收历史，清除仅属于上一轮的当前交付与提醒，进入 `active` 并创建 `restart` 派发；桌面按 Herdr 原生参数恢复原 Agent 会话、重新绑定独立负责人，再通知管家转交用户说明。没有历史会话标识的旧目标会从原目标记录启动新负责人，并在界面明确说明；个人事项继续使用“恢复到待办池”，不会伪装成 Agent 会话。
+
 ## 桌面 IPC
 
 渲染进程通过 preload 暴露的有限接口选择工作区与项目、导入与预览受校验的图片、执行目标命令、管理 Herdr 和 CLI、打开 HTTPS 链接。`BrowserWindow` 使用 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，拒绝窗口跳转和权限请求。IPC 校验发送方 URL，项目路径必须先由文件选择器选中；附件导入接受字节而不是任意目标路径，预览与打开只接受当前状态中的附件 ID。
