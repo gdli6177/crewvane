@@ -525,7 +525,9 @@ function App() {
             <button
               key={item.id}
               className={projectId === item.id ? "active" : ""}
+              aria-label={`打开项目：${item.name}`}
               aria-current={projectId === item.id ? "page" : undefined}
+              title={`打开项目：${item.name}`}
               onClick={() => {
                 setProjectId(item.id);
                 setPage("goals");
@@ -544,7 +546,12 @@ function App() {
               </small>
             </button>
           ))}
-          <button className="add-project" onClick={() => setModal("project")}>
+          <button
+            className="add-project"
+            aria-label="添加项目"
+            title="添加项目"
+            onClick={() => setModal("project")}
+          >
             <Plus />
             <span>添加项目</span>
           </button>
