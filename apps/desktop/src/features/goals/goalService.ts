@@ -13,4 +13,5 @@ export interface GoalDetailService {
   openHerdr(goalId: string): Promise<void>;
   openUrl(url: string): Promise<void>;
   retryDispatch(goalId: string): Promise<void>;
+  restartGoal(goalId: string, note: string): Promise<unknown>;
 }

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { LoaderCircle } from "lucide-react";
 import type { BadgeTone } from "./Badge.js";
 
 export type SurfaceTone = "surface" | "soft" | "accent" | "mint" | "warm";
@@ -110,10 +111,12 @@ export function LoadingState({
   inline?: boolean;
 }) {
   return (
-    <span className={`ui-loading${inline ? " ui-loading--inline" : ""}`} role="status">
-      <span className="ui-loading__mark" aria-hidden="true">
-        ✦
-      </span>
+    <span
+      className={`ui-loading${inline ? " ui-loading--inline" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
+      <LoaderCircle className="ui-loading__mark" size={14} aria-hidden="true" />
       {label}
     </span>
   );
@@ -151,7 +154,7 @@ export function SettingsSection({
       <header className="ui-settings-card__head">
         {icon && <span className="ui-settings-card__icon">{icon}</span>}
         <div>
-          <h2>{title}</h2>
+          <h3>{title}</h3>
           {description && <p>{description}</p>}
         </div>
       </header>

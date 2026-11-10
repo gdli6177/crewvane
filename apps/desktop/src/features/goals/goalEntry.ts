@@ -15,7 +15,7 @@ export function goalEntryDestination(goal: Goal): GoalEntryDestination {
   if (goal.status === "completed" || goal.status === "dropped") return "details";
   if (goal.attention?.source === "dispatch") return "attention";
   if (kind === "decision" || kind === "review" || kind === "follow_up") return "attention";
-  if (kind === "intervention") return "scene";
+  if (kind === "intervention") return hasGoalScene(goal) ? "scene" : "attention";
   if (goal.status === "active" && hasGoalScene(goal)) return "scene";
   return "details";
 }

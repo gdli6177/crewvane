@@ -33,10 +33,16 @@ async function launch() {
 async function snapshot(page) {
   return page.evaluate(() => window.crewvane.command({ type: "snapshot" }));
 }
+async function expectTaskPoolCount(page, count) {
+  const entry = page.getByRole("button", { name: "待办池", exact: true, includeHidden: true });
+  await expect(entry.locator("b")).toHaveText(String(count));
+  await expect(entry).toHaveAttribute("title", `${count} 件待办`);
+}
 let app;
 try {
   let page;
   ({ app, page } = await launch());
+  await expectTaskPoolCount(page, 0);
   await page.getByRole("button", { name: "待办池", exact: true }).click();
   await page.getByRole("button", { name: "记一件事", exact: true }).first().click();
   await page.getByLabel("记下这件事", { exact: true }).fill("以后研究新的作品集\n只留个想法，还没有授权开始。");
@@ -48,6 +54,16 @@ try {
   assert.equal(captured.dispatch, undefined);
   assert.equal(captured.attachments.length, 1);
   assert.equal((await snapshot(page)).concierge.status, "not_ready");
+  await expectTaskPoolCount(page, 1);
+  // Both pool sections contribute, even when only one is currently open.
+  const extraPersonal = await page.evaluate(() => window.crewvane.command({
+    type: "goal.intake", text: "临时的个人待办", handling: "self",
+  }));
+  await expectTaskPoolCount(page, 2);
+  await page.evaluate(goalId => window.crewvane.command({
+    type: "goal.drop", goalId, note: "数量验证结束，移出临时待办。",
+  }), extraPersonal.id);
+  await expectTaskPoolCount(page, 1);
   await page.locator(".goal-row").filter({ hasText: "以后研究新的作品集" }).click();
   await page.getByRole("button", { name: "补充说明", exact: true }).click();
   await page.getByLabel("补充说明", { exact: true }).fill("先整理三张参考图，等周末再决定。");
@@ -61,6 +77,7 @@ try {
   // A real application restart must restore the same record and attachment.
   await app.close();
   ({ app, page } = await launch());
+  await expectTaskPoolCount(page, 1);
   await page.getByRole("button", { name: "待办池", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "以后研究新的作品集" }).click();
   await page.getByText("idea.png", { exact: true }).waitFor();
@@ -70,6 +87,7 @@ try {
   assert.equal((await snapshot(page)).goals[0].dispatch, undefined);
   await page.screenshot({ path: join(home, "captured-detail-light.png"), animations: "disabled" });
   await page.getByRole("button", { name: "我来做", exact: true }).click();
+  await expectTaskPoolCount(page, 1);
   await expect(page.getByRole("button", { name: "标记完成", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "提醒我", exact: true }).click();
   await page.getByLabel("提醒时间", { exact: true }).fill("2030-01-01T09:30");
@@ -85,6 +103,7 @@ try {
   await page.locator(".goal-row").filter({ hasText: "以后研究新的作品集" }).click();
   await page.getByRole("button", { name: "标记完成", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expectTaskPoolCount(page, 0);
   let completed = (await snapshot(page)).goals[0];
   assert.equal(completed.status, "completed");
   assert.equal(completed.delivery, undefined);
@@ -98,6 +117,7 @@ try {
   const personal = (await snapshot(page)).goals.find(goal => goal.title === "我去银行办手续");
   assert.equal(personal.mode, "manual");
   assert.equal(personal.dispatch, undefined);
+  await expectTaskPoolCount(page, 1);
 
   // The reminder crosses its due time while the app is otherwise idle.
   await page.getByRole("button", { name: "注意力", exact: true }).click();
@@ -121,10 +141,12 @@ try {
   await page.getByRole("button", { name: "待办池", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "我去银行办手续" }).click();
   await page.getByRole("button", { name: "移出待办池", exact: true }).click();
+  await expectTaskPoolCount(page, 0);
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.getByRole("button", { name: "已放弃", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "我去银行办手续" }).click();
   await page.getByRole("button", { name: "恢复到待办池", exact: true }).click();
+  await expectTaskPoolCount(page, 1);
   await page.getByRole("button", { name: "待办池", exact: true }).click();
   await page.getByRole("button", { name: /先记下 1/ }).click();
   await page.locator(".goal-row").filter({ hasText: "我去银行办手续" }).click();
@@ -137,7 +159,38 @@ try {
   assert.equal(delegated.mode, "concierge");
   assert.equal(delegated.status, "active");
   assert.equal((await snapshot(page)).goals.filter(goal => goal.id === personal.id).length, 1);
+  await expectTaskPoolCount(page, 0);
   await page.getByRole("button", { name: "关闭", exact: true }).click();
+
+  // Completed concierge goals can be resurrected with one plain-language note.
+  const restartable = await page.evaluate(() => window.crewvane.command({
+    type: "goal.direct",
+    text: "重启后继续验收清单",
+  }));
+  await page.evaluate(goalId => window.crewvane.command({
+    type: "goal.complete",
+    goalId,
+    note: "这一轮先结束。",
+  }), restartable.id);
+  await page.getByRole("button", { name: "全部目标", exact: true }).click();
+  await page.getByRole("button", { name: "已完成", exact: true }).click();
+  await page.locator(".goal-row").filter({ hasText: "重启后继续验收清单" }).click();
+  await page.getByRole("button", { name: "重启目标", exact: true }).click();
+  await page.getByLabel("给管家的重启说明", { exact: true })
+    .fill("从现有记录继续，补齐没有覆盖的异常场景。");
+  await page.screenshot({ path: join(home, "restart-composer-light.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "重启并交给管家", exact: true }).click();
+  await expect.poll(async () =>
+    (await snapshot(page)).goals.find(goal => goal.id === restartable.id)?.status)
+    .toBe("active");
+  const restarted = (await snapshot(page)).goals.find(goal => goal.id === restartable.id);
+  assert.equal(restarted.dispatch?.kind, "restart");
+  assert.equal(restarted.dispatch?.note, "从现有记录继续，补齐没有覆盖的异常场景。");
+  assert.ok(restarted.activities.some(activity =>
+    activity.kind === "message" && activity.text === "从现有记录继续，补齐没有覆盖的异常场景。"));
+  await page.screenshot({ path: join(home, "restart-active-light.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "关闭", exact: true }).click();
+
   await app.browserWindow(page).then(window => window.evaluate(window => window.setSize(960, 760)));
   await page.getByRole("button", { name: "待办池", exact: true }).click();
   await page.screenshot({ path: join(home, "pool-narrow-light.png"), animations: "disabled" });

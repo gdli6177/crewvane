@@ -20,6 +20,7 @@ export interface DesktopApi {
   readClipboardText(): Promise<string>; writeClipboardText(value: string): Promise<void>;
   installCli(): Promise<{ output: string }>; prepareConcierge(): Promise<unknown>;
   dispatchGoal(goalId: string): Promise<unknown>;
+  restartGoal(goalId: string, note: string): Promise<unknown>;
   terminalSnapshot(): Promise<{ session: string; data: string; running: boolean; sequence: number; cols: number; rows: number; error?: string } | undefined>;
   writeTerminal(session: string, data: string): Promise<void>;
   resizeTerminal(session: string, cols: number, rows: number): Promise<void>;

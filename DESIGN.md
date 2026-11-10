@@ -1,27 +1,29 @@
 ---
 version: alpha
 name: Crewvane
-description: 注意力中心桌面应用的设计语言：深靛蓝工作台、长春花蓝主动作、薄荷绿完成反馈与克制的像素魔法师气质。
+description: 注意力中心桌面应用的设计语言：墨青工作台、海沫青主动作、暖琥珀提醒与克制的像素魔法师气质。
 colors:
-  bg: "#111520"
-  sidebar: "#151a26"
-  surface: "#1b2130"
-  surface-soft: "#222a3a"
-  surface-hover: "#252f40"
-  surface-raised: "#1b2130"
-  text: "#ecf0f8"
-  secondary: "#b2bdcf"
-  muted: "#8b98ae"
-  line: "#2b3546"
-  accent: "#a9b8ff"
-  accent-strong: "#8398fc"
-  accent-soft: "#29324f"
-  on-accent: "#182039"
-  mint: "#83e4c2"
-  mint-soft: "#1f3938"
-  warm: "#ebc894"
-  warm-soft: "#3d342a"
-  danger: "#eda5ad"
+  bg: "#0d1214"
+  sidebar: "#12191b"
+  surface: "#172023"
+  surface-soft: "#1d282b"
+  surface-hover: "#243135"
+  surface-raised: "#172023"
+  text: "#edf4f2"
+  secondary: "#bfd0cb"
+  muted: "#96aaa5"
+  line: "#2c3a3d"
+  line-strong: "#43565a"
+  accent: "#5ed9c9"
+  accent-strong: "#8bece0"
+  accent-soft: "#153836"
+  on-accent: "#061b18"
+  mint: "#9adba4"
+  mint-soft: "#20362a"
+  warm: "#efc56f"
+  warm-soft: "#3b3424"
+  danger: "#ff9ba1"
+  danger-soft: "#3b2529"
 typography:
   sans:
     fontFamily: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif
@@ -42,7 +44,7 @@ rounded:
 
 ## Overview
 
-Crewvane 是 macOS 桌面上运行的注意力中心。用户把事项交给唯一的全局管家，界面只把真正需要人的决定、验收、到期跟进和现场介入抬到前排；其余推进留在后台，不打扰用户。工作台以深靛蓝为底、长春花蓝作主动作与"需要你"的信号、薄荷绿回报完成，配一枚像素魔法师形象，形成克制的像素游戏气质。阅读以单列为主，桌面优先，不做手机布局。
+Crewvane 是 macOS 桌面上运行的注意力中心。用户把事项交给唯一的全局管家，界面只把真正需要人的决定、验收、到期跟进和现场介入抬到前排；其余推进留在后台，不打扰用户。工作台以墨青为底、海沫青作主动作与"需要你"的信号、暖琥珀提示外部等待与恢复，配一枚像素魔法师形象，形成克制、清爽而有辨识度的桌面工具气质。阅读以单列为主，桌面优先，不做手机布局。
 
 ## Colors
 
@@ -60,26 +62,28 @@ Crewvane 是 macOS 桌面上运行的注意力中心。用户把事项交给唯�
 
 | Token | Dark | Light |
 | --- | --- | --- |
-| bg | #111520 | #f7f8fb |
-| sidebar | #151a26 | #f0f2f7 |
-| surface | #1b2130 | #ffffff |
-| surface-soft | #222a3a | #eef1f7 |
-| surface-hover | #252f40 | #eaedf5 |
-| text | #ecf0f8 | #252e42 |
-| secondary | #b2bdcf | #4a5568 |
-| muted | #8b98ae | #626b79 |
-| line | #2b3546 | #ccd4e0 |
-| accent | #a9b8ff | #4d61bb |
-| accent-strong | #8398fc | #435abb |
-| accent-soft | #29324f | #e8ecfb |
-| on-accent | #182039 | #ffffff |
-| mint | #83e4c2 | #24725e |
-| mint-soft | #1f3938 | #e2f2eb |
-| warm | #ebc894 | #8d5e27 |
-| warm-soft | #3d342a | #f7eddf |
-| danger | #eda5ad | #a94f5c |
+| bg | #0d1214 | #f4f8f6 |
+| sidebar | #12191b | #ecf2ef |
+| surface | #172023 | #ffffff |
+| surface-soft | #1d282b | #edf3f0 |
+| surface-hover | #243135 | #e4ece8 |
+| text | #edf4f2 | #1d2a27 |
+| secondary | #bfd0cb | #43554f |
+| muted | #96aaa5 | #5d706a |
+| line | #2c3a3d | #c4d1cc |
+| line-strong | #43565a | #a7b7b1 |
+| accent | #5ed9c9 | #0d6f65 |
+| accent-strong | #8bece0 | #075a52 |
+| accent-soft | #153836 | #def2ed |
+| on-accent | #061b18 | #ffffff |
+| mint | #9adba4 | #2c7048 |
+| mint-soft | #20362a | #e4f1e9 |
+| warm | #efc56f | #8a5a19 |
+| warm-soft | #3b3424 | #f7eddf |
+| danger | #ff9ba1 | #913741 |
+| danger-soft | #3b2529 | #f9e8ea |
 
-实底按钮统一读取 `on-accent` token：深色下取深靛蓝，浅色下取白色。切主题只改 token 值，组件不需要单独判断主题。
+实底按钮统一读取 `on-accent` token：深色下取深墨绿，浅色下取白色。切主题只改 token 值，组件不需要单独判断主题。
 
 ## Typography
 
@@ -110,7 +114,7 @@ Crewvane 是 macOS 桌面上运行的注意力中心。用户把事项交给唯�
 
 ## Components
 
-- 按钮原语为 `Button`：`primary` 是 `accent` 实底按钮，深色主题用深靛蓝字、浅色主题用白字，悬停转 `mint`；`secondary` 是 `line` 边框配 `surface` 底的按钮，悬停时边框与文字转 `accent`；`danger` 只用于删除、放弃等破坏性动作；`ghost` 用于第三级动作与页内清空态。高度只有 32（行内/工具条）与 36（表单提交、弹窗主按钮）两档。同一视区只出现一个 `primary`。
+- 按钮原语为 `Button`：`primary` 是 `accent` 实底按钮，深色主题用深墨绿字、浅色主题用白字，悬停只加深或提亮到 `accent-strong`；`secondary` 是 `line` 边框配 `surface` 底的按钮，悬停时边框与文字转 `accent`；`danger` 只用于删除、放弃等破坏性动作；`ghost` 用于第三级动作与页内清空态。高度只有 32（行内/工具条）与 36（表单提交、弹窗主按钮）两档。同一视区只出现一个 `primary`。
 - 状态药丸把四个语义色映射成"文字色 + 柔底 + 边框"的三件套：需要回复用 `accent`，待验收与完成用 `mint`，等待外用 `warm`，阻塞用 `danger`。药丸始终带文字标签，颜色只是第二信号。
 - 注意力卡片整卡可点，左侧图标底色跟随状态 tone，点击进入目标详情；卡片内部不再放独立动作按钮。
 - 目标详情底部操作区随状态切换：等你回复给自由文本框，等你验收给"验收通过/退回修改"，等待外部显示"现在不用处理"，需要排障给"打开工作现场"；"管家处理中"不给主按钮。

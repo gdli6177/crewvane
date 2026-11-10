@@ -9,7 +9,11 @@ crewvane goal progress "$GOAL_ID" --summary "$ACTUAL_RESULT" --next "$NEXT_STEP"
 crewvane goal wait "$GOAL_ID" --reason "$WAITING_REASON" --owner "$WAITING_OWNER" --remind-at "$ISO_TIME" --root "$WORKSPACE"
 ```
 
-Use `progress` after an observable result, not as a heartbeat. Use `wait` only while a named person, service, or event is actually blocking work. When no substantive progress exists, report the blocker instead of manufacturing an update.
+Use `progress` after an observable result, not as a heartbeat. Use `wait` only while a named external third party (a contact, organization or external service) outside the human and every Crewvane Agent is blocking work. `--owner` is required and stores the external party in `waitingFor`; it does not replace the execution owner. The CLI rejects missing targets, the human, the concierge and registered Agents.
+
+Human choices, confirmations, information or manual actions use `decide`; delivery uses `review`. Neither belongs in external waiting. Coordination with an owner or worker stays `active`; ending a turn or an idle terminal never proves external waiting. `remind` changes only the schedule, including on active goals.
+
+Handing a waiting concierge goal back via `message`, `direct` or follow-up returns it to `active` and clears the old wait and reminder while an Agent processes it. Read the waiting activity/history to recover the original party and time; explicitly re-establish `wait` with an appropriate reminder if it is still an external dependency. Do not infer external completion from the message alone.
 
 ## Decisions and high-risk actions
 

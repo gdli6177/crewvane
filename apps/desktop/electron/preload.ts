@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("crewvane", {
   openTerminal: () => ipcRenderer.invoke("crewvane:open-terminal"),
   installCli: () => ipcRenderer.invoke("crewvane:install-cli"), prepareConcierge: () => ipcRenderer.invoke("crewvane:prepare-concierge"),
   dispatchGoal: (goalId: string) => ipcRenderer.invoke("crewvane:dispatch-goal", goalId),
+  restartGoal: (goalId: string, note: string) =>
+    ipcRenderer.invoke("crewvane:restart-goal", goalId, note),
   terminalSnapshot: () => ipcRenderer.invoke("crewvane:terminal-snapshot"),
   writeTerminal: (session: string, data: string) => ipcRenderer.invoke("crewvane:terminal-write", session, data),
   resizeTerminal: (session: string, cols: number, rows: number) => ipcRenderer.invoke("crewvane:terminal-resize", session, cols, rows),

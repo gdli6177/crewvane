@@ -252,6 +252,7 @@ try {
   page.setDefaultTimeout(90_000);
   // Onboarding installs tools, launches a CLI and performs many real IPC writes;
   // CI hosts occasionally need longer than the Playwright interaction default.
+  await page.getByRole("button", { name: "注意力", exact: true }).click();
   await page.locator(".top-actions").getByRole("button", { name:"新目标" }).click();
   await page.getByLabel("要交给管家的事情").fill(longGoalRequest);
   await page.getByRole("button", { name:"确认交给管家", exact:true }).click();
@@ -302,7 +303,8 @@ try {
   }, {timeout:60_000}).toBe("sent");
   await expect.poll(() => readFile(log,"utf8"), {timeout:10_000}).toContain("YR 已批准，按原方案继续开发");
   let waitingGoal = (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).goals.find(goal => goal.id === waiting.id);
-  assert.equal(waitingGoal.status,"waiting", "a user reply must leave the state decision to the concierge");
+  assert.equal(waitingGoal.status,"active", "an external wait handed back to an Agent returns to active coordination");
+  assert.equal(waitingGoal.waitingFor, undefined);
   assert.ok(waitingGoal.activities.some(activity => activity.text === "YR 已批准，按原方案继续开发"));
   await page.evaluate(id => window.crewvane.command({
     type:"goal.progress", goalId:id, actor:"concierge",
@@ -464,7 +466,7 @@ try {
     "arbitrary CLI saves and starts", "native argv preserved", "reuse custom concierge",
     "real goal and delegation-only role delivered to CLI stdin", "raw Herdr opens independently", "restart reuses installed latest and running CLI",
     "visible goal feedback reaches CLI without replacing the next step",
-    "waiting chat reaches CLI without changing state", "concierge decision writes the next state", "snooze and manual takeover",
+    "external-wait feedback reaches CLI and resumes active coordination", "concierge decision writes the next state", "snooze and manual takeover",
     "external CLI decision wakes desktop pending dispatch and reaches the concierge",
     "terminal panel resizes and toggles fullscreen", "closed concierge reconciles offline",
     "manual process in old pane is preserved while concierge recovery uses a new site",

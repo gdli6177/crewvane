@@ -4,6 +4,7 @@ import {
   Check,
   CircleAlert,
   Clock3,
+  RotateCcw,
   SquareTerminal,
   UserRound,
 } from "lucide-react";
@@ -240,7 +241,7 @@ export function GoalActionDock({
           <CircleAlert size={18} />
         </span>
         <div>
-          <strong>负责人现场需要你处理</strong>
+          <strong>{goal.herdr ? "负责人现场需要你处理" : "需要你处理"}</strong>
           <small>{goal.attention?.summary || goal.next}</small>
         </div>
         <div className="goal-action-buttons">
@@ -299,7 +300,7 @@ export function GoalActionDock({
           <Clock3 size={18} />
         </span>
         <div>
-          <strong>现在不用处理</strong>
+          <strong>等待外部</strong>
           <small>
             {goal.waitingFor ? `正在等待 ${goal.waitingFor}。` : "正在等待外部结果。"}
             {goal.next ? ` ${goal.next}` : ""}
@@ -330,7 +331,25 @@ export function GoalActionDock({
         </span>
         <div>
           <strong>{view.label}</strong>
-          <small>目标记录和附件仍可回看。</small>
+          <small>
+            {goal.mode === "concierge"
+              ? goal.ownerResume?.agentSession
+                ? "原负责人会话已保留，可以带着新的说明继续。"
+                : "可以重新联系管家；旧记录没有可恢复的会话标识时会启动新负责人。"
+              : "目标记录和附件仍可回看。"}
+          </small>
+        </div>
+        <div className="goal-action-buttons">
+          {goal.mode === "concierge" && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              icon={<RotateCcw size={15} />}
+              onClick={() => setReplyMode("restart")}
+            >
+              重启目标
+            </Button>
+          )}
         </div>
       </div>
     );

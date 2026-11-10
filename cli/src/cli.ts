@@ -17,7 +17,7 @@ import { launchOwner } from "./owner-launch.js";
 const exec = promisify(execFile);
 const usage = `Crewvane — 把所有事整理成清晰的下一步
 
-人的消息入口（只追加原话，不改变目标状态）：
+人的消息入口（保存原话，不从文本推断批准或完成）：
   crewvane status [--json]
   crewvane attention [--json]
   crewvane board [--new] [--once]
@@ -40,9 +40,9 @@ Agent 状态协议（仅在明确事实发生后使用）：
   crewvane goal create --title TEXT [--project ID] [--description TEXT]
     [--mode concierge|manual]
   crewvane goal update ID [--title TEXT] [--description TEXT] [--next TEXT]
-    [--owner TEXT] [--status active|waiting] [--remind-at ISO]
+    [--owner TEXT] [--status active|waiting] [--waiting-for 外部第三方] [--remind-at ISO]
   crewvane goal progress ID --summary TEXT [--next TEXT] [--owner NAME]
-  crewvane goal wait ID --reason TEXT [--owner TEXT] [--remind-at ISO]
+  crewvane goal wait ID --reason TEXT --owner 外部第三方 [--remind-at ISO]
   crewvane goal decide ID --question TEXT [--next TEXT] [--key KEY]
   crewvane goal risk ID --category CATEGORY --summary TEXT [--key KEY]
   crewvane goal ship ID --operation merge|deploy --checks passed|failed
@@ -61,7 +61,8 @@ Agent 状态协议（仅在明确事实发生后使用）：
     创建隔离的负责人现场；省略任务内容时读取目标详情与下一步
 
 使用 --root DIR 或 CREWVANE_WORKSPACE 指定工作区。所有读写与桌面共用状态。
-goal message 与 direct 不修改 status、next、等待对象或提醒；禁止用正文猜测批准、验收或完成。
+goal message 与 direct 不按正文推断状态。交给管家处理的外部等待会恢复 active，待管家重新核定；next 保留。
+waiting 只表示等待用户和所有 Agent 之外的具名外部第三方。需要用户处理请用 decide；内部协调保持 active。remind 不改变生命周期。
 高风险动作类别：delete-data、stop-service、spend-money、external-message、
 product-direction、create-secret、rotate-secret、change-permissions、change-ship-policy。
 goal ship 只按项目策略给出放行或审批判断；外部动作仍由负责人执行并核实。
@@ -365,6 +366,7 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         ...(args.has("stage") ? (() => { throw new Error("工序已移除；请直接更新目标下一步"); })() : {}),
         title: args.one("title"), description: args.one("description"), next: args.one("next"),
         owner: args.one("owner"),
+        waitingFor: args.one("waiting-for"),
         status: args.one("status") as "active" | "waiting" | undefined,
         remindAt: args.one("remind-at"),
       } };

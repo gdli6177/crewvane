@@ -46,6 +46,17 @@ export interface HerdrReference {
   session: string; workspaceId?: string; tabId?: string; paneId?: string; agent?: string;
   transport?: "pane"; processId?: number; launchPolicy?: "control-plane-v1";
 }
+export interface OwnerResume {
+  owner: string;
+  cwd?: string;
+  savedAt: string;
+  agentSession?: {
+    source: string;
+    agent: string;
+    kind: "id" | "path";
+    value: string;
+  };
+}
 export interface LiveEventTarget {
   paneId?: string; tabId?: string; workspaceId?: string;
 }
@@ -69,10 +80,10 @@ export interface Goal {
   mode: "concierge" | "manual"; status: GoalStatus;
   steps: WorkflowStep[]; stageId?: string; next: string; owner: string;
   waitingFor?: string; remindAt?: string; attention: Attention | null;
-  delivery?: Delivery; herdr?: HerdrReference; live?: LivePresence;
+  delivery?: Delivery; herdr?: HerdrReference; ownerResume?: OwnerResume; live?: LivePresence;
   reviewRounds?: number; reviewLimit?: number;
   risk?: RiskEscalation;
-  dispatch?: { id?: string; kind?: "resume" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
+  dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
   sceneReply?: SceneReply;
   recovery?: "idle" | "done" | "blocked";
   sceneVisit?: SceneVisit;
@@ -131,6 +142,7 @@ type WorkspaceCommand =
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
   | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "failed"; detail?: string; requestId?: string }
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
+  | { type: "goal.restart"; goalId: string; note: string }
   | { type: "goal.takeover"; goalId: string }
   | { type: "goal.delegate"; goalId: string }
   | { type: "goal.restore"; goalId: string }
@@ -145,6 +157,7 @@ type WorkspaceCommand =
   | { type: "goal.rework"; goalId: string; note: string; actor?: string }
   | { type: "goal.remind"; goalId: string; at: string; note?: string }
   | { type: "session.set"; goalId?: string; reference: HerdrReference }
+  | { type: "session.preserve"; goalId: string; resume: OwnerResume }
   | { type: "session.release"; goalId: string }
   | { type: "concierge.status"; status: "not_ready" | "ready" | "error"; detail?: string; reference?: HerdrReference; live?: LivePresence | null }
   | { type: "live.sync"; presences: Record<string, LivePresence> }

@@ -148,6 +148,19 @@ try {
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   await page.getByRole("button", { name: "深色模式" }).click();
   assert.equal(await page.locator(".section-heading h2 span").count(), 0);
+  const assertTopbarAligned = async (state) => {
+    const alignment = await page.evaluate(() => {
+      const status = document.querySelector(".live-status")?.getBoundingClientRect();
+      const action = document.querySelector(".top-actions .ui-button")?.getBoundingClientRect();
+      return status && action
+        ? { statusCenter: status.y + status.height / 2, actionCenter: action.y + action.height / 2 }
+        : null;
+    });
+    assert.ok(alignment, `topbar status and primary action must exist (${state})`);
+    assert.ok(Math.abs(alignment.statusCenter - alignment.actionCenter) < 0.5,
+      `topbar status and primary action must share a vertical center (${state}): ${JSON.stringify(alignment)}`);
+  };
+  await assertTopbarAligned("initial");
   await page.getByRole("button", { name: "收起侧边栏" }).click();
   assert.ok(await page.locator(".app.collapsed").count());
   assert.equal(await page.getByRole("button", { name: "找管家" }).locator("svg").first().isVisible(), true);
@@ -156,12 +169,18 @@ try {
   await page.getByRole("button", { name: "我的工作台", exact: true }).click();
   assert.equal(await page.getByRole("dialog").count(), 0, "workspace overview must not open a directory picker");
   await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
+  await page.setViewportSize({ width: 1024, height: 760 });
+  await page.getByRole("button", { name: "添加项目", exact: true }).waitFor();
   await page.getByRole("button", { name: "添加项目", exact: true }).click();
   await page.getByRole("dialog", { name: "添加项目" }).waitFor();
   await page.getByLabel("项目名称").fill("界面测试项目");
   await page.getByRole("button", { name: "添加项目", exact: true }).last().click();
-  await page.locator(".projects").getByRole("button", { name: /界面测试项目/ }).click();
-  await page.locator(".topbar").getByText("界面测试项目", { exact: true }).waitFor();
+  const narrowProjectButton = page.getByRole("button", { name: "打开项目：界面测试项目", exact: true });
+  await narrowProjectButton.waitFor();
+  await narrowProjectButton.click();
+  await page.locator(".topbar").getByText(/^界面测试项目/).waitFor();
+  await page.screenshot({ path: join(home, "narrow-project-navigation.png"), animations: "disabled" });
+  await page.setViewportSize({ width: 1408, height: 880 });
   await page.getByRole("button", { name: "我的工作台", exact: true }).click();
   await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
   assert.equal(await page.locator(".projects button.active").count(), 0);
@@ -527,11 +546,26 @@ try {
     await page
       .locator(".main")
       .evaluate((element) => getComputedStyle(element).overflowY),
-    "auto",
+    "hidden",
   );
+  const topbarBeforeScroll = await page.locator(".topbar").boundingBox();
   await page.locator("main").evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
+  await page.waitForFunction(() => {
+    const content = document.querySelector(".main > main");
+    return content && content.scrollTop > 0;
+  });
+  assert.deepEqual(
+    await page.locator(".topbar").boundingBox(),
+    topbarBeforeScroll,
+    "scrolling long content must keep the application top bar fixed",
+  );
+  assert.equal(
+    await page.locator("main").evaluate((element) => getComputedStyle(element).overflowY),
+    "auto",
+  );
+  await page.screenshot({ path: join(home, "settings-scrolled-fixed-topbar-dark.png"), animations: "disabled" });
   await page.getByText(new RegExp(`Crewvane ${appVersion.replaceAll(".", "\\.")} · 一位管家`)).waitFor();
   await page.getByRole("button", { name: "浅色模式" }).click();
   await page.getByRole("button", { name: "注意力", exact: true }).click();
@@ -604,6 +638,7 @@ try {
   await page.locator(".goal-attention-modal").waitFor({ state: "detached" });
   // Stop the artificial transport fixture from entering a real runtime.
   await service.execute({ type: "goal.takeover", goalId: sceneAnswer.id });
+  await assertTopbarAligned("attention home");
   await page.screenshot({ path: join(home, "home-light.png") });
   // A personal item must be manageable without asking an Agent or using CLI.
   await page.locator(".top-actions").getByRole("button", { name: "新目标" }).click();
@@ -652,7 +687,7 @@ try {
   await page.reload();
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "等待审批操作" }).click();
-  await page.getByText("现在不用处理", { exact: true }).waitFor();
+  await page.locator(".goal-quiet-row").getByText("等待外部", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("当前安排").count(), 0);
   await page.getByRole("button", { name: "1 小时后提醒", exact: true }).click();
   await page.waitForFunction(async goalId => {
@@ -681,7 +716,7 @@ try {
   await page.waitForFunction(async goalId => {
     const state = await window.crewvane.command({ type: "snapshot" });
     const goal = state.goals.find(item => item.id === goalId);
-    return goal?.status === "waiting" &&
+    return goal?.status === "active" && goal.waitingFor === undefined &&
       goal.mode === "concierge" &&
       goal.remindAt === undefined &&
       goal.activities.some(activity => activity.text === "审批通过了，请管家判断下一步并继续推进。");
@@ -738,7 +773,7 @@ try {
       tabId: "w1:t2",
     },
   });
-  await service.execute({ type: "goal.resume", goalId: sceneGoal.id, mode: "manual", note: "继续核实现场入口" });
+  await service.execute({ type: "goal.update", goalId: sceneGoal.id, patch: { next: "继续核实现场入口" } });
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "现场入口验证" }).click();
   await page.locator(".error").getByText(/Herdr|管家|现场/).first().waitFor();
@@ -852,9 +887,9 @@ try {
       if (await page.locator("html").getAttribute("data-theme") !== theme)
         await page.getByRole("button", { name: theme === "light" ? "浅色模式" : "深色模式" }).click();
       await page.waitForTimeout(120);
-      for (const screen of ["home", "goals", "settings"]) {
+      for (const screen of ["home", "tasks", "goals", "settings"]) {
         await page.getByRole("button", {
-          name: screen === "home" ? "注意力" : screen === "goals" ? "全部目标" : "设置",
+          name: screen === "home" ? "注意力" : screen === "tasks" ? "待办池" : screen === "goals" ? "全部目标" : "设置",
           exact: true,
         }).click();
         await page.waitForTimeout(120);
@@ -864,6 +899,30 @@ try {
           path: join(auditDirectory, `${size[0]}x${size[1]}-${theme}-${screen}.png`),
           animations: "disabled",
         });
+        if (screen === "tasks") {
+          for (const [section, name] of [["later", "先记下"], ["self", "我来做"]]) {
+            await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
+            await page.waitForTimeout(80);
+            const sectionIssues = await page.evaluate(auditRenderedUi);
+            auditReport.push({ size: size.join("x"), theme, screen: `tasks-${section}`, issues: sectionIssues });
+            await page.screenshot({
+              path: join(auditDirectory, `${size[0]}x${size[1]}-${theme}-tasks-${section}.png`),
+              animations: "disabled",
+            });
+          }
+        }
+        if (screen === "settings") {
+          const main = page.locator(".main > main");
+          await main.evaluate(element => { element.scrollTop = element.scrollHeight; });
+          await page.waitForTimeout(100);
+          const bottomIssues = await page.evaluate(auditRenderedUi);
+          auditReport.push({ size: size.join("x"), theme, screen: "settings-bottom", issues: bottomIssues });
+          await page.screenshot({
+            path: join(auditDirectory, `${size[0]}x${size[1]}-${theme}-settings-bottom.png`),
+            animations: "disabled",
+          });
+          await main.evaluate(element => { element.scrollTop = 0; });
+        }
       }
       await page.getByRole("button", { name: "全部目标", exact: true }).click();
       await page.getByText("联系管家失败界面", { exact: true }).click();
@@ -920,13 +979,13 @@ try {
         "single natural-language goal intake",
         "image paste, drag, file selection, preview, removal, and metadata-only persistence",
         "keyboard submission for goal intake",
-        "goal.message preserves the next step and status",
+        "goal.message preserves the next step without inferring approval or completion",
         "reply images are imported into the message activity",
         "complete goal conversation and substantive owner answer remain visible",
         "external terminal feedback refreshes the app without replaying a handoff",
         "waiting chat handoff and snooze work without ambiguous state buttons",
         "light and narrow goal detail layouts have no horizontal overflow",
-        "6 theme/size UI audit combinations across 5 core screens",
+        "6 theme/size combinations across attention, both task-pool sections, goals, settings top/bottom, goal detail, and intake",
         "dispatch failure is presented as a retryable concierge connection failure",
         "permanent deletion for completed goals",
         "in-app goal abandonment with a recorded reason",

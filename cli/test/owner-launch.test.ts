@@ -145,6 +145,63 @@ test("launches the configured agent with an isolated owner environment", async (
   assert.equal(state.goals[0]?.herdr?.paneId, "w7:p3");
 });
 
+test("reopens the original Agent kind with its native resume arguments", async () => {
+  const { root, service } = await fixture();
+  const goal = (await service.execute({
+    type: "goal.create",
+    input: {
+      title: "恢复原负责人",
+      projectId: "personal",
+      mode: "concierge",
+    },
+  })) as Goal;
+  const mock = fakeRunner({ paneShape: true });
+  const result = await launchOwner(
+    service,
+    {
+      goalId: goal.id,
+      name: "owner-a",
+      task: "继续原目标，先等待管家转交新消息。",
+      resume: {
+        owner: "owner-a",
+        cwd: root,
+        savedAt: new Date().toISOString(),
+        agentSession: {
+          source: "herdr:codex",
+          agent: "codex",
+          kind: "id",
+          value: "session-123",
+        },
+      },
+    },
+    {
+      environment: {
+        HERDR_ENV: "1",
+        HERDR_SESSION: "crewvane-test",
+        HOME: root,
+        PATH: "/usr/bin:/bin",
+      },
+      run: mock.run,
+    },
+  );
+  assert.equal(result.runtime, "codex");
+  const start = mock.calls.find(args =>
+    args[0] === "agent" && args[1] === "start" && !args.includes("--help"));
+  assert.ok(start);
+  assert.equal(start[start.indexOf("--kind") + 1], "codex");
+  assert.deepEqual(
+    start.slice(start.indexOf("--") + 1),
+    ["resume", "session-123"],
+  );
+  assert.equal(
+    mock.calls.some(args =>
+      args[0] === "agent" && args[1] === "start" && args.includes("--help")),
+    false,
+  );
+  assert.match(mock.calls.find(args =>
+    args[0] === "agent" && args[1] === "prompt")![3]!, /继续原目标/);
+});
+
 test("launches a custom interactive CLI and records its real foreground process", async () => {
   const { root, service } = await fixture();
   const goal = (await service.execute({

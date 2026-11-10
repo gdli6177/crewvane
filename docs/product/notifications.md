@@ -11,7 +11,7 @@
 以下目标状态真实变化时发送 `goal.status_changed`：
 
 - `active`：进行中；
-- `waiting`：等待中；
+- `waiting`：等待外部；
 - `review`：待验收；
 - `completed`：已完成；
 - `dropped`：已放弃。
@@ -37,7 +37,7 @@
 
 - 远程 Webhook 必须使用 HTTPS；
 - `localhost`、`127.0.0.1` 和 `::1` 可使用 HTTP，便于本机自动化；
-- 可分别勾选「进行中」「等待中」「待验收」「已完成」「已放弃」五种状态；默认全选；
+- 可分别勾选「进行中」「等待外部」「待验收」「已完成」「已放弃」五种状态；默认全选；
 - 全部取消后仍接收首次进入注意力的 `attention.required`；
 - 可选 Bearer 令牌通过 `Authorization: Bearer …` 发送；
 - 地址和令牌都有长度与控制字符校验；

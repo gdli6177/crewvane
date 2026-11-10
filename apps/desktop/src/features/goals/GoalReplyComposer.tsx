@@ -15,7 +15,7 @@ import type { Goal } from "../../../../../packages/core/src/types.js";
 import type { GoalDetailService } from "./goalService.js";
 import { attentionRequest } from "../../../../../packages/core/src/model.js";
 
-export type GoalReplyMode = "message" | "return" | "drop";
+export type GoalReplyMode = "message" | "return" | "drop" | "restart";
 type ReplyImage = { key: string; file: File; preview: string };
 
 const attachmentFormats = new Set([
@@ -103,6 +103,12 @@ export function GoalReplyComposer({
       submit: "确认放弃",
       note: "放弃后不会再联系管家；记录仍可查看",
     },
+    restart: {
+      heading: "重启目标",
+      placeholder: "告诉管家为什么重启，以及这次要接着推进什么。",
+      submit: "重启并交给管家",
+      note: "会优先恢复原负责人会话；原目标记录和消息都会保留",
+    },
   }[mode];
   const labels = {
     ...baseLabels,
@@ -163,6 +169,11 @@ export function GoalReplyComposer({
     if (!body) return;
     setValidation("");
     try {
+      if (mode === "restart") {
+        await service.restartGoal(goal.id, body);
+        onComplete("目标已重新打开；正在恢复原负责人会话并交给管家");
+        return;
+      }
       if (mode === "return") {
         await service.command({
           type: "goal.rework",
@@ -260,6 +271,8 @@ export function GoalReplyComposer({
               ? "退回说明"
               : mode === "drop"
                 ? "放弃原因"
+                : mode === "restart"
+                  ? "给管家的重启说明"
                 : "发给管家的消息"
           }
           placeholder={labels.placeholder}

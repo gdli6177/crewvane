@@ -47,7 +47,7 @@ crewvane direct --current "用户刚说的话"
 crewvane direct --new "用户在终端里新建的事项"
 crewvane goal message GOAL_ID --text "用户的补充意见"
 crewvane goal progress GOAL_ID --summary "Agent 的明确进展"
-crewvane goal wait GOAL_ID --reason "真实等待对象"
+crewvane goal wait GOAL_ID --reason "等待审批" --owner "外部联系人或机构"
 crewvane goal decide GOAL_ID --question "需要人决定的问题"
 crewvane goal review GOAL_ID --summary "交付与检查事实"
 ```

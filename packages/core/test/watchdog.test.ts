@@ -84,10 +84,8 @@ test("a settled owner is reconciled without declaring its goal completed or fail
   assert.deepEqual(inspectWatchdog([first], after(3)), []);
   assert.equal(first.recovery, undefined);
 });
-test("a quiet owner that recorded waiting on itself is still reconciled", () => {
+test("a quiet active owner is still reconciled", () => {
   const item = goal();
-  item.status = "waiting";
-  item.waitingFor = "owner";
   item.live = { state:"idle", checkedAt:after(1), reachable:true };
   const [request] = inspectWatchdog([item], after(2.5));
   assert.equal(request?.reason, "settled");
@@ -95,13 +93,12 @@ test("a quiet owner that recorded waiting on itself is still reconciled", () => 
   assert.equal(item.watchdog?.contactedAt, after(2.5));
   assert.ok(item.activities.some(activity => /已请管家核查/.test(activity.text)));
 });
-test("waiting for a person or another party does not probe the owner terminal", () => {
-  const human = goal(), external = goal();
-  human.status = external.status = "waiting";
-  human.waitingFor = "你";
+test("external waiting does not probe the owner terminal", () => {
+  const external = goal();
+  external.status = "waiting";
   external.waitingFor = "YR";
-  human.live = external.live = { state:"idle", checkedAt:after(1), reachable:true };
-  assert.deepEqual(inspectWatchdog([human, external], after(20)), []);
+  external.live = { state:"idle", checkedAt:after(1), reachable:true };
+  assert.deepEqual(inspectWatchdog([external], after(20)), []);
 });
 test("an idle owner cannot hide a fresh structured attention request", () => {
   const item = goal();
