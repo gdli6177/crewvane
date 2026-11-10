@@ -26,6 +26,11 @@ export function TaskPool({ goals, open, create, section, onSection }: {
           <p>还没准备好的放这里。自己要做的，也不用交给 Agent。</p>
         </div>
       </section>
+      <div className="task-pool-overview" aria-label="待办概览">
+        <span><strong>{later.length}</strong> 件待安排</span>
+        <i aria-hidden="true" />
+        <span><strong>{self.length}</strong> 件由你推进</span>
+      </div>
       <div className="filter-bar">
         <ChoiceGroup label="待办池分类" value={section} onChange={onSection}
           options={[{ value: "later", label: `先记下 ${later.length}` }, { value: "self", label: `我来做 ${self.length}` }]} />
@@ -34,11 +39,16 @@ export function TaskPool({ goals, open, create, section, onSection }: {
       </div>
       <div className="goal-list">
         {visible.map(goal => (
-          <button className="goal-row" key={goal.id} onClick={() => open(goal.id)}>
+          <button className="goal-row" type="button" key={goal.id} onClick={() => open(goal.id)}>
             <span className={`goal-dot ${goal.status}`} />
-            <div>
+            <div className="goal-row-copy">
               <strong>{goal.title}</strong>
               <p>{goal.remindAt ? `${time(goal.remindAt)} 提醒 · ` : ""}{goal.description}</p>
+              <small>
+                你
+                <span aria-hidden="true">·</span>
+                {time(goal.updatedAt)} 更新
+              </small>
             </div>
             <StatusPill tone={attentionKind(goal) ? "warm" : "neutral"}>
               {attentionKind(goal) === "follow_up" ? "提醒到期" : attentionKind(goal) ? "需要处理" : section === "later" ? "尚未开始" : "我来做"}

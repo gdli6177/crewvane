@@ -252,6 +252,7 @@ try {
   page.setDefaultTimeout(90_000);
   // Onboarding installs tools, launches a CLI and performs many real IPC writes;
   // CI hosts occasionally need longer than the Playwright interaction default.
+  await page.getByRole("button", { name: "注意力", exact: true }).click();
   await page.locator(".top-actions").getByRole("button", { name:"新目标" }).click();
   await page.getByLabel("要交给管家的事情").fill(longGoalRequest);
   await page.getByRole("button", { name:"确认交给管家", exact:true }).click();

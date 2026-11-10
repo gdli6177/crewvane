@@ -434,6 +434,9 @@ function App() {
     modal === "goal" && goal.mode === "manual" && goal.status !== "review"));
   return (
     <div className={`app ${collapsed ? "collapsed" : ""}`}>
+      <a className="skip-link" href="#main-content">
+        跳到主要内容
+      </a>
       <aside className="sidebar">
         <div className="brand">
           <img src={pixelMark} alt="Crewvane" />
@@ -470,6 +473,7 @@ function App() {
         <nav aria-label="主导航">
           <button
             aria-label="注意力"
+            aria-current={page === "home" ? "page" : undefined}
             className={page === "home" ? "active" : ""}
             onClick={() => {
               setPage("home");
@@ -478,21 +482,25 @@ function App() {
           >
             <Inbox />
             <span>注意力</span>
-            {attention.length > 0 && <b>{attention.length}</b>}
+            {attention.length > 0 && (
+              <b aria-label={`${attention.length} 件需要处理`}>{attention.length}</b>
+            )}
           </button>
           <button
             className={page === "tasks" ? "active" : ""}
             aria-label="待办池"
+            aria-current={page === "tasks" ? "page" : undefined}
             title={`${taskPoolCount} 件待办`}
             onClick={() => { setPage("tasks"); setProjectId(""); }}
           >
             <NotebookPen />
             <span>待办池</span>
-            <b>{taskPoolCount}</b>
+            <b aria-label={`${taskPoolCount} 件待办`}>{taskPoolCount}</b>
           </button>
           <button
             className={page === "goals" && !projectId ? "active" : ""}
             aria-label="全部目标"
+            aria-current={page === "goals" && !projectId ? "page" : undefined}
             onClick={() => {
               setPage("goals");
               setProjectId("");
@@ -504,6 +512,7 @@ function App() {
           <button
             className={page === "settings" ? "active" : ""}
             aria-label="设置"
+            aria-current={page === "settings" ? "page" : undefined}
             onClick={() => setPage("settings")}
           >
             <Settings2 />
@@ -511,11 +520,12 @@ function App() {
           </button>
         </nav>
         <div className="projects">
-          <small>我的空间</small>
+          <small>项目</small>
           {state.projects.map((item) => (
             <button
               key={item.id}
               className={projectId === item.id ? "active" : ""}
+              aria-current={projectId === item.id ? "page" : undefined}
               onClick={() => {
                 setProjectId(item.id);
                 setPage("goals");
@@ -553,11 +563,15 @@ function App() {
           </button>
         </div>
         <div className="sidebar-footer">
-          <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+          <button
+            aria-label={theme === "dark" ? "浅色模式" : "深色模式"}
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
             {theme === "dark" ? <Sun /> : <Moon />}
             <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
           </button>
           <button
+            className="sidebar-collapse"
             onClick={() => setCollapsed(!collapsed)}
             aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
           >
@@ -568,28 +582,38 @@ function App() {
       </aside>
       <div className="main">
         <header className="topbar">
-          <div>
-            <span className="tiny-star">✦</span>
+          <div className="topbar-context">
+            <span className="topbar-mark" aria-hidden="true">
+              <Sparkles size={16} />
+            </span>
             <span>{project?.name ?? state.name}</span>
             <span className="slash">/</span>
             <strong>{pages[page]}</strong>
           </div>
           <div className="top-actions">
-            <span className={`live-status ${conciergeLive ?? state.concierge.status}`}>
+            <button
+              type="button"
+              className={`live-status live-status--${conciergeLive ?? state.concierge.status}`}
+              disabled={!workspace || busy}
+              title={hasConciergeReference ? "打开管家现场" : "准备并打开管家"}
+              onClick={() => void openScene()}
+            >
               <i />
               {conciergeStatus}
-            </span>
-            <Button
-              variant="primary"
-              onClick={() => createIntake(page === "tasks" ? taskSection : "concierge")}
-              disabled={!workspace}
-              icon={<Plus size={16} />}
-            >
-              {page === "tasks" ? "记一件事" : "新目标"}
-            </Button>
+            </button>
+            {page !== "settings" && (
+              <Button
+                variant="primary"
+                onClick={() => createIntake(page === "tasks" ? taskSection : "concierge")}
+                disabled={!workspace}
+                icon={<Plus size={16} />}
+              >
+                {page === "tasks" ? "记一件事" : "新目标"}
+              </Button>
+            )}
           </div>
         </header>
-        <main>
+        <main id="main-content" tabIndex={-1}>
         {error && (
           <div className="error" role="alert">
             <CircleAlert size={16} />
@@ -818,7 +842,7 @@ function App() {
                   </p>
                 </div>
               </section>
-              <div className="filter-bar">
+              <div className="filter-bar" role="group" aria-label="按目标状态筛选">
                 {(
                   [
                     ["all", "全部"],
@@ -833,6 +857,8 @@ function App() {
                   <button
                     className={filter === value ? "active" : ""}
                     key={value}
+                    type="button"
+                    aria-pressed={filter === value}
                     onClick={() => setFilter(value)}
                   >
                     {label}
@@ -852,12 +878,20 @@ function App() {
                     <button
                       className="goal-row"
                       key={item.id}
+                      type="button"
                       onClick={() => openGoal(item.id)}
                     >
                       <span className={`goal-dot ${item.status}`} />
-                      <div>
+                      <div className="goal-row-copy">
                         <strong>{item.title}</strong>
                         <p>{item.next}</p>
+                        <small>
+                          {state.projects.find((currentProject) => currentProject.id === item.projectId)?.name ?? "个人事项"}
+                          <span aria-hidden="true">·</span>
+                          {item.owner}
+                          <span aria-hidden="true">·</span>
+                          {time(item.updatedAt)} 更新
+                        </small>
                       </div>
                       <StatusPill tone={goalRowTone(item)}>
                         {goalRowLabel(item)}
@@ -1538,20 +1572,40 @@ function Settings({
           <p>没有运行时管理。你已有的工具，在 Herdr 里自然相遇。</p>
         </div>
       </section>
-      <div className="ui-settings-grid">
-        <AgentPreferencesEditor
-          key={workspace}
-          preferences={state.agents ?? { concierge: "codex" }}
-          options={agentOptions}
-          busy={busy}
-          onSave={saveAgents}
-        />
-        <GovernanceEditor
-          projects={state.projects}
-          decisions={state.decisions ?? []}
-          busy={busy}
-          onSave={savePolicy}
-        />
+      <div className="settings-groups">
+        <section className="settings-group" aria-labelledby="settings-work-heading">
+          <header className="settings-group__head">
+            <span>01</span>
+            <div>
+              <h2 id="settings-work-heading">工作方式</h2>
+              <p>决定谁负责执行，以及哪些动作需要你明确批准。</p>
+            </div>
+          </header>
+          <div className="ui-settings-grid">
+            <AgentPreferencesEditor
+              key={workspace}
+              preferences={state.agents ?? { concierge: "codex" }}
+              options={agentOptions}
+              busy={busy}
+              onSave={saveAgents}
+            />
+            <GovernanceEditor
+              projects={state.projects}
+              decisions={state.decisions ?? []}
+              busy={busy}
+              onSave={savePolicy}
+            />
+          </div>
+        </section>
+        <section className="settings-group" aria-labelledby="settings-tools-heading">
+          <header className="settings-group__head">
+            <span>02</span>
+            <div>
+              <h2 id="settings-tools-heading">连接与环境</h2>
+              <p>管理 Herdr、命令行入口、Agent Skill 和工作区位置。</p>
+            </div>
+          </header>
+          <div className="ui-settings-grid">
         <SettingsSection
           wide
           icon={<SquareTerminal />}
@@ -1689,6 +1743,17 @@ function Settings({
             </Button>
           </div>
         </SettingsSection>
+          </div>
+        </section>
+        <section className="settings-group" aria-labelledby="settings-prefs-heading">
+          <header className="settings-group__head">
+            <span>03</span>
+            <div>
+              <h2 id="settings-prefs-heading">提醒与外观</h2>
+              <p>选择界面观感，以及哪些变化应该主动找到你。</p>
+            </div>
+          </header>
+          <div className="ui-settings-grid">
         <SettingsSection
           icon={theme === "dark" ? <Moon /> : <Sun />}
           title="外观"
@@ -1739,8 +1804,10 @@ function Settings({
             </Button>
           </div>
         </SettingsSection>
+          </div>
+        </section>
         <p className="settings-foot">
-          Crewvane {version} · 一位管家 · {state.projects.length} 个空间 ·{" "}
+          Crewvane {version} · 一位管家 · {state.projects.length} 个项目 ·{" "}
           {state.goals.length} 个目标
         </p>
       </div>

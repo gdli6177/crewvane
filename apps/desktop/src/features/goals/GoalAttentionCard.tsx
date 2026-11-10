@@ -56,7 +56,7 @@ export function GoalAttentionCard({
           <header className="goal-attention-header">
             <div className="goal-detail-origin">
               <span><Sparkles size={15} /></span>
-              <p><small>ATTENTION · {view.projectName}</small><strong>{view.label}</strong></p>
+              <p><small>注意力 · {view.projectName}</small><strong>{view.label}</strong></p>
             </div>
             <div className="goal-detail-header-actions">
               <button type="button" className="goal-scene-button" disabled={busy}
@@ -69,7 +69,7 @@ export function GoalAttentionCard({
           </header>
           <Dialog.Title className="goal-attention-title">{goal.title}</Dialog.Title>
           <Dialog.Description className="goal-attention-description">
-            只展示此刻需要的依据和操作。完整目标记录随时可查。
+            先看依据，再选择继续、退回或回到现场。
           </Dialog.Description>
           <div className="goal-attention-body">
             <section className={`attention-action-focus ${view.tone}`} aria-label="当前需要处理的事项">
@@ -108,7 +108,7 @@ export function GoalAttentionCard({
               replyMode={replyMode} setReplyMode={setReplyMode} notify={notify} />
           </footer>
           <footer className="goal-attention-footer">
-            <span><FileText size={13} /> 终端原文留在现场，不作为验收依据。</span>
+            <span><FileText size={13} /> 验收以成果和检查记录为准</span>
             <button type="button" onClick={openDetails}>完整记录 <ChevronRight size={14} /></button>
           </footer>
         </Dialog.Content>
