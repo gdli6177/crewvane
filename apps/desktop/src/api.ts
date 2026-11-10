@@ -3,6 +3,7 @@ import type { HerdrStatus } from "../electron/herdr-install.js";
 import type { HerdrPluginStatus } from "../electron/herdr-plugin.js";
 import type { WebhookSaveInput, WebhookSettings } from "../electron/webhook-notifications.js";
 import type { SkillsInstallResult, SkillsStatus } from "../electron/skill-installer.js";
+import type { CacheCleanupResult, CacheStatus } from "../electron/cache-maintenance.js";
 export interface DesktopApi {
   command(command: CrewvaneCommand): Promise<any>;
   importAttachments(inputs: { name: string; bytes: ArrayBuffer }[]): Promise<GoalAttachment[]>;
@@ -11,6 +12,8 @@ export interface DesktopApi {
   selectWorkspace(): Promise<string | null>; selectProject(): Promise<string | null>;
   environment(): Promise<{ workspace?: string; version: string }>;
   herdrStatus(): Promise<HerdrStatus & { session: string; plugin: HerdrPluginStatus }>;
+  cacheMaintenanceStatus(): Promise<CacheStatus>;
+  cleanCache(): Promise<CacheCleanupResult>;
   agentChoices(): Promise<{ kind: string; installed: boolean }[]>;
   webhookSettings(): Promise<WebhookSettings>;
   saveWebhook(input: WebhookSaveInput): Promise<WebhookSettings>;

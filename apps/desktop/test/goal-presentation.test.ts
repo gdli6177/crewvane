@@ -48,6 +48,33 @@ test("dispatch failure is presented as contact failure, not owner intervention",
   assert.equal(view.tone, "blocked");
 });
 
+test("an unconfirmed handoff is presented without asking for a duplicate send", async () => {
+  const root = await fixture();
+  const service = new WorkspaceService(root);
+  const goal = await service.execute({
+    type: "goal.create",
+    input: {
+      title: "现场确认中",
+      projectId: "personal",
+      mode: "concierge",
+    },
+  }) as Goal;
+  await service.execute({
+    type: "goal.dispatch",
+    goalId: goal.id,
+    status: "unconfirmed",
+    requestId: goal.dispatch!.id,
+    detail: "Herdr 已提交任务，但状态确认超时；先以现场为准，不重复发送。",
+  });
+
+  const state = await service.read();
+  const view = presentGoal(state.goals[0]!, state);
+  assert.equal(view.dispatchFailed, false);
+  assert.equal(view.label, "已提交，等待现场确认");
+  assert.equal(view.tone, "waiting");
+  assert.match(view.detail, /不重复发送/);
+});
+
 test("the latest raw message and its attachments remain visible without changing status", async () => {
   const root = await fixture();
   const service = new WorkspaceService(root);

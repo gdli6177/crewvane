@@ -30,6 +30,30 @@ export interface OwnerLaunchResult {
   warning?: string;
 }
 
+export async function startAgentWhenPaneReady(
+  run: HerdrCommandRunner,
+  args: string[],
+  wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let retryDelay = 100;
+  for (;;) {
+    try {
+      return await run(args);
+    } catch (error) {
+      // The pane initialization marker is emitted while the shell may still
+      // be finishing its command. Herdr reports agent_pane_busy before it
+      // launches the agent, so retrying the same pane is safe. Other startup
+      // errors can happen after process creation and must not be replayed.
+      if (!/\bagent_pane_busy\b/.test(String(error)) || Date.now() >= deadline)
+        throw error;
+      await wait(retryDelay);
+      retryDelay = Math.min(1_000, Math.round(retryDelay * 1.6));
+    }
+  }
+}
+
 function payload(raw: string): any {
   const value = JSON.parse(raw);
   return value?.result ?? value;
@@ -187,6 +211,7 @@ export async function launchOwner(
   options: {
     environment?: NodeJS.ProcessEnv;
     run?: HerdrCommandRunner;
+    wait?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<OwnerLaunchResult> {
   const environment = options.environment ?? process.env;
@@ -305,16 +330,20 @@ export async function launchOwner(
       agent: input.name,
     };
     if (command.kind) {
-      await run([
-        "agent",
-        "start",
-        input.name,
-        "--kind",
-        command.kind,
-        "--pane",
-        paneId,
-        ...(command.args.length ? ["--", ...command.args] : []),
-      ]);
+      await startAgentWhenPaneReady(
+        run,
+        [
+          "agent",
+          "start",
+          input.name,
+          "--kind",
+          command.kind,
+          "--pane",
+          paneId,
+          ...(command.args.length ? ["--", ...command.args] : []),
+        ],
+        options.wait,
+      );
     } else {
       await sendShellCommand(run, paneId, [executable, ...command.args].map(quoteShell).join(" "));
       const deadline = Date.now() + 20_000;

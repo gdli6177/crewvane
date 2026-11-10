@@ -212,6 +212,14 @@ export class WorkspaceService {
         body: string,
         actor = "你",
       ) => {
+        // Any structured non-system write proves that the Agent received the
+        // prompt, even when Herdr's immediate lifecycle probe timed out.
+        // Promote a stale delivery receipt before recording the real activity
+        // so later decisions and progress are not hidden behind "unconfirmed".
+        if (item.dispatch?.status === "unconfirmed" && actor !== "系统") {
+          item.dispatch.status = "sent";
+          delete item.dispatch.detail;
+        }
         item.activities.push({
           id: newId("act"),
           at: nowIso(),
@@ -666,7 +674,7 @@ export class WorkspaceService {
           ongoing(item, true);
           if (item.mode !== "concierge")
             throw new Error("这个目标已由你接管");
-          if (!["pending", "sent", "failed"].includes(command.status)) throw new Error("无效的派送状态");
+          if (!["pending", "sent", "unconfirmed", "failed"].includes(command.status)) throw new Error("无效的派送状态");
           const at = nowIso(), detail = command.detail ? text(command.detail, "派送说明", 2000) : undefined;
           item.mode = "concierge";
           item.dispatch = { ...item.dispatch,
@@ -678,8 +686,14 @@ export class WorkspaceService {
             id: newId("attention"),
             kind: "intervention", source: "dispatch", summary: detail || "目标尚未送达管家，请重试。", since: at,
           };
-          if (command.status === "sent" && item.attention?.source === "dispatch") item.attention = null;
-          activity(item, "session", command.status === "sent" ? "目标已送达管家。" : command.status === "failed" ? `联系管家失败：${detail}` : "正在联系管家。", "系统");
+          if (["sent", "unconfirmed"].includes(command.status) && item.attention?.source === "dispatch")
+            item.attention = null;
+          activity(item, "session",
+            command.status === "sent" ? "目标已送达管家。"
+              : command.status === "unconfirmed" ? `目标已提交，送达状态待现场确认。${detail ?? ""}`
+                : command.status === "failed" ? `联系管家失败：${detail}`
+                  : "正在联系管家。",
+            "系统");
           return item;
         }
         case "goal.resume": {

@@ -90,12 +90,15 @@ export function sceneSyncPresentation(goal: Goal) {
   if (goal.mode !== "concierge" || ["completed", "dropped"].includes(goal.status)) return undefined;
   const reply = pendingSceneReply(goal);
   const delivered = goal.dispatch?.kind === "scene_reply" && goal.dispatch.status === "sent";
+  const unconfirmed = goal.dispatch?.kind === "scene_reply" && goal.dispatch.status === "unconfirmed";
   if (reply) return {
     label: goal.dispatch?.status === "failed" ? "现场答复同步失败"
-      : delivered ? "答复已送达，事项尚未解决" : "现场已答复，管家核对中",
+      : unconfirmed ? "答复已提交，等待现场确认"
+        : delivered ? "答复已送达，事项尚未解决" : "现场已答复，管家核对中",
     detail: goal.dispatch?.status === "failed"
       ? goal.dispatch.detail || "答复已保存，恢复管家连接后可以重试。"
-      : delivered ? "管家已收到你的原话；当前问题尚未明确解决，可以继续在现场沟通或补充说明。"
+      : unconfirmed ? goal.dispatch?.detail || "答复已写入本机；Herdr 状态确认超时，先以现场为准。"
+        : delivered ? "管家已收到你的原话；当前问题尚未明确解决，可以继续在现场沟通或补充说明。"
       : "你的原话已保存；管家正在核对这条事项，无需重复答复。",
     quote: reply.quote,
     summary: reply.summary,
@@ -211,6 +214,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     detail = "目标已保存在本机；恢复连接后重试即可继续。";
     brief = goal.dispatch?.detail || goal.attention?.summary || detail;
     nextLabel = "恢复后继续";
+  } else if (goal.dispatch?.status === "unconfirmed") {
+    tone = "waiting";
+    label = "已提交，等待现场确认";
+    detail = goal.dispatch.detail || "任务已写入本机，Herdr 状态确认超时；系统会核对现场，不会自动重复发送。";
+    brief = detail;
+    nextLabel = "核对后的安排";
   } else if (needsDecision) {
     tone = "reply";
     label = "等你决定";

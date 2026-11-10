@@ -48,6 +48,9 @@ test("no-progress check contacts concierge first, deduplicates, and escalates on
   assert.equal(item.attention, null);
   assert.deepEqual(inspectWatchdog([item], after(41)), []);
   assert.equal(structuredClone(item).attention?.source, "watchdog");
+  assert.match(structuredClone(item).attention?.summary ?? "", /目标「巡检事项」/);
+  assert.match(structuredClone(item).attention?.summary ?? "", /30 分钟没有写回实质进展/);
+  assert.match(structuredClone(item).attention?.summary ?? "", /你：已交代事项/);
   const count = item.activities.length;
   inspectWatchdog([item], after(42));
   assert.equal(item.activities.length, count);
