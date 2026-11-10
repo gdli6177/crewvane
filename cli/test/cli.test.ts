@@ -318,7 +318,8 @@ test("ask creates a persisted concierge handoff and message appends feedback wit
   const nextBefore = waited.json.next;
   const messaged = await call(root, ["goal", "message", created.json.id, "--text", "增加一份回滚验证"]);
   assert.equal(messaged.code, 0, messaged.stderr);
-  assert.equal(messaged.json.status, "waiting");
+  assert.equal(messaged.json.status, "active");
+  assert.equal(messaged.json.waitingFor, undefined);
   assert.equal(messaged.json.next, nextBefore);
   assert.equal(messaged.json.dispatch.status, "pending");
   assert.notEqual(messaged.json.dispatch.id, initialRequest);
@@ -572,10 +573,15 @@ test("spawned CLI updates an item and rejects a late update after cancellation",
   const cli = (...args: string[]) => promisify(execFile)("pnpm", ["--dir", "cli", "exec", "tsx", "src/main.ts",
     ...args, "--root", root, "--json"], { cwd: new URL("../../", import.meta.url), timeout: 30_000 });
   const goal = JSON.parse((await cli("goal", "create", "--title", "真实进程调用", "--project", "personal")).stdout);
-  await cli("goal", "update", goal.id, "--next", "等待审批", "--status", "waiting", "--remind-at", "2030-01-01T00:00:00Z");
+  await assert.rejects(() => cli("goal", "wait", goal.id, "--reason", "缺少对象"), /外部第三方/);
+  await assert.rejects(() => cli("goal", "wait", goal.id, "--reason", "等你确认", "--owner", "你"), /外部第三方/);
+  await assert.rejects(() => cli("goal", "update", goal.id, "--status", "waiting"), /外部第三方/);
+  await cli("goal", "update", goal.id, "--next", "等待审批", "--status", "waiting", "--waiting-for", "YR", "--remind-at", "2030-01-01T00:00:00Z");
   const state = await new WorkspaceService(root).read();
   assert.equal(state.goals[0]?.status, "waiting");
   assert.equal(state.goals[0]?.next, "等待审批");
+  assert.equal(state.goals[0]?.waitingFor, "YR");
+  assert.equal(state.goals[0]?.owner, "待分配负责人");
   await cli("goal", "drop", goal.id, "--reason", "无需继续");
   await assert.rejects(() => cli("goal", "progress", goal.id, "--summary", "迟到写回"), /已结束/);
   const deferred = JSON.parse((await cli("capture", "跨进程记录的想法")).stdout);

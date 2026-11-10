@@ -20,14 +20,14 @@ async function fixture() {
   return { service, id: item.id };
 }
 
-test("offline handoff is saved, restart retries the actual follow-up message without resuming", async () => {
+test("offline handoff is saved and restart retries the actual follow-up as active coordination", async () => {
   const { service, id } = await fixture();
   await service.execute({ type: "goal.followup", goalId: id, note: "核查审批进展" });
   await deliverGoalUpdate(service, id, async () => { throw new Error("连接失败"); });
   let goal = (await service.read()).goals[0]!;
   assert.equal(goal.dispatch?.status, "failed");
   assert.equal(goal.attention?.source, "dispatch");
-  assert.equal(goal.status, "waiting");
+  assert.equal(goal.status, "active");
   const calls: string[][] = [];
   const messenger = new HerdrClient({ async run(args) {
     calls.push(args);
@@ -43,26 +43,26 @@ test("offline handoff is saved, restart retries the actual follow-up message wit
   goal = (await service.read()).goals[0]!;
   assert.equal(goal.dispatch?.status, "sent");
   assert.equal(goal.attention, null);
-  assert.equal(goal.status, "waiting");
+  assert.equal(goal.status, "active");
   assert.match(calls[0]![3]!, /核查审批进展/);
-  assert.match(calls[0]![3]!, /保持等待状态和跟进提醒/);
+  assert.match(calls[0]![3]!, /具名外部第三方/);
   assert.match(calls[0]![3]!, /\[CREWVANE_CASE_BEGIN\]/);
   assert.match(calls[0]![3]!, /\[CREWVANE_CASE_END\]/);
 });
 
-test("a newer resume request is not acknowledged by an older in-flight follow-up", async () => {
+test("a newer feedback request is not acknowledged by an older in-flight follow-up", async () => {
   const { service, id } = await fixture();
   await service.execute({ type: "goal.followup", goalId: id });
   const sent: string[] = [];
   await deliverGoalUpdate(service, id, async item => {
     sent.push(item.dispatch!.kind!);
     if (sent.length === 1) {
-      await service.execute({ type: "goal.resume", goalId: id, note: "审批通过，继续", mode: "concierge" });
+      await service.execute({ type: "goal.message", goalId: id, text: "审批通过，继续" });
     }
   });
-  assert.deepEqual(sent, ["follow_up", "resume"]);
+  assert.deepEqual(sent, ["follow_up", "feedback"]);
   const goal = (await service.read()).goals[0]!;
-  assert.equal(goal.dispatch?.kind, "resume");
+  assert.equal(goal.dispatch?.kind, "feedback");
   assert.equal(goal.dispatch?.status, "sent");
   assert.equal(goal.status, "active");
 });
@@ -71,7 +71,7 @@ test("manual takeover during send is never turned back into a concierge goal", a
   const { service, id } = await fixture();
   await service.execute({ type: "goal.followup", goalId: id });
   await deliverGoalUpdate(service, id, async () => {
-    await service.execute({ type: "goal.resume", goalId: id, note: "我来处理", mode: "manual" });
+    await service.execute({ type: "goal.takeover", goalId: id });
   });
   const goal = (await service.read()).goals[0]!;
   assert.equal(goal.mode, "manual");

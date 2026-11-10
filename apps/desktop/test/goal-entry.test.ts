@@ -21,6 +21,12 @@ test("real live intervention opens the owner scene directly", () => {
   })), "scene");
 });
 
+test("a historical human wait without an owner scene still has an actionable card", () => {
+  assert.equal(goalEntryDestination(goal({
+    attention: { kind: "intervention", summary: "请确认下一步", since: at },
+  })), "attention");
+});
+
 test("decision and review retain compact action cards", () => {
   assert.equal(goalEntryDestination(goal({
     attention: { kind: "decision", summary: "选择哪个方案？", since: at },

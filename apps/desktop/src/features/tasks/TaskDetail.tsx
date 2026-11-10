@@ -44,7 +44,7 @@ export function TaskDetail({ goal, service, busy, error, close, delegated, notif
         </div>
         <Card tone="soft"><p className="task-description">{goal.description}</p></Card>
         {goal.status === "waiting" && <Card tone="soft"><p className="task-description">
-          {goal.waitingFor ? `正在等待 ${goal.waitingFor}。` : "正在等待外部结果。"} {goal.next}
+          {goal.waitingFor ? `等待外部：${goal.waitingFor}。` : "正在等待外部结果。"} {goal.next}
         </p></Card>}
         {request && (
           <Card tone="warm">

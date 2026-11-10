@@ -72,7 +72,7 @@ test("the latest raw message and its attachments remain visible without changing
   assert.equal(view.latest?.kind, "message");
   assert.equal(view.latest?.text, "只补充背景，不改下一步。");
   assert.equal(current.next, "按原计划继续");
-  assert.equal(current.status, "waiting");
+  assert.equal(current.status, "active");
 });
 
 test("the summary keeps the latest agent reply when newer user context arrives", async () => {

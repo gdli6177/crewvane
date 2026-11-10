@@ -139,7 +139,7 @@ function automaticTask(goal: {
     `目标 ID：${goal.id}`,
     `完整目标原文：\n${goal.description}`,
     goal.next.trim() ? `当前下一步：\n${goal.next}` : "",
-    `实际执行由你完成；咨询用 crewvane goal progress ${goal.id} --summary "<具体答案>" 写回，等待用 crewvane goal wait ${goal.id} --reason "<实际等待>"，需要人选择用 crewvane goal decide ${goal.id} --question "<具体问题>" 提出问题并结束本回合。只有有实际可验收成果时才运行真实检查并用 crewvane goal review 提交成果摘要、位置与检查记录；不要为等待或咨询伪造交付。`,
+    `实际执行由你完成；咨询用 crewvane goal progress ${goal.id} --summary "<具体答案>" 写回。只有等待用户和所有 Agent 之外的具名外部第三方时，才用 crewvane goal wait ${goal.id} --reason "<外部等待原因>" --owner "<外部联系人或机构>"；需要用户选择、确认、提供信息或操作时，用 crewvane goal decide ${goal.id} --question "<具体问题>" 提出问题并结束本回合，不得记为 waiting。你、管家、工人和其他 Agent 之间的内部协调保持 active，通过 progress 写回实际结果；不要把终端空闲或结束一回合当成等待。remind 只设置提醒，不改变生命周期。只有有实际可验收成果时才运行真实检查并用 crewvane goal review 提交成果摘要、位置与检查记录；不要为等待或咨询伪造交付。`,
   ].filter(Boolean).join("\n\n");
 }
 

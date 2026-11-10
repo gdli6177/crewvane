@@ -5,6 +5,7 @@ import { nextSequence, withLock } from "./storage.js";
 import type { WorkspaceRecoveryReason, WorkspaceState } from "./types.js";
 import { defaultProjectPolicy, initialState, newId } from "./model.js";
 import { decisionMarkdown } from "./governance.js";
+import { normalizeExternalWaits } from "./waiting.js";
 export { initialState, newId } from "./model.js";
 class IncompatibleWorkspaceStateError extends Error {
   constructor(readonly reason: WorkspaceRecoveryReason, message: string) {
@@ -64,6 +65,7 @@ export function validateState(value: unknown): WorkspaceState {
   const state = value as unknown as WorkspaceState;
   state.decisions ??= [];
   for (const project of state.projects) project.policy ??= defaultProjectPolicy();
+  normalizeExternalWaits(state);
   return state;
 }
 async function writeAtomic(path: string, body: string) {

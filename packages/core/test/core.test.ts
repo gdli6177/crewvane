@@ -230,7 +230,7 @@ test("waiting only becomes attention at the reminder time", async () => {
     item.id,
   );
 });
-test("goal messages preserve state and remain isolated by goal id", async () => {
+test("goal messages return external waiting to coordination and remain isolated by goal id", async () => {
   const { service } = await fixture(), first = await create(service), second = await create(service);
   await service.execute({
     type: "goal.wait", goalId: first.id, reason: "等 YR 审批", owner: "YR",
@@ -248,10 +248,10 @@ test("goal messages preserve state and remain isolated by goal id", async () => 
   const messaged = await service.execute({
     type: "goal.message", goalId: first.id, text: "先保留现有范围，不要扩大。",
   }) as Goal;
-  assert.equal(messaged.status, "waiting");
+  assert.equal(messaged.status, "active");
   assert.equal(messaged.next, beforeFirst.next);
-  assert.equal(messaged.waitingFor, "YR");
-  assert.equal(messaged.remindAt, beforeFirst.remindAt);
+  assert.equal(messaged.waitingFor, undefined);
+  assert.equal(messaged.remindAt, undefined);
   assert.equal(messaged.dispatch?.status, "pending");
   assert.equal(messaged.activities.at(-1)?.kind, "message");
   assert.equal(messaged.activities.at(-1)?.text, "先保留现有范围，不要扩大。");

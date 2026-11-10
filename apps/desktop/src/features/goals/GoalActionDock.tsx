@@ -240,7 +240,7 @@ export function GoalActionDock({
           <CircleAlert size={18} />
         </span>
         <div>
-          <strong>负责人现场需要你处理</strong>
+          <strong>{goal.herdr ? "负责人现场需要你处理" : "需要你处理"}</strong>
           <small>{goal.attention?.summary || goal.next}</small>
         </div>
         <div className="goal-action-buttons">
@@ -299,7 +299,7 @@ export function GoalActionDock({
           <Clock3 size={18} />
         </span>
         <div>
-          <strong>现在不用处理</strong>
+          <strong>等待外部</strong>
           <small>
             {goal.waitingFor ? `正在等待 ${goal.waitingFor}。` : "正在等待外部结果。"}
             {goal.next ? ` ${goal.next}` : ""}

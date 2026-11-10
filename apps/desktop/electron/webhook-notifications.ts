@@ -64,7 +64,7 @@ const allGoalStatuses: GoalStatus[] = ["backlog", "active", "waiting", "review",
 const statusLabels: Record<GoalStatus, string> = {
   backlog: "暂存",
   active: "进行中",
-  waiting: "等待中",
+  waiting: "等待外部",
   review: "待验收",
   completed: "已完成",
   dropped: "已放弃",

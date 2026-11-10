@@ -33,7 +33,7 @@ Crewvane 0.6 是一个**全局管家与注意力中心**。用户把事项告诉
 Crewvane 工作区
 ├── 注意力
 │   ├── 需要你处理：决定 / 验收 / 到期跟进 / 会话介入
-│   ├── 在等待：等待对象、下一步、跟进时间
+│   ├── 等待外部：外部联系人或机构、下一步、跟进时间
 │   └── 跟进中：精简进度摘要，不发送普通进度通知
 ├── 全部目标
 │   ├── 项目筛选、状态筛选与搜索
@@ -102,7 +102,7 @@ Crewvane 工作区
 
 状态中的 `workflows` 与 `steps` 只作为旧快照结构占位读取，不再出现在产品入口、CLI、目标详情或管家提示词中。
 
-生命周期使用 `backlog | active | waiting | review | completed | dropped`。`backlog` 表示仅暂存、尚未授权执行；`active` 表示正在推进或管家可以下一步处理；`waiting` 表示等待真实外部结果；`review` 表示已提交给人验收。是否进入注意力队列由独立注意力或明确到期提醒决定，不能从 Herdr 空闲状态推断。
+生命周期使用 `backlog | active | waiting | review | completed | dropped`。`backlog` 表示仅暂存、尚未授权执行；`active` 表示仍需跟进，不表示终端一直在执行；`waiting` 仅表示等待用户和所有 Agent 之外的具名外部第三方；`review` 表示已提交给人验收。需要用户决定、确认、提供信息或操作时保持 `active` 并进入注意力；内部 Agent 协调保持 `active`。是否进入注意力由独立注意力或明确到期提醒决定，不能从 Herdr 空闲状态推断。
 
 待办池是同一份 `Goal` 的投影：“先记下”为 `backlog/manual`，“我来做”为 `active/manual`。统一输入框通过 `goal.intake.handling` 选择 `later | self | concierge`。前两者不启动 Agent，也不参与停滞巡检；提醒是独立可选字段，不要求把人工事项改为等待别人。查看和追加备注不清除个人提醒。准备好后通过 `takeover` 或 `delegate` 复用原记录开始；人工完成不要求提交 Agent 验收材料。详见 [待办池开发说明](task-pool-proposal.md)。
 
@@ -122,13 +122,13 @@ Crewvane 工作区
 | 管家 / 负责人明确请求人决定；上线策略要求审批 | 是，`decision` | 是，决定账本命中时除外 |
 | 删除数据、停服、花钱、外部发消息、改产品方向、新建或轮换密钥、改权限、改上线策略 | 是，`decision` | 是，任何 ship policy 都相同；决定账本命中时直接沿用 |
 | 提交了真实交付记录 | 是，`review` | 是 |
-| 等待、暂存或个人执行的 `remindAt <= now` | 是，`follow_up` | 每个提醒时间最多一次，不自动启动 Agent |
+| 等待外部、暂存或活动目标的 `remindAt <= now` | 是，`follow_up` | 每个提醒时间最多一次，不自动启动 Agent |
 | Herdr 对应 Agent 为 `blocked` / 不可达 | 先由巡检联系管家 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | 活跃目标的负责人 `idle` / `done` 持续 90 秒且没有写回结果 | 先由巡检联系管家核对现场、结果和下一步，显示“待管家核对” | 不直接通知；联系失败或 10 分钟无恢复进展时通知 |
 | 活跃目标 30 分钟未写回实质进展 | 先由巡检联系管家，不以终端忙闲判定失败 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | Herdr 为 `working` / `idle` / `done` / `unknown` | 否 | 否 |
 | 普通进展更新 | 否 | 否 |
-| 等待他人但未到提醒时间 | 仅在“在等待” | 否 |
+| 等待外部但未到提醒时间 | 仅在“等待外部” | 否 |
 | 已完成 / 已放弃 | 否 | 否 |
 
 人工在桌面更新的目标说明、下一步和提醒优先于自动同步。现场同步只更新独立的 `live` 状态。巡检先联系管家处理负责人问题；联系失败或 10 分钟没有恢复进展才产生自己的介入项，不覆盖人工决定或验收。`active` 是业务目标仍需跟进，不表示终端一直在工作；列表分别显示“执行中”“待管家核对”和“待管家跟进”，不把“回到现场”作为执行中状态。已明确等待他人、待验收、已结束和仅手动记录的目标不进行无进展催办。巡检记录不得被当作任务取得新进展，迟到的巡检结果不能覆盖任务的新进展。负责人恢复 `working` 或提交新的决定、交付时，旧的空闲核对提示立即失效。
@@ -207,7 +207,7 @@ crewvane goal create --title TEXT --project ID [--description TEXT]
 crewvane goal update ID [--title TEXT] [--description TEXT] [--next TEXT]
                         [--owner TEXT] [--status active|waiting] [--remind-at ISO]
 crewvane goal progress ID --summary TEXT [--next TEXT] [--owner NAME]
-crewvane goal wait ID --reason TEXT [--owner TEXT] [--remind-at ISO]
+crewvane goal wait ID --reason TEXT --owner 外部第三方 [--remind-at ISO]
 crewvane goal decide ID --question TEXT [--next TEXT]
 crewvane goal risk ID --category CATEGORY --summary TEXT [--key KEY]
 crewvane goal ship ID --operation merge|deploy --checks passed|failed
@@ -230,11 +230,11 @@ crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
 
 `goal risk` 覆盖 `delete-data`、`stop-service`、`spend-money`、`external-message`、`product-direction`、`create-secret`、`rotate-secret`、`change-permissions`、`change-ship-policy`。这些动作即使处于 `auto` 项目也会先问人。同一目标默认最多三轮审查；第四轮返回 `intervention`，人在注意力面板允许后才增加一轮。
 
-`ask` 与桌面单框新建共用 `goal.intake`，立即保存完整原文、附件和持久派发请求；桌面未运行或用户稍后启动时会补发。`goal message` 与 `direct` 是消息入口，只追加人的原话和附件，不覆盖下一步或改变状态；`direct` 不接受 `--next`。`progress`、`wait`、`review`、`decide` 等是 Agent 或受信任适配器在明确事实发生后使用的高级状态协议。`board` 是 Herdr 插件使用的同源终端 Pane：交互模式支持选择、补充/决定、等待跟进、继续推进、人工接管、验收、退回和聚焦负责人现场，`--once` 输出静态文本供测试和诊断。
+`ask` 与桌面单框新建共用 `goal.intake`，立即保存完整原文、附件和持久派发请求；桌面未运行或用户稍后启动时会补发。`goal message` 与 `direct` 保存原话和附件，不从正文推断批准、验收或完成；外部等待交回 Agent 时先恢复 `active`、清除旧等待与提醒，原下一步保留；`direct` 不接受 `--next`。`progress`、`wait`、`review`、`decide` 等是 Agent 或受信任适配器在明确事实发生后使用的高级状态协议。`board` 是 Herdr 插件使用的同源终端 Pane：交互模式支持选择、补充/决定、等待跟进、继续推进、人工接管、验收、退回和聚焦负责人现场，`--once` 输出静态文本供测试和诊断。
 
 管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind、session；不得 list、attention、ask、message 或跨目标访问。这个应用层闸门不冒充操作系统文件沙箱。
 
-等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。交给管家的 `goal.message` 清除已处理的到期注意力与旧提醒，但保持 `waiting` 和等待对象不变；个人事项的普通备注不清提醒；管家收到唯一 `feedback` 请求后，依据用户明确语义调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发；已移出且没有现场的个人记录允许显式恢复到暂存，不恢复任何 Agent 执行状态。
+外部等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。交给管家的 `goal.message`、`direct` 与显式跟进会先恢复 `active` 并清除旧等待与提醒，表示管家正在处理，并不证明外部已完成；管家核查后仍需等外部时，重新执行 `wait` 并安排提醒。个人事项的普通备注保留真实外部等待与提醒。管家依据明确事实调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发；已移出且没有现场的个人记录允许显式恢复到暂存，不恢复任何 Agent 执行状态。
 
 高级手动操作必须区分补充进展、编辑目标与提交成果。补充进展只写事实，不默认覆盖下一步；编辑目标调整安排但不提交验收；提交成果必须包含可核对成果与真实检查。等待中的直接操作与这些高级表单不能互相覆盖输入或改变原定安排。
 

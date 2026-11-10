@@ -11,7 +11,7 @@ export type GoalTone = "running" | "waiting" | "review" | "reply" | "blocked" | 
 export const statusLabel = {
   backlog: "暂存",
   active: "跟进中",
-  waiting: "等待中",
+  waiting: "等待外部",
   review: "待验收",
   completed: "已完成",
   dropped: "已放弃",
@@ -219,17 +219,19 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     nextLabel = "决定后继续";
   } else if (needsIntervention) {
     tone = "blocked";
-    label = "需要你排障";
-    detail = "负责人无法自行继续，需要你在现场完成一次操作。";
+    label = goal.herdr ? "需要你排障" : "需要你处理";
+    detail = goal.herdr
+      ? "负责人无法自行继续，需要你在现场完成一次操作。"
+      : "这件事有尚未处理的事项，可以回复管家或查看完整记录。";
     brief = goal.attention?.summary || goal.next;
     nextLabel = "处理后的安排";
   } else if (dueFollowUp) {
     tone = "waiting";
     label = "到点跟进";
-    detail = "到了你设定的跟进时间，可以确认等待是否已有结果。";
+    detail = "到了你设定的提醒时间，请确认下一步安排。";
     brief = goal.waitingFor
       ? `正在等待 ${goal.waitingFor}，现在需要确认是否已有结果。`
-      : "等待事项已到跟进时间。";
+      : goal.next || "到了你设定的提醒时间。";
     nextLabel = "下一步";
   } else if (goal.watchdog?.contactedAt) {
     tone = "waiting";

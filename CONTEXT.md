@@ -24,7 +24,7 @@
 - **交付 / Delivery**：供人验收的成果摘要、位置和真实检查记录；Agent 自称完成不等于交付已验收。
 - **现场 / HerdrReference**：目标对应的真实 Herdr Session、Tab、Pane、Agent ID，供恢复和人工接管使用。
 - **Herdr 插件 / Herdr plugin**：随应用安装的 Herdr 动作与 Pane，只提供注意力入口、一句话新建目标、回到管家和现场事件；持久事实仍由 Crewvane core 与 CLI 保存。
-- **等待 / Waiting**：有等待对象和可选跟进时间的目标状态；到提醒时间才进入注意力。
+- **等待 / Waiting**：仅等待用户和所有 Crewvane Agent 之外的具名外部第三方，界面显示“等待外部”；需要用户决定、确认、提供信息或操作时进入注意力，内部 Agent 协调保持 `active`。提醒独立于生命周期。
 
 0.4 起不再使用运行时配置、ACP / App Server、项目授权、泳道、密码本和自动调度；0.5 继续这条边界。0.6 不导入 0.3 的旧语义，但发现旧版、损坏或缺快照的工作区时会整库归档为 `.crewvane.backup-*`，再自动创建兼容的新 v2 工作区。
 

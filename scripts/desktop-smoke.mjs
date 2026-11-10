@@ -652,7 +652,7 @@ try {
   await page.reload();
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "等待审批操作" }).click();
-  await page.getByText("现在不用处理", { exact: true }).waitFor();
+  await page.locator(".goal-quiet-row").getByText("等待外部", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("当前安排").count(), 0);
   await page.getByRole("button", { name: "1 小时后提醒", exact: true }).click();
   await page.waitForFunction(async goalId => {
@@ -681,7 +681,7 @@ try {
   await page.waitForFunction(async goalId => {
     const state = await window.crewvane.command({ type: "snapshot" });
     const goal = state.goals.find(item => item.id === goalId);
-    return goal?.status === "waiting" &&
+    return goal?.status === "active" && goal.waitingFor === undefined &&
       goal.mode === "concierge" &&
       goal.remindAt === undefined &&
       goal.activities.some(activity => activity.text === "审批通过了，请管家判断下一步并继续推进。");
@@ -738,7 +738,7 @@ try {
       tabId: "w1:t2",
     },
   });
-  await service.execute({ type: "goal.resume", goalId: sceneGoal.id, mode: "manual", note: "继续核实现场入口" });
+  await service.execute({ type: "goal.update", goalId: sceneGoal.id, patch: { next: "继续核实现场入口" } });
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.locator(".goal-row").filter({ hasText: "现场入口验证" }).click();
   await page.locator(".error").getByText(/Herdr|管家|现场/).first().waitFor();
@@ -920,7 +920,7 @@ try {
         "single natural-language goal intake",
         "image paste, drag, file selection, preview, removal, and metadata-only persistence",
         "keyboard submission for goal intake",
-        "goal.message preserves the next step and status",
+        "goal.message preserves the next step without inferring approval or completion",
         "reply images are imported into the message activity",
         "complete goal conversation and substantive owner answer remain visible",
         "external terminal feedback refreshes the app without replaying a handoff",

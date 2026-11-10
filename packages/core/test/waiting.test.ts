@@ -39,26 +39,26 @@ test("resume clears waiting and reminder, preserves owner site and persists a pe
   assert.equal(attentionGoals([goal]).length, 0);
 });
 
-test("follow-up keeps waiting and its schedule, and retry retains the follow-up instruction", async () => {
+test("follow-up is active coordination and retry retains its instruction", async () => {
   const { service, id } = await waiting();
   await service.execute({ type: "goal.followup", goalId: id, note: "请核查审批进展" });
   const request = (await service.read()).goals[0]!.dispatch!;
   await service.execute({ type: "goal.dispatch", goalId: id, status: "failed", requestId: request.id, detail: "离线" });
   await service.execute({ type: "goal.dispatch", goalId: id, status: "pending" });
   const goal = (await service.read()).goals[0]!;
-  assert.equal(goal.status, "waiting");
-  assert.equal(goal.waitingFor, "YR");
-  assert.equal(goal.remindAt, "2020-01-01T00:00:00.000Z");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.waitingFor, undefined);
+  assert.equal(goal.remindAt, undefined);
   assert.equal(goal.dispatch?.kind, "follow_up");
   assert.equal(goal.dispatch?.note, "请核查审批进展");
   assert.notEqual(goal.dispatch?.id, request.id);
 });
 
-test("manual resume cancels pending handoff and stale acknowledgements cannot dispatch it again", async () => {
+test("manual takeover cancels pending handoff and stale acknowledgements cannot dispatch it again", async () => {
   const { service, id } = await waiting();
   await service.execute({ type: "goal.followup", goalId: id });
   const requestId = (await service.read()).goals[0]!.dispatch!.id;
-  await service.execute({ type: "goal.resume", goalId: id, note: "我来处理", mode: "manual" });
+  await service.execute({ type: "goal.takeover", goalId: id });
   await service.execute({ type: "goal.dispatch", goalId: id, status: "sent", requestId });
   const goal = (await service.read()).goals[0]!;
   assert.equal(goal.mode, "manual");
@@ -86,8 +86,8 @@ test("a follow-up reply clears the due item while leaving the final state decisi
     text: "YR 已经批准，可以继续开发",
     routeToConcierge: true,
   }) as Goal;
-  assert.equal(replied.status, "waiting");
-  assert.equal(replied.waitingFor, "YR");
+  assert.equal(replied.status, "active");
+  assert.equal(replied.waitingFor, undefined);
   assert.equal(replied.remindAt, undefined);
   assert.equal(replied.attention, null);
   assert.equal(replied.dispatch?.kind, "feedback");

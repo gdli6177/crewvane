@@ -166,6 +166,11 @@ The key boundary is that messages and state changes are separate:
 - Herdr lifecycle events update whether a real agent site is reachable; and
   they never declare a goal completed.
 
+`waiting` means a named external party outside you and all Crewvane Agents.
+Human decisions belong in Attention; internal coordination stays active.
+Handing an external wait back to an Agent resumes active coordination until the
+concierge reconciles it. Reminders do not change the goal lifecycle.
+
 ## Install
 
 ### Packaged app

@@ -19,14 +19,16 @@ Crewvane 不运行模型，不扫描或适配 Agent 协议，不管理模型凭�
 
 工作区由用户选择，状态位于 `<workspace>/.crewvane/`。`state.json` 是完整快照，`events.jsonl` 是追加事件记录，工作区根目录的 `.crewvane-lock/` 串行化桌面和 CLI 的读取、恢复与并发写入，确保旧状态被整体归档时不会与写入交错。每次修改先写临时文件，再原子替换快照。`decisions.md` 与 `rejected.md` 由结构化决定记录派生，供 Agent 和人直接阅读。图片原图位于 `.crewvane/attachments/`，状态只保存相对路径、MIME、大小和 SHA-256；导入校验真实文件魔数并限制数量与体积。已结束目标保留图片 30 天，应用启动时清理，也支持逐张或随目标永久删除。
 
-`WorkspaceState.version = 2` 当前包含项目及项目上线策略、目标、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 原样读取。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v2 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
+`WorkspaceState.version = 2` 当前包含项目及项目上线策略、目标、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 保留原记录并按下述等待语义纠正后读取。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v2 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
 
 目标内容与状态命令分离：
 
-- `goal.message` / `goal.direct` 只追加人的原话和附件，不按正文改变 `status`、`next` 或等待对象。等待提醒被回复时，消息入口会清除已经处理的到期注意力与旧提醒，再交给管家判断下一步；目标仍保持等待，直到管家提交结构化状态命令。
-- `goal.progress`、`goal.wait`、`goal.review`、`goal.decide` 等是 Agent 或受信任适配器提交的明确状态事实。
+- `goal.message` / `goal.direct` 保存人的原话和附件，不从正文推断批准、验收或完成。外部等待目标交回管家处理时先恢复 `active`、清除旧等待与提醒，保留原下一步；管家根据明确事实重新确立外部等待、进展或注意力。人工事项的普通备注保留等待与提醒。
+- `goal.progress`、`goal.wait`、`goal.review`、`goal.decide` 等是 Agent 或受信任适配器提交的明确状态事实。`waiting` 仅用于具名外部第三方，不能等待用户、管家、负责人或工人；`goal.wait --owner` 必填，外部对象存入 `waitingFor`，不覆盖执行负责人。需要人处理使用注意力，内部协调保持 `active`。`goal.remind` 只设置提醒，活动目标也可到期进入注意力。
 - `goal.accept`、`goal.complete`、`goal.rework`、`goal.drop`、`goal.resolve` 由人通过明确操作触发，或由当前案卷管家在用户明确说完成后执行；结束与决定必须保存用户原话，不从“可以”“继续”等顺承词自动推断。
 - 活动记录按 `goalId` 隔离，原始 Agent 内容保持不透明；UI 不要求固定摘要模板。
+
+读取有效 v2 快照时纠正旧版等待语义：等待对象缺失、指向用户或内部 Agent，或仍有未解决的决定、验收、介入事项时恢复活动状态（已有交付的验收保留 `review`），保留历史与注意力。旧版等用户且缺少注意力时补回介入项。真正的外部等待及其到期跟进保留，不归档整个工作区；后续修改时保存纠正结果。
 
 注意力是独立派生：
 

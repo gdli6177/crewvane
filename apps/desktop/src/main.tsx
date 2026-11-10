@@ -81,7 +81,7 @@ const pages = {
 const statusLabel = {
   backlog: "暂存",
   active: "跟进中",
-  waiting: "等待中",
+  waiting: "等待外部",
   review: "待验收",
   completed: "已完成",
   dropped: "已放弃",
@@ -364,6 +364,7 @@ function App() {
     if (kind === "decision") return "作出决定";
     if (kind === "follow_up") return "处理跟进";
     if (item.attention?.source === "dispatch") return "恢复联系";
+    if (goalEntryDestination(item) === "attention") return "查看并处理";
     return "进入现场";
   }
   function goalRowLabel(item: Goal) {
@@ -705,7 +706,7 @@ function App() {
                                   (p) => p.id === item.projectId,
                                 )?.name
                               }{" "}
-                              · {sceneSync?.label || attentionLabel[kind]}
+                              · {sceneSync?.label || (kind === "intervention" && !item.herdr ? "需要你处理" : attentionLabel[kind])}
                             </span>
                             <h3>{item.title}</h3>
                             <p>{sceneSync?.summary || item.attention?.summary || item.next}</p>
@@ -726,15 +727,15 @@ function App() {
                     tone="mint"
                     icon={<Sparkles size={18} />}
                     title="此刻，没有等你处理的事。"
-                    description={`${waiting.length ? `${waiting.length} 件在等待` : "没有被搁置的事项"}${active.length ? `，${active.length} 件由管家跟进` : ""}。到了该出现的时候再告诉你。`}
+                    description={`${waiting.length ? `${waiting.length} 件等待外部` : "没有被搁置的事项"}${active.length ? `，${active.length} 件由管家跟进` : ""}。到了该出现的时候再告诉你。`}
                   />
                 )}
               </section>
               {waiting.length > 0 && (
                 <section className="waiting-section">
                   <SectionHeading
-                    title="在等待"
-                    description="不用一直记着"
+                    title="等待外部"
+                    description="等外部联系人或机构处理，不用一直记着"
                   />
                   {waiting.map((item) => (
                     <button
@@ -746,7 +747,7 @@ function App() {
                       <div>
                         <strong>{item.title}</strong>
                         <span>
-                          {item.owner} · {item.next}
+                          {item.waitingFor} · {item.next}
                         </span>
                       </div>
                       <small>
@@ -804,7 +805,7 @@ function App() {
                   [
                     ["all", "全部"],
                     ["attention", "需要处理"],
-                    ["waiting", "等待中"],
+                    ["waiting", "等待外部"],
                     ["active", "跟进中"],
                     ["backlog", "暂存"],
                     ["completed", "已完成"],
@@ -1290,6 +1291,7 @@ function GoalEditor({
   onClose,
   onSaved,
 }: GoalFormProps) {
+  const [arrangement, setArrangement] = useState(goal.status === "waiting" ? "waiting" : "active");
   const localReminder = goal.remindAt
     ? (() => {
         const date = new Date(goal.remindAt);
@@ -1301,7 +1303,7 @@ function GoalEditor({
   return (
     <Modal
       title="编辑目标"
-      description="修改目标说明或接下来的安排。它不会提交成果，也不会表示等待已经结束。"
+      description="修改目标说明或接下来的安排。等待外部只适用于你和 Agent 之外的联系人或机构。"
       error={error}
       onClose={onClose}
     >
@@ -1319,11 +1321,11 @@ function GoalEditor({
                 description: String(data.get("description")),
                 next: String(data.get("next")),
                 owner: String(data.get("owner")),
-                waitingFor: String(data.get("owner")),
+                ...(arrangement === "waiting" ? { waitingFor: String(data.get("waitingFor")) } : {}),
                 status:
                   goal.status === "review"
                     ? undefined
-                    : (data.get("status") as "active" | "waiting"),
+                    : (arrangement as "active" | "waiting"),
                 remindAt: data.get("remindAt")
                   ? new Date(String(data.get("remindAt"))).toISOString()
                   : null,
@@ -1353,15 +1355,20 @@ function GoalEditor({
         <div className="ui-form__grid">
           {goal.status !== "review" && (
             <Field label="当前安排">
-              <Select name="status" defaultValue={goal.status}>
+              <Select name="status" value={arrangement} onChange={event => setArrangement(event.target.value)}>
                 <option value="active">继续推进</option>
-                <option value="waiting">等待他人 / 到时跟进</option>
+                <option value="waiting">等待外部</option>
               </Select>
             </Field>
           )}
-          <Field label="等待对象 / 负责人">
+          <Field label="负责人">
             <TextInput name="owner" defaultValue={goal.owner} required />
           </Field>
+          {arrangement === "waiting" && (
+            <Field label="外部等待对象" hint="例如 YR、法务或供应商；需要你处理或 Agent 协调不属于等待外部。">
+              <TextInput name="waitingFor" defaultValue={goal.waitingFor} maxLength={120} required />
+            </Field>
+          )}
           <Field label="跟进提醒" hint="到提醒时间会进入注意力面板。">
             <TextInput
               name="remindAt"

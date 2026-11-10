@@ -44,7 +44,7 @@ export function GoalAttentionCard({
 }) {
   const [replyMode, setReplyMode] = useState<GoalReplyMode | null>(null);
   const view = presentGoal(goal, state);
-  const active = view.needsDecision || view.dueFollowUp || view.dispatchFailed || goal.status === "review";
+  const active = view.needsDecision || view.needsIntervention || view.dueFollowUp || view.dispatchFailed || goal.status === "review";
   useEffect(() => {
     if (!active) onClose();
   }, [active]);
@@ -92,7 +92,7 @@ export function GoalAttentionCard({
             {view.dueFollowUp && (
               <div className="attention-next-step">
                 <span>当前下一步</span><p>{goal.next || "等待管家更新下一步。"}</p>
-                <small>{goal.waitingFor ? `等待 ${goal.waitingFor}` : "等待外部结果"}{goal.remindAt ? ` · ${time(goal.remindAt)} 到期` : ""}</small>
+                <small>{goal.waitingFor ? `等待外部：${goal.waitingFor}` : "按你设定的时间提醒"}{goal.remindAt ? ` · ${time(goal.remindAt)} 到期` : ""}</small>
               </div>
             )}
             {!!goal.attachments?.length && (view.needsDecision || goal.status === "review") && (

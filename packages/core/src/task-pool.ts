@@ -30,6 +30,5 @@ export function taskPoolGoals(goals: Goal[], section: "later" | "self") {
 
 export function hasDueReminder(goal: Goal, now = Date.now()) {
   return Boolean(goal.remindAt && Date.parse(goal.remindAt) <= now &&
-    (goal.status === "waiting" || goal.status === "backlog" ||
-      goal.status === "active" && goal.mode === "manual"));
+    ["waiting", "backlog", "active"].includes(goal.status));
 }

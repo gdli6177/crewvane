@@ -12,13 +12,7 @@ function progressAt(goal: Goal) {
   return goal.activities.filter(activity => activity.kind !== "watchdog").at(-1)?.at ?? goal.createdAt;
 }
 function inspectable(goal: Goal) {
-  if (goal.mode !== "concierge") return false;
-  if (goal.status === "active") return true;
-  // Owners sometimes use "waiting" to mean that their current turn is over.
-  // Reconcile that state only when the recorded wait target is the owner's own
-  // live Agent. A wait for the human or another external party is intentional.
-  return goal.status === "waiting" && Boolean(goal.herdr?.agent) &&
-    goal.waitingFor === goal.herdr?.agent;
+  return goal.mode === "concierge" && goal.status === "active";
 }
 function record(goal: Goal, at: string, text: string) {
   goal.activities.push({ id: newId("act"), at, actor: "巡检", kind: "watchdog", text });
