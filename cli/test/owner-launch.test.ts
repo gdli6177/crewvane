@@ -10,6 +10,7 @@ import {
   type Goal,
 } from "../../packages/core/src/index.js";
 import {
+  startAgentWhenPaneReady,
   launchOwner,
   type HerdrCommandRunner,
 } from "../src/owner-launch.js";
@@ -143,6 +144,41 @@ test("launches the configured agent with an isolated owner environment", async (
   const state = await service.read();
   assert.equal(state.goals[0]?.owner, "case-owner");
   assert.equal(state.goals[0]?.herdr?.paneId, "w7:p3");
+});
+
+test("retries a busy initialization pane without creating a replacement", async () => {
+  const calls: string[][] = [],
+    waits: number[] = [];
+  let attempts = 0;
+  const run: HerdrCommandRunner = async (args) => {
+    calls.push(args);
+    attempts += 1;
+    if (attempts < 3)
+      throw new Error('Herdr agent start: {"code":"agent_pane_busy"}');
+    return '{"result":{"agent":{"name":"owner-a","pane_id":"w7:p3"}}}';
+  };
+  await startAgentWhenPaneReady(
+    run,
+    ["agent", "start", "owner-a", "--kind", "qodercli", "--pane", "w7:p3"],
+    async ms => { waits.push(ms); },
+  );
+
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(args => args[args.indexOf("--pane") + 1] === "w7:p3"));
+  assert.deepEqual(waits, [100, 160]);
+});
+
+test("does not replay an agent start error once process startup may have begun", async () => {
+  let attempts = 0;
+  await assert.rejects(startAgentWhenPaneReady(
+    async () => {
+      attempts += 1;
+      throw new Error('Herdr agent start: {"code":"agent_not_ready"}');
+    },
+    ["agent", "start", "owner-a", "--kind", "qodercli", "--pane", "w7:p3"],
+    async () => {},
+  ), /agent_not_ready/);
+  assert.equal(attempts, 1);
 });
 
 test("reopens the original Agent kind with its native resume arguments", async () => {

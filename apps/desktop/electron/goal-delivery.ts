@@ -1,11 +1,16 @@
 import type { Goal, WorkspaceService } from "../../../packages/core/src/index.js";
 
+export interface GoalDeliveryReceipt {
+  status?: "sent" | "unconfirmed";
+  detail?: string;
+}
+
 // Persisted requests survive application restart. A receipt only acknowledges
 // the request that was actually sent, never a newer user action.
 export async function deliverGoalUpdate(
   target: WorkspaceService,
   goalId: string,
-  send: (goal: Goal) => Promise<void>,
+  send: (goal: Goal) => Promise<void | GoalDeliveryReceipt>,
 ) {
   let item = (await target.read()).goals.find(goal => goal.id === goalId);
   if (!item || item.mode !== "concierge" || ["backlog", "completed", "dropped"].includes(item.status)) return;
@@ -18,10 +23,16 @@ export async function deliverGoalUpdate(
       item.dispatch?.status !== "pending") return;
     const requestId = item.dispatch.id;
     try {
-      await send(item);
+      const receipt = await send(item) ?? {};
       const latest = (await target.read()).goals.find(goal => goal.id === goalId);
       if (!latest || ["completed", "dropped"].includes(latest.status)) return;
-      await target.execute({ type: "goal.dispatch", goalId, status: "sent", requestId });
+      await target.execute({
+        type: "goal.dispatch",
+        goalId,
+        status: receipt.status === "unconfirmed" ? "unconfirmed" : "sent",
+        requestId,
+        ...(receipt.detail ? { detail: receipt.detail } : {}),
+      });
     } catch (error) {
       const latest = (await target.read()).goals.find(goal => goal.id === goalId);
       if (!latest || ["completed", "dropped"].includes(latest.status)) return;

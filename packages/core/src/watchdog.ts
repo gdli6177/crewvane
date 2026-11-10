@@ -8,8 +8,22 @@ const ESCALATE_AFTER = 10 * 60_000;
 const RETRY_AFTER = 60_000;
 const NUDGE_AFTER = 15 * 60_000;
 export interface WatchdogRequest { goalId: string; reason: WatchdogReason; basis: string }
+function latestProgress(goal: Goal) {
+  return goal.activities.filter(activity => activity.kind !== "watchdog").at(-1);
+}
 function progressAt(goal: Goal) {
-  return goal.activities.filter(activity => activity.kind !== "watchdog").at(-1)?.at ?? goal.createdAt;
+  return latestProgress(goal)?.at ?? goal.createdAt;
+}
+function concise(value: string, limit = 180) {
+  const characters = Array.from(value.replace(/\s+/g, " ").trim());
+  return characters.length > limit ? `${characters.slice(0, limit).join("")}…` : characters.join("");
+}
+function reasonLabel(reason: WatchdogReason) {
+  return reason === "unassigned" ? "尚未登记独立负责人现场"
+    : reason === "blocked" ? "负责人正在等待输入或批准"
+      : reason === "missing" ? "负责人现场不可达"
+        : reason === "settled" ? "负责人已停止输出但尚未写回结果"
+          : "目标 30 分钟没有写回实质进展";
 }
 function inspectable(goal: Goal) {
   return goal.mode === "concierge" && goal.status === "active";
@@ -53,13 +67,16 @@ export function inspectWatchdog(goals: Goal[], at: string): WatchdogRequest[] {
     const watch = goal.watchdog;
     if (watch.contactedAt && now - Date.parse(watch.contactedAt) >= ESCALATE_AFTER && !watch.escalatedAt) {
       watch.escalatedAt = at;
+      const progress = latestProgress(goal);
+      const lastProgress = progress
+        ? `${progress.actor}：${concise(progress.text)}`
+        : "没有可用的历史进展";
       if (!goal.attention) goal.attention = {
         id: newId("attention"),
         kind: "intervention", source: "watchdog", since: at,
-        summary: reason === "unassigned" ? "巡检已请管家分配负责人，但 10 分钟仍没有独立执行现场，请查看管家。" :
-          "巡检已请管家处理，但 10 分钟仍未收到恢复进展，请查看现场。",
+        summary: `目标「${goal.title}」${reasonLabel(reason)}。最后进展：${lastProgress}。已请管家处理 10 分钟仍未恢复，请查看现场。`,
       };
-      record(goal, at, "已联系管家，但仍未收到恢复进展，现请你查看现场。");
+      record(goal, at, `目标「${goal.title}」${reasonLabel(reason)}；已联系管家，但 10 分钟仍无恢复进展，现请你查看现场。`);
     }
     if (watch.escalatedAt) continue;
     const interval = watch.lastError ? RETRY_AFTER : NUDGE_AFTER;

@@ -1,6 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, session, shell, Tray } from "electron";
 import { watch, type FSWatcher } from "node:fs";
-import { access, chmod, lstat, mkdir, readFile, readlink, realpath, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readFile, readlink, realpath, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
@@ -32,9 +32,11 @@ import { HerdrPlugin } from "./herdr-plugin.js";
 import { deliverGoalUpdate } from "./goal-delivery.js";
 import { reconcileSceneReply } from "./scene-reconciliation.js";
 import { CoordinatorQueue } from "./coordinator-queue.js";
+import { writeCoordinatorScope } from "./coordinator-scope.js";
 import { WebhookNotifier, type WebhookSaveInput } from "./webhook-notifications.js";
 import { CrewvaneSkillInstaller } from "./skill-installer.js";
 import { launchOwner, type HerdrCommandRunner } from "../../../cli/src/owner-launch.js";
+import { clearManagedCaches, inspectManagedCaches } from "./cache-maintenance.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -42,6 +44,8 @@ const selections = new Set<string>();
 const knownGoalStatuses = new Map<string, GoalStatus>();
 let knownGoalStatusWorkspace: string | undefined;
 let lastSnapshotSignature: string | undefined;
+let automaticCacheCleanupStarted = false;
+let cacheMaintenanceQueue: Promise<unknown> = Promise.resolve();
 const here = __dirname;
 // Native window chrome needs a startup color before renderer CSS is available.
 // Keep this synchronized with the dark `--bg` design token and DESIGN.md.
@@ -55,6 +59,38 @@ function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ??
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
 async function snapshot() { return activeService().read(); }
+function cacheMaintenancePaths() {
+  return {
+    userDataRoot: app.getPath("userData"),
+    cacheRoot: app.getPath("sessionData"),
+    logsRoot: app.getPath("logs"),
+    workspaceRoot: root,
+  };
+}
+function queueCacheMaintenance<T>(task: () => Promise<T>): Promise<T> {
+  const queued = cacheMaintenanceQueue.catch(() => undefined).then(task);
+  cacheMaintenanceQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+async function runAutomaticCacheCleanup() {
+  if (automaticCacheCleanupStarted) return;
+  automaticCacheCleanupStarted = true;
+  const marker = join(app.getPath("userData"), "cache-maintenance.json");
+  try {
+    const previous = JSON.parse(await readFile(marker, "utf8")) as { lastAutomaticRunAt?: string };
+    if (previous.lastAutomaticRunAt &&
+      Date.now() - Date.parse(previous.lastAutomaticRunAt) < 24 * 60 * 60 * 1000) return;
+  } catch {
+    // Missing or malformed bookkeeping only means it is time for one safe pass.
+  }
+  await queueCacheMaintenance(() => clearManagedCaches(cacheMaintenancePaths(), {
+    mode: "automatic",
+  }));
+  await mkdir(app.getPath("userData"), { recursive: true });
+  await writeFile(marker, `${JSON.stringify({
+    lastAutomaticRunAt: new Date().toISOString(),
+  }, null, 2)}\n`, { mode: 0o600 });
+}
 function broadcastSnapshot(state: WorkspaceState, workspace: string) {
   if (root !== workspace || !window || window.isDestroyed()) return;
   const signature = JSON.stringify(state);
@@ -237,16 +273,6 @@ const coordinatorQueue = new CoordinatorQueue();
 function coordinate<T>(target: WorkspaceService, task: () => Promise<T>): Promise<T> {
   return coordinatorQueue.run(target.root, task);
 }
-function coordinatorScope(target: WorkspaceService) {
-  return join(target.root, ".crewvane", "coordinator-scope.json");
-}
-async function setCoordinatorScope(target: WorkspaceService, goalId: string, requestId?: string,
-  sceneReply?: import("../../../packages/core/src/index.js").SceneReply) {
-  await writeFile(coordinatorScope(target), `${JSON.stringify({
-    goalId, requestId, setAt: new Date().toISOString(),
-    ...(sceneReply ? { attentionId: sceneReply.attentionId, sceneReplyId: sceneReply.id } : {}),
-  }, null, 2)}\n`, { mode: 0o600 });
-}
 async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<void> {
   const key = `${target.root}:${goalId}`;
   const pending = handoffs.get(key); if (pending) return pending;
@@ -278,11 +304,11 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
         if (!status.executable) throw new Error("Herdr 尚未准备好");
         const herdrExecutable = status.executable;
         const messenger = client(herdrExecutable, target.root);
-        await setCoordinatorScope(target, item.id, item.dispatch?.id,
+        await writeCoordinatorScope(target.root, item.id, item.dispatch?.id,
           item.dispatch?.kind === "scene_reply" ? item.sceneReply : undefined);
         if (item.dispatch?.kind === "follow_up")
-          await messenger.notifyFollowUp(reference, item.id, item.dispatch.note || "", item, target.root);
-        else await messenger.notifyGoal(reference, item.id, item.title, item, target.root);
+          return messenger.notifyFollowUp(reference, item.id, item.dispatch.note || "", item, target.root);
+        return messenger.notifyGoal(reference, item.id, item.title, item, target.root);
       });
     } finally {
       if (root === target.root) broadcastSnapshot(await target.read(), target.root);
@@ -352,7 +378,6 @@ async function doPrepareConcierge(target: WorkspaceService) {
   const plugin = await herdrPlugin.ensure(status.executable);
   broadcastHerdrStatus(status);
   if (plugin.phase === "error") throw new Error(plugin.detail);
-  await rm(coordinatorScope(target), { force: true });
   const state = await target.read();
   await target.execute({
     type: "concierge.status",
@@ -580,6 +605,12 @@ async function openWorkspace(path: string) {
       message: `附件清理暂未完成：${error instanceof Error ? error.message : String(error)}`,
     });
   });
+  void runAutomaticCacheCleanup().catch(error => {
+    if (!window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `缓存自动清理暂未完成：${error instanceof Error ? error.message : String(error)}`,
+    });
+  });
   await mkdir(app.getPath("userData"), { recursive: true }); await writeFile(join(app.getPath("userData"), "workspaces.json"), JSON.stringify({ selected: root }), { mode: 0o600 });
   window.webContents.send("crewvane:event", { type: "refresh", workspace: root });
   if (process.env.CREWVANE_TEST_SKIP_HERDR_SETUP !== "1")
@@ -665,7 +696,7 @@ async function synchronize() {
         const coordinator = client(status.executable, workspace);
         await coordinate(target, async () => {
           for (const request of activeRequests) {
-            await setCoordinatorScope(target, request.goalId, `watchdog-${Date.parse(request.basis)}`);
+            await writeCoordinatorScope(target.root, request.goalId, `watchdog-${Date.parse(request.basis)}`);
             await coordinator.notifyWatchdog(state.concierge, [request]);
           }
         });
@@ -810,7 +841,7 @@ app.whenReady().then(async () => {
         if (status.executable) {
           const herdrExecutable = status.executable;
           try { await coordinate(target, async () => {
-            await setCoordinatorScope(target, item.id, `event-${Date.now()}`);
+            await writeCoordinatorScope(target.root, item.id, `event-${Date.now()}`);
             await client(herdrExecutable, target.root).notifyGoal(current.concierge, item.id, item.title, item, target.root);
           }); }
           catch (error) { window.webContents.send("crewvane:event", { type: "diagnostic", message: error instanceof Error ? error.message : String(error) }); }
@@ -825,6 +856,19 @@ app.whenReady().then(async () => {
     return result;
   });
   ipcMain.handle("crewvane:herdr-status", (event) => { sender(event); return herdrStatus(); });
+  ipcMain.handle("crewvane:cache-status", (event) => {
+    sender(event);
+    activeService();
+    return queueCacheMaintenance(() => inspectManagedCaches(cacheMaintenancePaths()));
+  });
+  ipcMain.handle("crewvane:cache-clean", (event) => {
+    sender(event);
+    activeService();
+    return queueCacheMaintenance(() => clearManagedCaches(cacheMaintenancePaths(), {
+      mode: "manual",
+      clearBrowserRuntime: () => session.defaultSession.clearCache(),
+    }));
+  });
   ipcMain.handle("crewvane:agent-choices", (event) => { sender(event); return agentChoices(); });
   ipcMain.handle("crewvane:webhook-settings", (event) => { sender(event); return webhookNotifier.status(); });
   ipcMain.handle("crewvane:webhook-save", (event, input: WebhookSaveInput) => {

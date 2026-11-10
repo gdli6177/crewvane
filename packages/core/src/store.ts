@@ -1,12 +1,15 @@
-import { appendFile, mkdir, readFile, realpath, rename, lstat, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, realpath, rename, lstat, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { nextSequence, withLock } from "./storage.js";
 import type { WorkspaceRecoveryReason, WorkspaceState } from "./types.js";
 import { defaultProjectPolicy, initialState, newId } from "./model.js";
 import { decisionMarkdown } from "./governance.js";
 import { normalizeExternalWaits } from "./waiting.js";
 export { initialState, newId } from "./model.js";
+const DEFAULT_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
+const DEFAULT_EVENT_TAIL_BYTES = 4 * 1024 * 1024;
+const DEFAULT_RETAINED_EVENTS = 2_000;
 class IncompatibleWorkspaceStateError extends Error {
   constructor(readonly reason: WorkspaceRecoveryReason, message: string) {
     super(message);
@@ -20,6 +23,74 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
+}
+function stateDigest(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+function compactEvent(record: Record<string, unknown>) {
+  const compact: Record<string, unknown> = {};
+  for (const key of ["id", "type", "sequence", "created_at", "title", "source_task_id", "recovery"]) {
+    if (record[key] !== undefined) compact[key] = record[key];
+  }
+  if (record.state !== undefined) {
+    const state = JSON.stringify(record.state);
+    compact.state_sha256 = stateDigest(state);
+    compact.state_bytes = Buffer.byteLength(state);
+  }
+  compact.compacted = true;
+  return compact;
+}
+async function readEventTail(path: string, maxBytes: number): Promise<Record<string, unknown>[]> {
+  const handle = await open(path, "r");
+  try {
+    const info = await handle.stat(), offset = Math.max(0, info.size - maxBytes);
+    const buffer = Buffer.alloc(info.size - offset);
+    await handle.read(buffer, 0, buffer.length, offset);
+    let raw = buffer.toString("utf8");
+    if (offset > 0) {
+      const firstNewline = raw.indexOf("\n");
+      raw = firstNewline >= 0 ? raw.slice(firstNewline + 1) : "";
+    }
+    const records: Record<string, unknown>[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const value: unknown = JSON.parse(line);
+        if (value && typeof value === "object" && !Array.isArray(value))
+          records.push(value as Record<string, unknown>);
+      } catch {
+        // A tail read can begin in the middle of a UTF-8 code point. The
+        // newline boundary above removes that partial record.
+      }
+    }
+    return records;
+  } finally {
+    await handle.close();
+  }
+}
+export async function compactEventLogIfNeeded(
+  directory: string,
+  options: { maxBytes?: number; tailBytes?: number; keepEvents?: number } = {},
+) {
+  const path = join(directory, "events.jsonl"),
+    maxBytes = options.maxBytes ?? DEFAULT_EVENT_LOG_MAX_BYTES,
+    tailBytes = options.tailBytes ?? DEFAULT_EVENT_TAIL_BYTES,
+    keepEvents = options.keepEvents ?? DEFAULT_RETAINED_EVENTS;
+  let before: number;
+  try {
+    before = (await stat(path)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { compacted: false, before: 0, after: 0 };
+    throw error;
+  }
+  if (before <= maxBytes) return { compacted: false, before, after: before };
+  const records = (await readEventTail(path, tailBytes)).slice(-keepEvents).map(compactEvent);
+  if (!records.length) throw new Error("events.jsonl 超过上限，但尾部没有完整事件可安全保留");
+  const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`,
+    body = records.map(record => JSON.stringify(record)).join("\n") + "\n";
+  await writeFile(temporary, body, { mode: 0o600 });
+  await rename(temporary, path);
+  return { compacted: true, before, after: Buffer.byteLength(body) };
 }
 export function validateState(value: unknown): WorkspaceState {
   if (!record(value))
@@ -132,7 +203,8 @@ export class WorkspaceStore {
       next = initialState(recovery);
     try {
       await mkdir(staging);
-      await writeAtomic(join(staging, "state.json"), `${JSON.stringify(next, null, 2)}\n`);
+      const serialized = `${JSON.stringify(next, null, 2)}\n`;
+      await writeAtomic(join(staging, "state.json"), serialized);
       await writeFile(join(staging, "events.jsonl"), `${JSON.stringify({
         id: newId("evt"),
         type: "workspace_recovered",
@@ -141,7 +213,8 @@ export class WorkspaceStore {
         title: "工作区已自动恢复",
         source_task_id: "workspace",
         recovery,
-        state: next,
+        state_sha256: stateDigest(serialized),
+        state_bytes: Buffer.byteLength(serialized),
       })}\n`, { mode: 0o600 });
       await writeFile(join(staging, "sequence"), "1", { mode: 0o600 });
       await Promise.all([
@@ -193,14 +266,25 @@ export class WorkspaceStore {
     return withLock(owner, async () => {
       const state = await this.readUnlocked(), before = JSON.stringify(state), result = await action(state);
       if (before === JSON.stringify(state)) return result;
-      const temporary = join(directory, `.state-${process.pid}-${randomUUID()}.tmp`);
-      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+      const temporary = join(directory, `.state-${process.pid}-${randomUUID()}.tmp`),
+        serialized = `${JSON.stringify(state, null, 2)}\n`;
+      await writeFile(temporary, serialized, { mode: 0o600 });
       await rename(temporary, join(directory, "state.json"));
       await Promise.all([
         writeAtomic(join(directory, "decisions.md"), decisionMarkdown(state.decisions, "approved")),
         writeAtomic(join(directory, "rejected.md"), decisionMarkdown(state.decisions, "rejected")),
       ]);
-      await appendFile(join(directory, "events.jsonl"), `${JSON.stringify({ id: newId("evt"), type: "workspace_changed", sequence: await nextSequence(this.root), created_at: new Date().toISOString(), title: reason, source_task_id: "workspace", state })}\n`, { mode: 0o600 });
+      await compactEventLogIfNeeded(directory);
+      await appendFile(join(directory, "events.jsonl"), `${JSON.stringify({
+        id: newId("evt"),
+        type: "workspace_changed",
+        sequence: await nextSequence(this.root),
+        created_at: new Date().toISOString(),
+        title: reason,
+        source_task_id: "workspace",
+        state_sha256: stateDigest(serialized),
+        state_bytes: Buffer.byteLength(serialized),
+      })}\n`, { mode: 0o600 });
       return result;
     });
   }

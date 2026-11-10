@@ -1,5 +1,5 @@
-import { _electron as electron } from "@playwright/test";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { _electron as electron, expect } from "@playwright/test";
+import { access, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -94,6 +94,14 @@ const home = await mkdtemp("/tmp/cv-desktop-"),
 await mkdir(workspace);
 await mkdir(join(home, "userData"), { recursive: true });
 await mkdir(join(home, ".local/bin"), { recursive: true });
+const manualCacheFile = join(home, "userData/GPUCache/manual-cache.bin"),
+  automaticTempFile = join(home, "userData/runtime/herdr.download");
+await mkdir(join(home, "userData/GPUCache"), { recursive: true });
+await mkdir(join(home, "userData/runtime"), { recursive: true });
+await writeFile(manualCacheFile, Buffer.alloc(2048));
+await writeFile(automaticTempFile, "stale");
+const staleAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+await utimes(automaticTempFile, staleAt, staleAt);
 const webhookEvents = [];
 const webhookServer = createServer((request, response) => {
   const chunks = [];
@@ -411,6 +419,15 @@ try {
   assert.equal(await page.getByRole("button", { name: "工序", exact: true }).count(), 0);
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("heading", { name: "只设置必要的。" }).waitFor();
+  await page.getByRole("heading", { name: "缓存与本地维护", exact: true }).waitFor();
+  await expect.poll(() => access(automaticTempFile).then(() => true).catch(() => false),
+    { timeout: 10_000 }).toBe(false);
+  const goalsBeforeCacheCleanup = (await service.read()).goals.length;
+  await page.getByRole("button", { name: "清理缓存", exact: true }).click();
+  await page.getByText(/已释放 .* 个缓存文件/).waitFor();
+  await expect.poll(() => access(manualCacheFile).then(() => true).catch(() => false)).toBe(false);
+  assert.equal((await service.read()).goals.length, goalsBeforeCacheCleanup,
+    "cache cleanup must not remove goals");
   const personalPolicy = page.locator(".policy-row").filter({ hasText: "个人事项" });
   await personalPolicy.getByRole("button", { name: "配置", exact: true }).click();
   await personalPolicy.getByLabel("上线策略").selectOption("auto");
@@ -967,6 +984,7 @@ try {
         "accept",
         "settings",
         "private Webhook settings and real attention delivery",
+        "automatic stale temp cleanup and manual packaged-app cache cleanup without touching goals",
         "Webhook status subscriptions, automatic delivery test, external state change delivery, and Feishu/WeCom response validation",
         "one review transition sends exactly one application-level Webhook request",
         "per-project ship policy from the desktop UI",

@@ -83,7 +83,7 @@ export interface Goal {
   delivery?: Delivery; herdr?: HerdrReference; ownerResume?: OwnerResume; live?: LivePresence;
   reviewRounds?: number; reviewLimit?: number;
   risk?: RiskEscalation;
-  dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "failed"; at: string; detail?: string };
+  dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "unconfirmed" | "failed"; at: string; detail?: string };
   sceneReply?: SceneReply;
   recovery?: "idle" | "done" | "blocked";
   sceneVisit?: SceneVisit;
@@ -140,7 +140,7 @@ type WorkspaceCommand =
   | { type: "scene.visit"; goalId: string; retry?: boolean }
   | { type: "scene.check"; goalId: string; visitId: string; status: "checking" | "checked" | "failed"; detail?: string }
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
-  | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "failed"; detail?: string; requestId?: string }
+  | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "unconfirmed" | "failed"; detail?: string; requestId?: string }
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
   | { type: "goal.restart"; goalId: string; note: string }
   | { type: "goal.takeover"; goalId: string }

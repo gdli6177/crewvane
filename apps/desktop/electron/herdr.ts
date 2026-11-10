@@ -163,6 +163,7 @@ export class HerdrClient {
       // An arbitrary CLI has no trustworthy lifecycle signal. Give its
       // terminal input loop a short turn before the next case is queued.
       await delay(750);
+      return { status: "sent" as const };
     } else {
       if (!reference.agent) throw new Error("管家尚未准备好");
       try {
@@ -174,16 +175,25 @@ export class HerdrClient {
       } catch (error) {
         if (/\bagent_blocked\b/.test(String(error)))
           throw new ConciergeBlockedError();
-        // Herdr can submit the prompt before its five-second lifecycle probe
-        // observes the agent transition. Retrying would duplicate the task.
-        // Treat only this known case as delivered; later plugin events and the
-        // watchdog still decide whether work progressed or needs recovery.
-        if (/\bagent_prompt_stalled\b/.test(String(error))) {
+        // Herdr can submit the prompt before its lifecycle probe observes the
+        // agent transition. Timeout and stalled responses do not prove that
+        // the prompt was rejected, so replaying them can duplicate work. Save
+        // an unconfirmed delivery fact and let scene events plus the watchdog
+        // decide whether recovery is needed.
+        if (/\bagent_prompt_stalled\b/.test(String(error)) ||
+          /\btimed out waiting for agent status\b/.test(String(error)) ||
+          /"code"\s*:\s*"timeout"/.test(String(error))) {
           await delay(750);
-          return;
+          return {
+            status: "unconfirmed" as const,
+            detail: /\bagent_prompt_stalled\b/.test(String(error))
+              ? "Herdr 已接收任务，但未及时观察到工作状态；先以现场为准，不重复发送。"
+              : "Herdr 已提交任务，但状态确认超时；先以现场为准，不重复发送。",
+          };
         }
         throw error;
       }
+      return { status: "sent" as const };
     }
   }
   async inspectConcierge(existing?: HerdrReference): Promise<ConciergeSite | undefined> {
@@ -405,7 +415,7 @@ export class HerdrClient {
       ...item,
       absolutePath: workspaceRoot ? attachmentAbsolutePath(workspaceRoot, item) : item.path,
     }));
-    await this.prompt(reference,
+    return this.prompt(reference,
       `${conciergeRole}
 [CREWVANE_CASE_BEGIN]
 case_id: ${goalId}
@@ -429,7 +439,7 @@ ${goal?.dispatch?.kind === "restart" ? `这是用户主动重启的已结束目�
       ...item,
       absolutePath: workspaceRoot ? attachmentAbsolutePath(workspaceRoot, item) : item.path,
     }));
-    await this.prompt(reference,
+    return this.prompt(reference,
       `${conciergeRole}
 [CREWVANE_CASE_BEGIN]
 case_id: ${goalId}

@@ -17,7 +17,7 @@ Crewvane 不运行模型，不扫描或适配 Agent 协议，不管理模型凭�
 
 ## 状态
 
-工作区由用户选择，状态位于 `<workspace>/.crewvane/`。`state.json` 是完整快照，`events.jsonl` 是追加事件记录，工作区根目录的 `.crewvane-lock/` 串行化桌面和 CLI 的读取、恢复与并发写入，确保旧状态被整体归档时不会与写入交错。每次修改先写临时文件，再原子替换快照。`decisions.md` 与 `rejected.md` 由结构化决定记录派生，供 Agent 和人直接阅读。图片原图位于 `.crewvane/attachments/`，状态只保存相对路径、MIME、大小和 SHA-256；导入校验真实文件魔数并限制数量与体积。已结束目标保留图片 30 天，应用启动时清理，也支持逐张或随目标永久删除。
+工作区由用户选择，状态位于 `<workspace>/.crewvane/`。`state.json` 是完整快照，`events.jsonl` 是追加事件记录；事件只保存状态摘要的 SHA-256 与字节数，不再为每次修改复制整份 workspace。日志超过 16 MB 时在状态写锁内只保留最近约 4 MB、最多 2,000 条完整事件，并原子替换旧日志，避免长时间运行产生数 GB 的重复快照。工作区根目录的 `.crewvane-lock/` 串行化桌面和 CLI 的读取、恢复与并发写入，确保旧状态被整体归档时不会与写入交错。每次修改先写临时文件，再原子替换快照。`decisions.md` 与 `rejected.md` 由结构化决定记录派生，供 Agent 和人直接阅读。图片原图位于 `.crewvane/attachments/`，状态只保存相对路径、MIME、大小和 SHA-256；导入校验真实文件魔数并限制数量与体积。已结束目标保留图片 30 天，应用启动时清理，也支持逐张或随目标永久删除。
 
 `WorkspaceState.version = 2` 当前包含项目及项目上线策略、目标、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 保留原记录并按下述等待语义纠正后读取。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v2 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
 
@@ -65,7 +65,7 @@ Crewvane 不向 Codex 或其他 Agent CLI 注入运行时专属的 `workspace-wr
 
 应用打开工作区后使用按路径派生的命名 Session，也可以通过 `CREWVANE_HERDR_SESSION` 固定名称。准备管家会检查 CLI 和 Server，优先复用实时 `concierge`，检查登记的 Pane，再显式设置工作区、Session 和 CLI `PATH`，最后启动默认的 Codex 管家。Session 未运行时，应用内 PTY 启动 `herdr session attach <session>` 并等待 Server 就绪，不打开系统 Terminal。同一工作区复用一个连接；收起面板不终止会话，重启应用重新 attach。输入和尺寸 IPC 只允许访问当前工作区的连接，不接受渲染器指定的可执行文件。
 
-管家通过 `crewvane` 读取和写回目标，只负责分发、协调跟进与向人交接。所有实际执行，包括简单任务、返工和检查，都交给独立负责人；管家不得在阻塞时接手执行。负责人使用 Herdr Tab、Pane 和 Agent 消息，但 Crewvane 不预设任务图、分配算法或固定层级拓扑。
+管家通过 `crewvane` 读取和写回目标，只负责分发、协调跟进与向人交接。所有实际执行，包括简单任务、返工和检查，都交给独立负责人；管家不得在阻塞时接手执行。负责人使用 Herdr Tab、Pane 和 Agent 消息，但 Crewvane 不预设任务图、分配算法或固定层级拓扑。每次派发前先把 `coordinator-scope.json` 写入同目录临时文件，再用 rename 原子替换；准备或刷新管家不会先删除 scope，因此队列中的目标任务不会遇到短暂的文件缺失。Herdr `timeout` 或 `agent_prompt_stalled` 只表示提交后未能及时观察生命周期变化，保存为 `unconfirmed` 并禁止自动重发；真实现场与巡检继续确认后续结果。
 
 Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接在管家终端追加入口时，管家先调用 `crewvane direct` 写回原始消息：带当前案卷时追加活动，明确的新事项创建新目标并标记为已经从终端送达，避免桌面再次派发同一文本。`direct --new` 成功后会把管家的案卷 scope 原子切到新目标，允许同一回合继续读取、整理和派发新案卷。桌面监听 `.crewvane/state.json`，外部 CLI 写入后立即刷新，不需要等待 10 秒巡检。这个同步依赖管家执行协议；未经 CLI 写回的终端聊天仍只是终端内容。
 
@@ -73,7 +73,7 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind 和 session；`goal list`、attention、ask、message 和跨目标读写会被拒绝。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
-首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
+首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。若 Pane 刚创建、Herdr 尚报 `agent_pane_busy`，CLI 只在同一个 Pane 上按 100 ms 起的指数退避重试，最长 15 秒；其他可能在进程创建后发生的启动错误不重放，避免重复启动。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
 
 ## 上线策略与决定账本
 
@@ -108,6 +108,8 @@ Herdr 的 `pane.agent_status_changed`、`pane.exited`、`pane.closed`、`pane.mo
 模块化与插件化约束见 [插件架构](product/plugin-architecture.md)。扩展按 `storage`、`execution`、`terminal`、`agent-discovery`、`notification`、`automation`、`view` 和 `integration` 能力接入；第一方 Herdr、通知和 Agent 发现与第三方实现遵守同一协议。可选适配器失效时，目标的创建、查看、消息、等待和验收仍应可用。
 
 应用内 CLI 使用随包分发的独立 Node 可执行文件，CLI bundle 位于 ASAR unpack 目录，脚本和 Node runtime 都在 `.app` 内。打开工作区时自动安装或刷新 `~/.local/bin/crewvane`，并把它默认绑定到当前工作区。该入口只是应用内脚本的符号链接，因此移动应用后 CLI 会失败并提示重新安装，可避免悄悄执行旧版本。
+
+本地维护每天最多后台扫描一次 Crewvane 自己的 Chromium 缓存、诊断日志和遗留临时文件：删除 30 天未用的缓存与日志、退出后遗留超过 24 小时的原子临时文件；设置页可立即显示占用并手动清理当前缓存。清理根目录固定且拒绝符号链接，只匹配已知缓存目录和临时文件名，不删除 `state.json`、目标、当前附件、Agent 会话或 `.crewvane.backup-*`。已结束目标的附件继续使用 30 天保留期。维护任务与设置页扫描串行执行，避免清理与统计交错；自动任务在首屏打开后后台运行，不阻塞工作区加载。
 
 ## 安装和签名
 

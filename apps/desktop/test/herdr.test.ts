@@ -276,11 +276,28 @@ test("a stalled lifecycle probe does not duplicate a prompt that already reached
   const mock = fake({
     "agent prompt": '!Herdr agent prompt：{"code":"agent_prompt_stalled","message":"prompt was submitted but produced no observed working state"}',
   });
-  await new HerdrClient(mock.runner, "crewvane-test").notifyGoal(
+  const receipt = await new HerdrClient(mock.runner, "crewvane-test").notifyGoal(
     { session: "crewvane-test", agent: "concierge" },
     "goal_stalled_probe",
     "已送达但状态侦测延迟",
   );
+  assert.equal(receipt.status, "unconfirmed");
+  assert.match(receipt.detail ?? "", /不重复发送/);
+  assert.equal(mock.calls.length, 1);
+  assert.deepEqual(mock.calls[0]!.slice(0, 3), ["agent", "prompt", "concierge"]);
+});
+
+test("a lifecycle status timeout is unconfirmed and never replayed", async () => {
+  const mock = fake({
+    "agent prompt": '!Herdr agent prompt：{"code":"timeout","message":"timed out waiting for agent status"}',
+  });
+  const receipt = await new HerdrClient(mock.runner, "crewvane-test").notifyGoal(
+    { session: "crewvane-test", agent: "concierge" },
+    "goal_timeout_probe",
+    "已提交但状态确认超时",
+  );
+  assert.equal(receipt.status, "unconfirmed");
+  assert.match(receipt.detail ?? "", /状态确认超时/);
   assert.equal(mock.calls.length, 1);
   assert.deepEqual(mock.calls[0]!.slice(0, 3), ["agent", "prompt", "concierge"]);
 });

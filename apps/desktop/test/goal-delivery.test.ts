@@ -67,6 +67,32 @@ test("a newer feedback request is not acknowledged by an older in-flight follow-
   assert.equal(goal.status, "active");
 });
 
+test("a lifecycle timeout is saved as unconfirmed without creating a false failure", async () => {
+  const { service, id } = await fixture();
+  await service.execute({ type: "goal.followup", goalId: id, note: "核查审批进展" });
+  await deliverGoalUpdate(service, id, async () => ({
+    status: "unconfirmed",
+    detail: "Herdr 已提交任务，但状态确认超时；先以现场为准，不重复发送。",
+  }));
+
+  let goal = (await service.read()).goals[0]!;
+  assert.equal(goal.dispatch?.status, "unconfirmed");
+  assert.equal(goal.attention, null);
+  assert.match(goal.dispatch?.detail ?? "", /不重复发送/);
+  assert.match(goal.activities.at(-1)?.text ?? "", /送达状态待现场确认/);
+
+  await service.execute({
+    type: "goal.decide",
+    goalId: id,
+    question: "是否采用方案 A？",
+    actor: "owner-a",
+  });
+  goal = (await service.read()).goals[0]!;
+  assert.equal(goal.dispatch?.status, "sent");
+  assert.equal(goal.dispatch?.detail, undefined);
+  assert.equal(goal.attention?.kind, "decision");
+});
+
 test("manual takeover during send is never turned back into a concierge goal", async () => {
   const { service, id } = await fixture();
   await service.execute({ type: "goal.followup", goalId: id });

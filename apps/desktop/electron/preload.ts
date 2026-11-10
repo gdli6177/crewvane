@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld("crewvane", {
     ipcRenderer.invoke("crewvane:open-attachment", goalId, attachmentId) as Promise<void>,
   selectWorkspace: () => ipcRenderer.invoke("crewvane:workspace"), selectProject: () => ipcRenderer.invoke("crewvane:project"),
   environment: () => ipcRenderer.invoke("crewvane:environment"), herdrStatus: () => ipcRenderer.invoke("crewvane:herdr-status"),
+  cacheMaintenanceStatus: () => ipcRenderer.invoke("crewvane:cache-status"),
+  cleanCache: () => ipcRenderer.invoke("crewvane:cache-clean"),
   agentChoices: () => ipcRenderer.invoke("crewvane:agent-choices"),
   webhookSettings: () => ipcRenderer.invoke("crewvane:webhook-settings"),
   saveWebhook: (input: unknown) => ipcRenderer.invoke("crewvane:webhook-save", input),

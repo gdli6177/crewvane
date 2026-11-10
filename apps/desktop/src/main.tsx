@@ -10,6 +10,7 @@ import {
   CircleAlert,
   Clock3,
   Folder,
+  HardDrive,
   Inbox,
   LayoutDashboard,
   LayoutList,
@@ -17,10 +18,12 @@ import {
   NotebookPen,
   Copy,
   Plus,
+  RefreshCw,
   Settings2,
   Sparkles,
   SquareTerminal,
   Sun,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -1750,6 +1753,7 @@ function Settings({
             </Button>
           </div>
         </SettingsSection>
+        <StorageMaintenance />
           </div>
         </section>
         <section className="settings-group" aria-labelledby="settings-prefs-heading">
@@ -1819,6 +1823,92 @@ function Settings({
         </p>
       </div>
     </div>
+  );
+}
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** index;
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+function StorageMaintenance() {
+  const [status, setStatus] = useState<
+    Awaited<ReturnType<typeof api.cacheMaintenanceStatus>>
+  >();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [failure, setFailure] = useState("");
+  async function refresh() {
+    setFailure("");
+    try {
+      setStatus(await api.cacheMaintenanceStatus());
+    } catch (reason) {
+      setFailure(String(reason).replace(
+        /^Error invoking remote method '[^']+': (?:Error: )?/,
+        "",
+      ));
+    }
+  }
+  useEffect(() => {
+    void refresh();
+  }, []);
+  async function clean() {
+    setBusy(true);
+    setFailure("");
+    setMessage("");
+    try {
+      const result = await api.cleanCache();
+      setStatus(result.status);
+      setMessage(`已释放 ${formatBytes(result.removedBytes)}，清理 ${result.removedFiles} 个缓存文件。`);
+      if (result.warnings.length)
+        setFailure(`${result.warnings.length} 个文件正在使用或无法删除，已安全跳过。`);
+    } catch (reason) {
+      setFailure(String(reason).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <SettingsSection
+      wide
+      icon={<HardDrive />}
+      title="缓存与本地维护"
+      description="每天自动清理 30 天未用的渲染缓存与日志，并删除退出后遗留超过 24 小时的临时文件。已结束目标的附件仍按 30 天规则清理；不会删除目标、Agent 会话或旧工作区备份。"
+    >
+      <div className="settings-inline">
+        <span className="settings-status">
+          <i />
+          {status ? `${formatBytes(status.totalBytes)} · ${status.totalFiles} 个缓存文件` : "正在扫描…"}
+        </span>
+        {status && <span>{formatBytes(status.staleBytes)} 可在自动维护中释放</span>}
+      </div>
+      {message && <p className="ui-field__hint">{message}</p>}
+      {failure && <p className="ui-field__error">{failure}</p>}
+      <div className="ui-settings-card__actions">
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<RefreshCw size={14} />}
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void refresh().finally(() => setBusy(false));
+          }}
+        >
+          重新扫描
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<Trash2 size={14} />}
+          disabled={busy || !status}
+          onClick={() => void clean()}
+        >
+          {busy ? "正在清理…" : "清理缓存"}
+        </Button>
+      </div>
+    </SettingsSection>
   );
 }
 const shipPolicyLabels: Record<ShipPolicy, string> = {
