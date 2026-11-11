@@ -316,7 +316,10 @@ test("watchdog keeps recovery with owners instead of asking the concierge to exe
   assert.match(prompts[2]![3]!, /尚未写回这一阶段的结果/);
   assert.match(prompts[2]![3]!, /不要自行验收/);
   assert.doesNotMatch(prompts[2]![3]!, /goal_stale/);
-  assert.ok(prompts.every(args => args.includes("--wait") && !args.includes("--timeout")));
+  assert.ok(prompts.every(args =>
+    args.includes("--wait") &&
+    args.includes("--timeout") &&
+    args[args.indexOf("--timeout") + 1] === "30000"));
 });
 test("resumed concierge receives current role instructions without starting another agent", async () => {
   const mock=fake({"agent prompt":"{}"});
@@ -542,6 +545,34 @@ test("custom commands start in the real pane, preserve argv and reuse the record
   assert.ok(mock.calls.some(args => args[0] === "pane" && args[1] === "run" && args[3]?.includes("g1")));
   const messages = mock.calls.filter(args => args[0] === "pane" && args[1] === "run" && args[3]?.includes("不亲自执行目标"));
   assert.equal(messages.length, 2, "both initial instructions and a reused custom CLI receive the role boundary");
+});
+
+test("a custom Pane discovered as an Agent uses lifecycle-aware prompting", async () => {
+  const mock = fake({
+    "pane process-info": '{"result":{"process_info":{"shell_pid":12,"foreground_processes":[{"pid":42,"name":"codex"}]}}}',
+    "agent list": '{"result":{"agents":[{"name":"detected-codex","agent_status":"idle","workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1"}]}}',
+    "agent prompt": "{}",
+  });
+  const client = new HerdrClient(mock.runner, "crewvane-test");
+  const result = await client.notifyGoal({
+    session: "crewvane-test",
+    workspaceId: "w1",
+    tabId: "w1:t1",
+    paneId: "w1:p1",
+    agent: "concierge",
+    processId: 42,
+    transport: "pane",
+    launchPolicy: "control-plane-v1",
+  }, "goal_detected", "自动发现 Agent");
+  assert.deepEqual(result, { status: "sent" });
+  assert.deepEqual(
+    mock.calls.find(args => args[0] === "agent" && args[1] === "prompt")?.slice(0, 3),
+    ["agent", "prompt", "w1:p1"],
+  );
+  assert.equal(
+    mock.calls.some(args => args[0] === "pane" && args[1] === "run"),
+    false,
+  );
 });
 
 test("custom command exit or a replaced foreground process never receives task text", async () => {

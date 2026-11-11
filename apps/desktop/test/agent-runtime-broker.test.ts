@@ -200,13 +200,13 @@ test("a settled turn reminds once, then hands protocol_missing to the concierge"
   assert.equal(clock.scheduled.at(-1)?.delay, 30_000);
 
   await clock.fireFirstOpen();
-  await eventually(async () => {
-    assert.equal(
-      (await service.read()).goals[0]!.agentRuntime?.receipt?.status,
-      "protocol_missing",
-    );
-  });
   let state = (await service.read()).goals[0]!;
+  await eventually(async () => {
+    state = (await service.read()).goals[0]!;
+    assert.equal(state.agentRuntime?.receipt?.status, "protocol_missing");
+    assert.notEqual(state.watchdog?.attemptedAt, undefined);
+  });
+  state = (await service.read()).goals[0]!;
   assert.equal(state.agentRuntime?.receipt?.status, "protocol_missing");
   assert.equal(state.status, "active");
   assert.equal(state.attention, null);

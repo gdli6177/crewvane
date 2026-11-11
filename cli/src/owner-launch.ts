@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { runHostHerdr } from "./host-bridge.js";
 import { ownerSceneReplyInstructions } from "./owner-instructions.js";
 import {
   agentRuntimeCapabilities,
@@ -125,6 +126,10 @@ function createRunner(environment: NodeJS.ProcessEnv): HerdrCommandRunner {
   const session = environment.HERDR_SESSION?.trim();
   if (!session)
     throw new Error("负责人启动需要当前 Herdr Session");
+  const hostSocket = environment.CREWVANE_HOST_SOCKET?.trim();
+  const hostToken = environment.CREWVANE_HOST_TOKEN?.trim();
+  if (hostSocket && hostToken)
+    return args => runHostHerdr(hostSocket, hostToken, args);
   const binary =
     environment.CREWVANE_HERDR_BINARY?.trim() ||
     environment.HERDR_BIN_PATH?.trim() ||
@@ -338,6 +343,12 @@ export async function launchOwner(
         environment.HERDR_BIN_PATH?.trim() ||
         "herdr",
       )}`,
+      ...(environment.CREWVANE_HOST_SOCKET?.trim()
+        ? [`export CREWVANE_HOST_SOCKET=${quoteShell(environment.CREWVANE_HOST_SOCKET.trim())}`]
+        : []),
+      ...(environment.CREWVANE_HOST_TOKEN?.trim()
+        ? [`export CREWVANE_HOST_TOKEN=${quoteShell(environment.CREWVANE_HOST_TOKEN.trim())}`]
+        : []),
       `export HERDR_ENV=1 HERDR_SESSION=${quoteShell(session)}`,
       `export HERDR_WORKSPACE_ID=${quoteShell(workspaceId)}`,
       `export HERDR_TAB_ID=${quoteShell(tabId)}`,
@@ -363,6 +374,7 @@ export async function launchOwner(
       paneId,
       agent: input.name,
     };
+    let managedByHerdr = false;
     if (command.kind) {
       try {
         await startAgentWhenPaneReady(
@@ -426,11 +438,44 @@ export async function launchOwner(
       }
       if (!processId)
         throw new Error("自定义 Agent 未保持运行");
+      // Custom CLIs are intentionally not limited to Herdr's known kinds.
+      // Herdr can see the foreground process before the CLI has entered raw
+      // terminal input mode, so wait through that handshake before sending the
+      // first prompt. Otherwise an interactive CLI may discard buffered input
+      // and exit (observed with a Codex launcher wrapper).
+      await (options.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(1_200);
+      const readyInfo = payload(await run([
+        "pane",
+        "process-info",
+        "--pane",
+        paneId,
+      ])).process_info;
+      const readyForeground = Array.isArray(readyInfo?.foreground_processes)
+        ? readyInfo.foreground_processes.filter(
+          (process: any) => process?.pid !== readyInfo.shell_pid,
+        )
+        : [];
+      if (!readyForeground.some((process: any) => process?.pid === processId))
+        throw new Error("自定义 Agent 在准备输入时退出，请核对启动命令、登录和现场输出");
       reference = {
         ...reference,
         transport: "pane",
         processId,
       };
+      try {
+        const listed = payload(await run(["agent", "list"]));
+        const detected = Array.isArray(listed.agents)
+          ? listed.agents.find((agent: any) => agent?.pane_id === paneId)
+          : undefined;
+        if (detected) {
+          if (detected.name !== input.name)
+            await run(["agent", "rename", paneId, input.name]);
+          managedByHerdr = true;
+        }
+      } catch {
+        // Unknown CLIs stay on Pane transport; supported CLIs that Herdr has
+        // already detected get a stable governed name and lifecycle prompting.
+      }
     }
 
     await service.execute({
@@ -440,7 +485,7 @@ export async function launchOwner(
     });
     bound = true;
 
-    if (command.kind) {
+    if (command.kind || managedByHerdr) {
       try {
         await run([
           "agent",

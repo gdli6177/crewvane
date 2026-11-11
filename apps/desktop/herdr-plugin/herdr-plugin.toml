@@ -1,6 +1,6 @@
 id = "dev.crewvane"
 name = "Crewvane"
-version = "0.7.2"
+version = "0.8.0"
 min_herdr_version = "0.9.5"
 description = "Bring Crewvane attention, one-line goal intake, and concierge focus into Herdr."
 platforms = ["macos"]

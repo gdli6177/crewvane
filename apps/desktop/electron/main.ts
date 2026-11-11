@@ -19,6 +19,7 @@ import {
   type GoalStatus,
   type HerdrReference,
   type LivePresence,
+  type WatchdogReason,
   type WatchdogRequest,
   type WorkspaceState,
 } from "../../../packages/core/src/index.js";
@@ -31,7 +32,8 @@ import { HerdrInstallation, type HerdrStatus } from "./herdr-install.js";
 import { HerdrPlugin } from "./herdr-plugin.js";
 import { deliverGoalUpdate } from "./goal-delivery.js";
 import { reconcileSceneReply } from "./scene-reconciliation.js";
-import { CoordinatorQueue } from "./coordinator-queue.js";
+import { CoordinatorInbox, type CoordinatorInboxItem, type CoordinatorInboxStatus } from "./coordinator-inbox.js";
+import { CoordinatorDispatcher, type CoordinatorExecutionResult } from "./coordinator-dispatcher.js";
 import { writeCoordinatorScope } from "./coordinator-scope.js";
 import { WebhookNotifier, type WebhookSaveInput } from "./webhook-notifications.js";
 import { CrewvaneSkillInstaller } from "./skill-installer.js";
@@ -42,6 +44,7 @@ import {
   type ManagedAdapterId,
 } from "./agent-hook-manager.js";
 import { AgentRuntimeBroker } from "./agent-runtime-broker.js";
+import { HerdrHostBridge } from "./herdr-host-bridge.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -60,6 +63,8 @@ const terminals = new TerminalHost((event) => {
 }, process.env);
 const rendererURL = pathToFileURL(join(here, "renderer/index.html")).href;
 let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller, agentHookManager: AgentHookManager, agentRuntimeBroker: AgentRuntimeBroker;
+let coordinatorInbox: CoordinatorInbox | undefined, coordinatorDispatcher: CoordinatorDispatcher | undefined;
+let herdrHostBridge: HerdrHostBridge | undefined;
 function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ?? `crewvane-${createHash("sha256").update(path ?? "").digest("hex").slice(0, 10)}`; }
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
@@ -171,18 +176,16 @@ async function notifyRuntimeConcierge(goal: Goal, detail: string) {
   const target = activeService(), state = await target.read(), herdr = await herdrStatus();
   if (!herdr.executable || state.concierge.status !== "ready")
     throw new Error("管家尚未连接");
-  await coordinate(target, async () => {
-    await writeCoordinatorScope(
-      target.root,
-      goal.id,
-      `protocol-missing-${Date.now()}`,
-    );
-    await client(herdr.executable!, target.root).notifyWatchdog(
-      state.concierge,
-      [{ goalId: goal.id, reason: "protocol_missing" }],
-    );
-  });
-  void detail;
+  const current = state.goals.find(item => item.id === goal.id) ?? goal;
+  const issue: WatchdogRequest = {
+    goalId: goal.id,
+    reason: "protocol_missing",
+    basis: current.watchdog?.basis ??
+      current.agentRuntime?.receipt?.missingAt ??
+      current.updatedAt,
+  };
+  await enqueueWatchdog(target, issue, detail);
+  await drainCoordinatorQueue(target);
 }
 async function executable(command: string, cwd?: string) {
   return tools.find(command, cwd);
@@ -341,16 +344,230 @@ function conciergeIdentity(reference: HerdrReference) {
   return JSON.stringify([reference.session, reference.paneId, reference.agent, reference.processId]);
 }
 const handoffs = new Map<string, Promise<void>>();
-const coordinatorQueue = new CoordinatorQueue();
-function coordinate<T>(target: WorkspaceService, task: () => Promise<T>): Promise<T> {
-  return coordinatorQueue.run(target.root, task);
+const CONCIERGE_TURN_TIMEOUT_MS = 30_000;
+function broadcastCoordinatorStatus(status: CoordinatorInboxStatus) {
+  if (window && !window.isDestroyed())
+    window.webContents.send("crewvane:event", { type: "coordinator-status", status });
+}
+function coordinatorPriority(kind: CoordinatorInboxItem["kind"], reason?: string) {
+  if (kind === "feedback" || kind === "restart" || kind === "scene_reply") return "human" as const;
+  if (kind === "follow_up") return "attention" as const;
+  if (kind === "watchdog") return reason === "blocked" || reason === "missing"
+    ? "attention" as const : "background" as const;
+  if (kind === "reconcile") return "background" as const;
+  return "normal" as const;
+}
+async function enqueueWatchdog(target: WorkspaceService, issue: WatchdogRequest, detail?: string) {
+  if (root !== target.root) return;
+  const { inbox } = await ensureCoordinatorInbox();
+  await inbox.enqueue({
+    goalId: issue.goalId,
+    requestId: `watchdog-${issue.reason}-${issue.basis}`,
+    kind: "watchdog",
+    priority: coordinatorPriority("watchdog", issue.reason),
+    watchdogReason: issue.reason,
+    watchdogBasis: issue.basis,
+    ...(detail ? { detail } : {}),
+  });
+}
+function dispatchKind(goal: Goal): CoordinatorInboxItem["kind"] {
+  switch (goal.dispatch?.kind) {
+    case "follow_up": return "follow_up";
+    case "scene_reply": return "scene_reply";
+    case "restart": return "restart";
+    case "feedback":
+    case "resume": return "feedback";
+    default: return "goal";
+  }
+}
+async function ensureCoordinatorInbox() {
+  if (!coordinatorInbox || !coordinatorDispatcher) throw new Error("管家收件箱尚未准备好");
+  return { inbox: coordinatorInbox, dispatcher: coordinatorDispatcher };
+}
+async function executeCoordinatorItem(
+  target: WorkspaceService,
+  item: CoordinatorInboxItem,
+): Promise<CoordinatorExecutionResult> {
+  if (root !== target.root)
+    return { status: "cancelled", detail: "工作区已切换，本次收件未发送。" };
+  if (item.kind === "watchdog") {
+    if (!item.watchdogReason || !item.watchdogBasis)
+      return { status: "cancelled", detail: "巡检请求缺少原因或基准，已取消。" };
+    if (!["blocked", "missing", "stale", "unassigned", "settled", "protocol_missing"].includes(
+      item.watchdogReason,
+    )) return { status: "cancelled", detail: "巡检请求包含未知原因，已取消。" };
+    try {
+      const status = await herdrStatus();
+      if (!status.executable) throw new Error("Herdr 尚未准备好");
+      const reference = await prepareConcierge(target);
+      await writeCoordinatorScope(target.root, item.goalId, item.requestId);
+      await client(status.executable, target.root).notifyWatchdog(reference, [{
+        goalId: item.goalId,
+        reason: item.watchdogReason as WatchdogReason,
+        basis: item.watchdogBasis,
+      }]);
+      await target.execute({
+        type: "watchdog.report",
+        goalId: item.goalId,
+        at: new Date().toISOString(),
+        basis: item.watchdogBasis,
+        outcome: "contacted",
+      });
+      return { status: "sent", estimatedChars: 3_500 };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await target.execute({
+        type: "watchdog.report",
+        goalId: item.goalId,
+        at: new Date().toISOString(),
+        basis: item.watchdogBasis,
+        outcome: "failed",
+        detail: detail.slice(0, 1000),
+      }).catch(() => {});
+      return {
+        status: "failed",
+        detail,
+        pauseQueue: error instanceof ConciergeBlockedError,
+      };
+    }
+  }
+
+  const before = (await target.read()).goals.find(goal => goal.id === item.goalId);
+  if (!before || before.mode !== "concierge" ||
+    ["completed", "dropped"].includes(before.status)) {
+    return { status: "cancelled", detail: "目标已结束、已接管或不存在。" };
+  }
+  if (before.dispatch?.id !== item.requestId)
+    return { status: "cancelled", detail: "已有更新请求，本次请求已合并。" };
+
+  try {
+    const status = await herdrStatus();
+    if (!status.executable) throw new Error("Herdr 尚未准备好");
+    const reference = await prepareConcierge(target);
+    const messenger = client(status.executable, target.root);
+    const site = await messenger.inspectConcierge(reference);
+    if (site?.live.state === "working")
+      return {
+        status: "deferred",
+        detail: "管家仍在处理上一案卷，本通知已保留并将在其空闲后继续。",
+      };
+    if (site?.live.state === "blocked")
+      return {
+        status: "deferred",
+        detail: "管家正在等待人处理现场输入，本通知已保留且不会插入终端。",
+      };
+    await writeCoordinatorScope(
+      target.root,
+      item.goalId,
+      item.requestId,
+      item.kind === "scene_reply" ? before.sceneReply : undefined,
+    );
+    await deliverGoalUpdate(target, item.goalId, async current => {
+      if (item.kind === "follow_up")
+        return messenger.notifyFollowUp(
+          reference,
+          current.id,
+          current.dispatch?.note || "",
+          current,
+          target.root,
+          CONCIERGE_TURN_TIMEOUT_MS,
+        );
+      return messenger.notifyGoal(
+        reference,
+        current.id,
+        current.title,
+        current,
+        target.root,
+        CONCIERGE_TURN_TIMEOUT_MS,
+      );
+    }, item.requestId);
+    const latest = (await target.read()).goals.find(goal => goal.id === item.goalId);
+    if (!latest?.dispatch || latest.dispatch.id !== item.requestId)
+      return { status: "cancelled", detail: "发送期间目标状态已更新，本次请求不再覆盖新状态。" };
+    const deliveryStatus = latest.dispatch.status;
+    let pauseQueue = false;
+    if (deliveryStatus === "unconfirmed") {
+      const presence = await messenger.inspectConcierge(reference)
+        .then(site => site?.live.state)
+        .catch(() => undefined);
+      pauseQueue = presence === "working";
+    }
+    return {
+      status: deliveryStatus === "pending" ? "failed" : deliveryStatus,
+      detail: latest.dispatch.detail ??
+        (deliveryStatus === "sent" ? "管家已收到本次案卷通知。" : undefined),
+      estimatedChars: Math.min(
+        20_000,
+        (latest.description.length + latest.next.length + JSON.stringify(
+          latest.activities.slice(-8),
+        ).length + 3_000),
+      ),
+      pauseQueue,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const latest = (await target.read()).goals.find(goal => goal.id === item.goalId);
+    if (latest?.dispatch?.id === item.requestId && latest.dispatch.status === "pending") {
+      await target.execute({
+        type: "goal.dispatch",
+        goalId: item.goalId,
+        status: "failed",
+        requestId: item.requestId,
+        detail: `联系管家失败：${detail.replace(/[。.!！]\s*$/, "")}。内容已保存，请重试联系管家。`,
+      }).catch(() => {});
+    }
+    return {
+      status: "failed",
+      detail,
+      pauseQueue: error instanceof ConciergeBlockedError,
+    };
+  }
+}
+async function resetCoordinatorContextIfNeeded(target: WorkspaceService) {
+  const { inbox } = await ensureCoordinatorInbox();
+  const status = await inbox.status();
+  if (!status.contextResetDue || status.queued || status.processing) return;
+  const state = await target.read();
+  const herdr = await herdrStatus();
+  if (!herdr.executable || state.concierge.status !== "ready") return;
+  const connection = client(herdr.executable, target.root);
+  const site = await connection.inspectConcierge(state.concierge);
+  if (!site || !["idle", "done"].includes(site.live.state)) return;
+  await connection.closeConcierge(site.reference);
+  await target.execute({
+    type: "concierge.status",
+    status: "not_ready",
+    reference: { session: site.reference.session },
+    detail: "正在轮换管家上下文，已完成案卷仍保存在工作区。",
+  });
+  refreshedConcierges.delete(target.root);
+  await prepareConcierge(target);
+  await inbox.markContextReset();
+  broadcastCoordinatorStatus(await inbox.status());
+}
+async function drainCoordinatorQueue(target: WorkspaceService) {
+  if (root !== target.root) return;
+  const { dispatcher } = await ensureCoordinatorInbox();
+  await dispatcher.drain();
+  if (root !== target.root) return;
+  await resetCoordinatorContextIfNeeded(target).catch(error => {
+    if (root === target.root && !window.isDestroyed()) {
+      window.webContents.send("crewvane:event", {
+        type: "diagnostic",
+        message: `管家上下文轮换暂未完成：${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  });
 }
 async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<void> {
+  if (root !== target.root) return;
   const key = `${target.root}:${goalId}`;
   const pending = handoffs.get(key); if (pending) return pending;
-  const work = coordinate(target, async () => {
+  const work = (async () => {
     try {
-      const current = (await target.read()).goals.find(goal => goal.id === goalId);
+      let current = (await target.read()).goals.find(goal => goal.id === goalId);
+      if (!current || current.mode !== "concierge" ||
+        ["backlog", "completed", "dropped"].includes(current.status)) return;
       if (current?.dispatch?.kind === "restart" && !current.herdr) {
         try {
           await restartOwnerSession(target, current);
@@ -367,25 +584,29 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
           throw error;
         }
       }
-      await deliverGoalUpdate(target, goalId, async item => {
-        const reference = await prepareConcierge(target);
-        const latest = (await target.read()).goals.find(goal => goal.id === goalId);
-        if (!latest || latest.mode !== "concierge" || ["completed", "dropped"].includes(latest.status) ||
-          latest.dispatch?.id !== item.dispatch?.id) return;
-        const status = await herdrStatus();
-        if (!status.executable) throw new Error("Herdr 尚未准备好");
-        const herdrExecutable = status.executable;
-        const messenger = client(herdrExecutable, target.root);
-        await writeCoordinatorScope(target.root, item.id, item.dispatch?.id,
-          item.dispatch?.kind === "scene_reply" ? item.sceneReply : undefined);
-        if (item.dispatch?.kind === "follow_up")
-          return messenger.notifyFollowUp(reference, item.id, item.dispatch.note || "", item, target.root);
-        return messenger.notifyGoal(reference, item.id, item.title, item, target.root);
+      current = (await target.read()).goals.find(goal => goal.id === goalId);
+      if (!current || current.mode !== "concierge" ||
+        ["backlog", "completed", "dropped"].includes(current.status)) return;
+      if (current.dispatch?.status !== "pending") {
+        current = await target.execute({
+          type: "goal.dispatch",
+          goalId,
+          status: "pending",
+        }) as Goal;
+      }
+      if (!current.dispatch?.id) throw new Error("目标缺少可持久化的派发编号");
+      const { inbox } = await ensureCoordinatorInbox();
+      await inbox.enqueue({
+        goalId,
+        requestId: current.dispatch.id,
+        kind: dispatchKind(current),
+        priority: coordinatorPriority(dispatchKind(current)),
       });
+      await drainCoordinatorQueue(target);
     } finally {
       if (root === target.root) broadcastSnapshot(await target.read(), target.root);
     }
-  });
+  })();
   handoffs.set(key, work);
   try { await work; } finally { handoffs.delete(key); }
 }
@@ -505,6 +726,9 @@ async function doPrepareConcierge(target: WorkspaceService) {
       command.args,
       agentExecutable,
       (await cliStatus()).directory,
+      status.executable,
+      herdrHostBridge?.socketPath ?? "",
+      herdrHostBridge?.token ?? "",
     );
     refreshedConcierges.set(target.root, conciergeIdentity(reference));
     await target.execute({
@@ -668,10 +892,54 @@ async function deliverAttentionNotifications(target: WorkspaceService, state: Aw
 async function openWorkspace(path: string) {
   const canonical = await realpath(path); if (!(await stat(canonical)).isDirectory()) throw new Error("工作区必须是目录");
   const opened = new WorkspaceService(canonical), initialState = await opened.read();
+  await herdrHostBridge?.stop().catch(() => {});
+  herdrHostBridge = new HerdrHostBridge(
+    canonical,
+    sessionName(canonical),
+    async () => {
+      const status = await herdrInstallation.ensure();
+      if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好");
+      return status.executable;
+    },
+  );
+  await herdrHostBridge.start();
   await agentRuntimeBroker?.stop().catch(() => {});
   deliverGoalStatusChanges(opened, initialState, canonical);
+  const inbox = await CoordinatorInbox.open(canonical);
+  coordinatorInbox = inbox;
+  coordinatorDispatcher = new CoordinatorDispatcher(inbox, {
+    execute: item => executeCoordinatorItem(opened, item),
+    onStatus: status => {
+      if (root === canonical) broadcastCoordinatorStatus(status);
+    },
+  });
   root = canonical; service = opened;
   lastSnapshotSignature = undefined;
+  const recovered = await inbox.recoverInterrupted();
+  for (const { item, detail } of recovered) {
+    if (item.kind === "watchdog" && item.watchdogBasis) {
+      await opened.execute({
+        type: "watchdog.report",
+        goalId: item.goalId,
+        at: new Date().toISOString(),
+        basis: item.watchdogBasis,
+        outcome: "failed",
+        detail,
+      }).catch(() => {});
+      continue;
+    }
+    const goal = (await opened.read()).goals.find(candidate => candidate.id === item.goalId);
+    if (goal?.dispatch?.id === item.requestId) {
+      await opened.execute({
+        type: "goal.dispatch",
+        goalId: item.goalId,
+        status: "unconfirmed",
+        requestId: item.requestId,
+        detail,
+      }).catch(() => {});
+    }
+  }
+  broadcastCoordinatorStatus(await inbox.status());
   watchWorkspaceState(opened);
   await agentRuntimeBroker.start().catch(error => {
     if (!window.isDestroyed()) window.webContents.send("crewvane:event", {
@@ -699,6 +967,12 @@ async function openWorkspace(path: string) {
         type: "diagnostic", message: error instanceof Error ? error.message : String(error),
       });
     });
+  void coordinatorDispatcher?.drain().catch(error => {
+    if (!window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `管家收件箱恢复暂未完成：${error instanceof Error ? error.message : String(error)}`,
+    });
+  });
 }
 async function synchronize() {
   if (syncing || !service || !root) return;
@@ -770,22 +1044,10 @@ async function synchronize() {
       return goal?.watchdog?.basis === request.basis && !goal.attention;
     });
     if (activeRequests.length && root === workspace) {
-      let failure: string | undefined;
-      try {
-        if (!status.executable || state.concierge.status !== "ready") throw new Error("管家尚未连接，请点击「找管家」恢复");
-        const coordinator = client(status.executable, workspace);
-        await coordinate(target, async () => {
-          for (const request of activeRequests) {
-            await writeCoordinatorScope(target.root, request.goalId, `watchdog-${Date.parse(request.basis)}`);
-            await coordinator.notifyWatchdog(state.concierge, [request]);
-          }
-        });
-      } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-      for (const request of requests) await target.execute({
-        type: "watchdog.report", goalId: request.goalId, at: new Date().toISOString(), basis: request.basis,
-        outcome: failure ? "failed" : "contacted", ...(failure ? { detail: failure.slice(0, 1000) } : {}),
-      });
+      for (const request of activeRequests)
+        await enqueueWatchdog(target, request);
     }
+    if (root === workspace) await drainCoordinatorQueue(target);
     state = await target.read();
     await deliverAttentionNotifications(target, state, workspace);
     broadcastSnapshot(state, workspace);
@@ -941,17 +1203,23 @@ app.whenReady().then(async () => {
       });
     }
     if (["goal.rework", "goal.resolve", "goal.update"].includes(command.type)) {
-      const item = result as import("../../../packages/core/src/index.js").Goal, current = await target.read();
-      if (item.mode === "concierge" && current.concierge.status === "ready" && item.dispatch?.status !== "pending") {
-        const status = await herdrStatus();
-        if (status.executable) {
-          const herdrExecutable = status.executable;
-          try { await coordinate(target, async () => {
-            await writeCoordinatorScope(target.root, item.id, `event-${Date.now()}`);
-            await client(herdrExecutable, target.root).notifyGoal(current.concierge, item.id, item.title, item, target.root);
-          }); }
-          catch (error) { window.webContents.send("crewvane:event", { type: "diagnostic", message: error instanceof Error ? error.message : String(error) }); }
+      const item = result as Goal;
+      if (!["completed", "dropped"].includes(item.status) && item.mode === "concierge") {
+        const current = (await target.read()).goals.find(goal => goal.id === item.id);
+        if (current?.dispatch?.status !== "pending") {
+          await target.execute({
+            type: "goal.dispatch",
+            goalId: item.id,
+            status: "pending",
+            kind: "feedback",
+          });
         }
+        void dispatchGoal(target, item.id).catch(error => {
+          if (root === target.root) window.webContents.send("crewvane:event", {
+            type: "diagnostic",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
     }
     if (root === target.root) {
@@ -1007,6 +1275,10 @@ app.whenReady().then(async () => {
     clipboard.writeText(value);
   });
   ipcMain.handle("crewvane:prepare-concierge", (event) => { sender(event); return prepareConcierge(); });
+  ipcMain.handle("crewvane:coordinator-status", async event => {
+    sender(event);
+    return (await ensureCoordinatorInbox()).inbox.status();
+  });
   ipcMain.handle("crewvane:dispatch-goal", (event, goalId: string) => { sender(event); return dispatchGoal(activeService(), goalId); });
   ipcMain.handle("crewvane:restart-goal", (event, goalId: string, note: string) => {
     sender(event);
@@ -1073,5 +1345,6 @@ app.on("before-quit", () => {
   stateWatcher?.close();
   if (stateRefreshTimer) clearTimeout(stateRefreshTimer);
   void agentRuntimeBroker?.stop().catch(() => {});
+  void herdrHostBridge?.stop().catch(() => {});
   terminals.dispose();
 });

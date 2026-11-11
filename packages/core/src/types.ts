@@ -215,7 +215,15 @@ type WorkspaceCommand =
   | { type: "scene.visit"; goalId: string; retry?: boolean }
   | { type: "scene.check"; goalId: string; visitId: string; status: "checking" | "checked" | "failed"; detail?: string }
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
-  | { type: "goal.dispatch"; goalId: string; status: "pending" | "sent" | "unconfirmed" | "failed"; detail?: string; requestId?: string }
+  | {
+      type: "goal.dispatch";
+      goalId: string;
+      status: "pending" | "sent" | "unconfirmed" | "failed";
+      detail?: string;
+      requestId?: string;
+      kind?: NonNullable<Goal["dispatch"]>["kind"];
+      note?: string;
+    }
   | { type: "goal.resume"; goalId: string; note: string; mode: "concierge" | "manual" }
   | { type: "goal.restart"; goalId: string; note: string }
   | { type: "goal.takeover"; goalId: string }
