@@ -181,6 +181,7 @@ function App() {
   const pendingState = useRef<{ state: WorkspaceState; signature: string } | undefined>(undefined);
   const stateFrame = useRef<number | undefined>(undefined);
   const lastStateSignature = useRef("");
+  const autonomyPromptedWorkspace = useRef("");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   function applyState(next: WorkspaceState) {
     const signature = JSON.stringify(next);
@@ -296,6 +297,8 @@ function App() {
   }, [page]);
   useEffect(() => {
     if (!workspace || !stateLoaded || state.autonomy.initializedAt || modal) return;
+    if (autonomyPromptedWorkspace.current === workspace) return;
+    autonomyPromptedWorkspace.current = workspace;
     setModal("autonomy");
   }, [workspace, stateLoaded, state.autonomy.initializedAt, modal]);
   useEffect(() => {

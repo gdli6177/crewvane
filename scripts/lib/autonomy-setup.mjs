@@ -11,4 +11,9 @@ export async function completeAutonomySetup(
     : /每次都由我验收/;
   await dialog.getByRole("button", { name: label }).click();
   await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() =>
+    window.crewvane.command({ type: "snapshot" })
+      .then(state => Boolean(state.autonomy.initializedAt)));
+  await new Promise(resolve => setTimeout(resolve, 250));
+  await dialog.waitFor({ state: "hidden" });
 }
