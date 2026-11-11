@@ -300,7 +300,13 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
             <small>当前事项</small>
             <span>{goal.currentAction}</span>
           </div>
-          <button type="button" className="scene-record" onClick={() => onOpenGoal(goal.id)}>
+          <button
+            type="button"
+            className="scene-record"
+            aria-label="目标记录"
+            title="目标记录"
+            onClick={() => onOpenGoal(goal.id)}
+          >
             <FileText size={14} /><span>目标记录</span><ChevronRight size={13} />
           </button>
         </div>
