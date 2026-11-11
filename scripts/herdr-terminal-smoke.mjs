@@ -60,6 +60,14 @@ try {
   const goal = await page.evaluate(() => window.crewvane.command({
     type: "goal.create", input: { title: "隔离的真实终端测试", projectId: "personal", mode: "manual" },
   }));
+  // This fixture is written directly through IPC before React has necessarily
+  // finished its one-time subscription setup. Reload once to verify normal
+  // startup recovery and wait until the renderer has loaded the goal.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => !!window.crewvane);
+  await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
+  await page.getByRole("button", { name: "全部目标", exact: true }).click();
+  await page.locator(".goal-row").filter({ hasText: goal.title }).waitFor();
   // A manually recorded goal opens the workspace TUI without starting a model.
   await page.evaluate((id) => window.crewvane.openHerdr(id), goal.id);
   await page.getByRole("region", { name: "Herdr 工作现场" }).waitFor();

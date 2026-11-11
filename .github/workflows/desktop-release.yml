@@ -42,6 +42,7 @@ jobs:
       - run: pnpm test:desktop
       - run: pnpm test:task-pool
       - run: pnpm test:installers
+      - run: pnpm test:terminal
       - name: Run packaged-app onboarding with authenticated Herdr download
         run: pnpm test:onboarding
         env:
@@ -75,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Crewvane｜协航 0.7.1 · macOS Apple Silicon
+          Crewvane｜协航 0.7.2 · macOS Apple Silicon
 
           ## 本版更新
 
@@ -87,6 +88,7 @@ jobs:
           - 回执提醒改为单个逻辑行，并等待 Herdr 确认同一负责人实际进入 `working`；确认不到时交给管家核对，不会重复发送或把 API 成功误当成已处理。
           - 修复内嵌 Herdr 无法从系统剪贴板粘贴的问题，同时支持 `⌘V`、`Ctrl+V` 和 Electron 原生粘贴事件。
           - 保留 Agent Hooks、一次回执提醒、30 分钟无业务进展巡检、外部等待和原有注意力规则。已回报一轮不等于目标完成。
+          - 加固 Release 验收中的异步临时目录清理，避免回执测试的后台写盘与目录删除竞争造成构建偶发失败。
 
           ## 安装
 
