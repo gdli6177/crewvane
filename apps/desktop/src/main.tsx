@@ -20,6 +20,7 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  ShieldCheck,
   Sparkles,
   SquareTerminal,
   Sun,
@@ -36,12 +37,14 @@ import {
 import { taskPoolGoals } from "../../../packages/core/src/task-pool.js";
 import type {
   CrewvaneCommand,
+  AcceptanceMode,
   AgentPreferences,
   Goal,
   GoalAttachment,
   IntakeHandling,
   LiveState,
   Project,
+  ReleaseOnMerge,
   ShipPolicy,
   WorkspaceState,
 } from "../../../packages/core/src/types.js";
@@ -137,6 +140,7 @@ const time = (value?: string) =>
     : "";
 function App() {
   const [state, setState] = useState<WorkspaceState>(initialState),
+    [stateLoaded, setStateLoaded] = useState(false),
     [workspace, setWorkspace] = useState<string>(),
     [version, setVersion] = useState(""),
     [page, setPage] = useState<keyof typeof pages>("home");
@@ -148,7 +152,8 @@ function App() {
     [query, setQuery] = useState(""),
     [filter, setFilter] = useState("all");
   const [modal, setModal] = useState<
-      "new" | "project" | "attention" | "goal" | "task" | "edit" | "delivery" | "workspace" | "webhook" | ""
+      "new" | "project" | "attention" | "goal" | "task" | "edit" | "delivery"
+      | "workspace" | "webhook" | "autonomy" | ""
     >(""),
     [goalId, setGoalId] = useState("");
   const [intakeHandling, setIntakeHandling] = useState<IntakeHandling>("concierge");
@@ -176,6 +181,7 @@ function App() {
   const pendingState = useRef<{ state: WorkspaceState; signature: string } | undefined>(undefined);
   const stateFrame = useRef<number | undefined>(undefined);
   const lastStateSignature = useRef("");
+  const autonomyPromptedWorkspace = useRef("");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   function applyState(next: WorkspaceState) {
     const signature = JSON.stringify(next);
@@ -188,6 +194,7 @@ function App() {
       if (!pending || pending.signature === lastStateSignature.current) return;
       lastStateSignature.current = pending.signature;
       setState(pending.state);
+      setStateLoaded(true);
     });
   }
   const goal = state.goals.find((item) => item.id === goalId),
@@ -288,6 +295,12 @@ function App() {
       void api.webhookSettings().then(setWebhook).catch(showError);
     }
   }, [page]);
+  useEffect(() => {
+    if (!workspace || !stateLoaded || state.autonomy.initializedAt || modal) return;
+    if (autonomyPromptedWorkspace.current === workspace) return;
+    autonomyPromptedWorkspace.current = workspace;
+    setModal("autonomy");
+  }, [workspace, stateLoaded, state.autonomy.initializedAt, modal]);
   useEffect(() => {
     if (!error || modal) return;
     const timer = window.setTimeout(() => setError(""), 8_000);
@@ -1023,6 +1036,34 @@ function App() {
                 await execute({ type: "project.policy.set", projectId, policy, actor: "你" });
                 notify("项目上线策略已更新。");
               }}
+              saveAutonomy={async (value: {
+                acceptance: AcceptanceMode;
+                paused: boolean;
+                maxRecoveryAttempts: number;
+                noProgressMinutes: number;
+              }) => {
+                await execute({
+                  type: "workspace.autonomy.set",
+                  ...value,
+                  actor: "你",
+                });
+                notify("工作区自主推进设置已更新。");
+              }}
+              saveProjectAutonomy={async (
+                projectId: string,
+                value: {
+                  acceptance: "inherit" | AcceptanceMode;
+                  releaseOnMerge: ReleaseOnMerge;
+                },
+              ) => {
+                await execute({
+                  type: "project.autonomy.set",
+                  projectId,
+                  ...value,
+                  actor: "你",
+                });
+                notify("项目自主目标设置已更新。");
+              }}
               theme={theme}
               setTheme={(value: string) => setTheme(value)}
               onAction={async (action: string) => {
@@ -1099,6 +1140,33 @@ function App() {
           </Button>
         </div>
       </Modal>}
+      {modal === "autonomy" && (
+        <AutonomySetupModal
+          busy={busy}
+          error={error}
+          onChoose={async acceptance => {
+            setBusy(true);
+            setError("");
+            try {
+              await api.command({
+                type: "workspace.autonomy.set",
+                acceptance,
+                initialize: true,
+                actor: "你",
+              });
+              applyState(await api.command({ type: "snapshot" }));
+              setModal("");
+              notify(acceptance === "auto-with-verification"
+                ? "已启用独立复核后自动验收；生产发布仍由你逐次批准。"
+                : "已设为人工验收；Agent 不会自行代替你验收。");
+            } catch (reason) {
+              showError(reason);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
       {modal === "webhook" && (
         <Modal
           title="Webhook 通知"
@@ -1599,6 +1667,8 @@ function Settings({
   webhook,
   saveAgents,
   savePolicy,
+  saveAutonomy,
+  saveProjectAutonomy,
   openWebhook,
   version,
 }: any) {
@@ -1651,6 +1721,12 @@ function Settings({
               decisions={state.decisions ?? []}
               busy={busy}
               onSave={savePolicy}
+            />
+            <AutonomySettings
+              state={state}
+              busy={busy}
+              onSaveWorkspace={saveAutonomy}
+              onSaveProject={saveProjectAutonomy}
             />
           </div>
         </section>
@@ -1878,6 +1954,50 @@ function Settings({
     </div>
   );
 }
+function AutonomySetupModal({
+  busy,
+  error,
+  onChoose,
+}: {
+  busy: boolean;
+  error: string;
+  onChoose: (acceptance: AcceptanceMode) => Promise<void>;
+}) {
+  return (
+    <Modal
+      title="交付完成后，谁来验收？"
+      description="这是工作区默认设置，可随时在设置中调整。生产发布始终需要你逐次批准，执行完成后也由你最终确认。"
+      error={error}
+      onClose={() => void onChoose("human-review")}
+    >
+      <div className="autonomy-setup-options">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void onChoose("human-review")}
+        >
+          <span><ShieldCheck size={18} /></span>
+          <strong>每次都由我验收</strong>
+          <small>最保守的默认方式。Agent 可准备证据和复核，但不会自行把目标标为完成。</small>
+          <em>跳过时也使用此方式</em>
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void onChoose("auto-with-verification")}
+        >
+          <span><Sparkles size={18} /></span>
+          <strong>独立复核后自动验收</strong>
+          <small>只有候选、完成条件、真实证据和未参与交付的复核者都满足门禁时才会自动完成；你仍可随时暂停或重新打开。</small>
+          <em>减少日常验收，不放弃最终裁决权</em>
+        </button>
+      </div>
+      <p className="autonomy-setup-note">
+        自动验收只适用于目标边界内的交付，不等于合并或上线。
+      </p>
+    </Modal>
+  );
+}
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -1969,6 +2089,189 @@ const shipPolicyLabels: Record<ShipPolicy, string> = {
   auto: "检查通过后自动合并与上线",
   "auto-merge-manual-deploy": "自动合并，上线前审批",
 };
+const acceptanceLabels: Record<AcceptanceMode, string> = {
+  "human-review": "人工验收",
+  "auto-with-verification": "独立复核后自动验收",
+};
+const releaseOnMergeLabels: Record<ReleaseOnMerge, string> = {
+  unknown: "尚未确认（禁止自主合并）",
+  never: "合并不触发生产发布",
+  production: "合并会触发生产发布",
+};
+function AutonomySettings({
+  state,
+  busy,
+  onSaveWorkspace,
+  onSaveProject,
+}: {
+  state: WorkspaceState;
+  busy: boolean;
+  onSaveWorkspace: (value: {
+    acceptance: AcceptanceMode;
+    paused: boolean;
+    maxRecoveryAttempts: number;
+    noProgressMinutes: number;
+  }) => Promise<void>;
+  onSaveProject: (
+    projectId: string,
+    value: {
+      acceptance: "inherit" | AcceptanceMode;
+      releaseOnMerge: ReleaseOnMerge;
+    },
+  ) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState<string>(),
+    autonomy = state.autonomy;
+  return (
+    <SettingsSection
+      wide
+      icon={<Sparkles />}
+      title="自主推进与验收授权"
+      description="默认人工验收。只有明确启用后，目标才会在独立复核与证据门禁都满足时自动完成；人始终保留最终裁决权。"
+    >
+      <form
+        className="autonomy-settings-form"
+        key={`workspace-${autonomy.revision}`}
+        onSubmit={async event => {
+          event.preventDefault();
+          const data = new FormData(event.currentTarget);
+          try {
+            await onSaveWorkspace({
+              acceptance: String(data.get("acceptance")) as AcceptanceMode,
+              paused: data.get("paused") === "on",
+              maxRecoveryAttempts: Number(data.get("maxRecoveryAttempts")),
+              noProgressMinutes: Number(data.get("noProgressMinutes")),
+            });
+          } catch {
+            /* The parent shows the server error. */
+          }
+        }}
+      >
+        <Field label="工作区默认验收方式">
+          <Select name="acceptance" defaultValue={autonomy.acceptance} disabled={busy}>
+            {Object.entries(acceptanceLabels).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="默认恢复次数" hint="同一候选没有新证据时会更早停止自动重试。">
+          <TextInput
+            name="maxRecoveryAttempts"
+            type="number"
+            min={1}
+            max={20}
+            defaultValue={autonomy.maxRecoveryAttempts}
+            disabled={busy}
+          />
+        </Field>
+        <Field label="无进展检测（分钟）" hint="只用于发现长时间没有结构化写回的现场。">
+          <TextInput
+            name="noProgressMinutes"
+            type="number"
+            min={5}
+            max={10080}
+            defaultValue={autonomy.noProgressMinutes}
+            disabled={busy}
+          />
+        </Field>
+        <label className="autonomy-pause-control">
+          <input
+            name="paused"
+            type="checkbox"
+            defaultChecked={autonomy.paused}
+            disabled={busy}
+          />
+          <span>
+            <strong>全局暂停自主续跑</strong>
+            <small>不会强制终止当前 Agent 回合；只停止新的自动续跑。</small>
+          </span>
+        </label>
+        <Button type="submit" variant="primary" size="sm" disabled={busy}>
+          保存工作区设置
+        </Button>
+      </form>
+
+      <div className="autonomy-project-list">
+        {state.projects.map(project => {
+          const projectAutonomy = project.autonomy,
+            open = editing === project.id;
+          return (
+            <div key={project.id} className="autonomy-project-row">
+              <div>
+                <strong>{project.name}</strong>
+                <span>
+                  {projectAutonomy?.acceptance === "inherit" || !projectAutonomy
+                    ? `继承工作区：${acceptanceLabels[autonomy.acceptance]}`
+                    : acceptanceLabels[projectAutonomy.acceptance]}
+                </span>
+                <small>{releaseOnMergeLabels[project.releaseOnMerge ?? "unknown"]}</small>
+              </div>
+              {!open ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setEditing(project.id)}
+                >
+                  配置项目覆盖
+                </Button>
+              ) : (
+                <form
+                  key={`${project.id}-${projectAutonomy?.revision ?? 0}`}
+                  onSubmit={async event => {
+                    event.preventDefault();
+                    const data = new FormData(event.currentTarget);
+                    try {
+                      await onSaveProject(project.id, {
+                        acceptance: String(data.get("acceptance")) as "inherit" | AcceptanceMode,
+                        releaseOnMerge: String(data.get("releaseOnMerge")) as ReleaseOnMerge,
+                      });
+                      setEditing(undefined);
+                    } catch {
+                      /* The parent shows the server error. */
+                    }
+                  }}
+                >
+                  <Field label="项目验收覆盖">
+                    <Select
+                      name="acceptance"
+                      defaultValue={projectAutonomy?.acceptance ?? "inherit"}
+                      disabled={busy}
+                    >
+                      <option value="inherit">继承工作区</option>
+                      {Object.entries(acceptanceLabels).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="合并与生产发布关系">
+                    <Select
+                      name="releaseOnMerge"
+                      defaultValue={project.releaseOnMerge ?? "unknown"}
+                      disabled={busy}
+                    >
+                      {Object.entries(releaseOnMergeLabels).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <div className="policy-actions">
+                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => setEditing(undefined)}>
+                      取消
+                    </Button>
+                    <Button type="submit" variant="primary" size="sm" disabled={busy}>
+                      保存项目设置
+                    </Button>
+                  </div>
+                </form>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </SettingsSection>
+  );
+}
 function GovernanceEditor({
   projects,
   decisions,

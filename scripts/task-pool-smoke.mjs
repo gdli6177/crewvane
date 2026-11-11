@@ -10,6 +10,12 @@ const home = await mkdtemp("/tmp/cv-pool-ui-"), workspace = join(home, "workspac
 await mkdir(workspace);
 const service = new WorkspaceService(workspace);
 await service.execute({ type: "agents.configure", preferences: { concierge: "/missing/cv-pool-test-agent" } });
+await service.execute({
+  type: "workspace.autonomy.set",
+  acceptance: "human-review",
+  initialize: true,
+  actor: "你",
+});
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aW3sAAAAASUVORK5CYII=", "base64");
 const errors = [];
 async function launch() {

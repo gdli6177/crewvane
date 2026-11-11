@@ -32,7 +32,7 @@ It works with interactive CLI agents that can already run in a terminal, keeps
 the terminal sessions in Herdr, and adds the durable workflow around them:
 state, ownership, waiting, evidence, approvals, and recovery.
 
-> **Status:** early preview (`0.7.x`). The desktop UI is currently in Simplified
+> **Status:** early preview (`0.9.x`). The desktop UI is currently in Simplified
 > Chinese and the packaged app supports macOS on Apple Silicon.
 
 ## Why Crewvane
@@ -46,7 +46,7 @@ Crewvane changes the unit of work from **terminal session** to **goal**.
 | Without a coordination layer | With Crewvane |
 | --- | --- |
 | You monitor a growing list of terminal tabs. | You scan one attention center. |
-| A finished-looking agent may be mistaken for finished work. | Delivery requires evidence and human acceptance. |
+| A finished-looking agent may be mistaken for finished work. | Delivery requires evidence plus independent review or human acceptance. |
 | Important context lives in chat history. | Goals keep the original request, attachments, messages, waiting state, and handoffs. |
 | "Done" means whatever the current session says. | `idle` or `done` is runtime state, not completion. |
 | Approvals are repeated from memory. | A decision ledger reuses explicit human decisions. |
@@ -81,6 +81,30 @@ The attention panel is intentionally narrow. It shows work when:
 
 Ordinary progress, a busy terminal, an idle agent, or a chat reply does not
 become an attention item.
+
+### Autonomous goals, with the human still in charge
+
+A goal can carry a structured brief with its outcome, scope, completion criteria,
+external effects and verification plan. Crewvane then persists short execution
+continuations outside any Agent session: checkpoint, external wait, recovery,
+independent verification and human-decision triggers all survive restarts.
+
+Automatic acceptance is opt-in and resolves goal override > project > workspace.
+It can complete a delivery only after real evidence, a matching candidate and an
+independent reviewer pass the gate. You can pause or override any goal, require
+human review, inspect every record, or reopen completed work at any time.
+
+Production release is deliberately separate. Each release is its own goal, needs
+one approval for that environment and candidate, and still returns to you for a
+final result check after execution. A delivery acceptance is never release
+authority.
+
+A local Bot can use the same goal and event facts through `crewvane.bot.v1`.
+Bindings are human-created, project-scoped and revocable; Bots cannot accept
+work, approve releases or modify policy in the first phase.
+
+See the [autonomous goals specification](docs/product/autonomous-goals.md) for
+the full boundary, acceptance, continuation and release protocol.
 
 When a waiting item is due, the card asks for one plain-language update. The
 concierge reads that message and decides whether to keep waiting, resume,

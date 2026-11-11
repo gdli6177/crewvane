@@ -68,7 +68,7 @@ Agent 启动停在 Hook 或目录信任提示时保留真实现场，不自动�
 3. Herdr 生命周期；
 4. Watchdog。
 
-Hook heartbeat 不写入 `Goal.activities`，因此不会重置 30 分钟业务无进展计时。`working` 等 Herdr 心跳可以证明阻塞状态已恢复，但不能证明目标完成。
+Hook heartbeat 不写入 `Goal.activities`，因此不会重置工作区配置的业务无进展计时（默认 30 分钟）。`working` 等 Herdr 心跳可以证明阻塞状态已恢复，但不能证明目标完成。
 
 ## Stop 回执状态机
 

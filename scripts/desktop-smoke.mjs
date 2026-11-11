@@ -103,6 +103,14 @@ await mkdir(join(home, "userData/GPUCache"), { recursive: true });
 await mkdir(join(home, "userData/runtime"), { recursive: true });
 await writeFile(manualCacheFile, Buffer.alloc(2048));
 await writeFile(automaticTempFile, "stale");
+await writeFile(join(home, "userData/runtime/herdr"), `#!/bin/sh
+case " $* " in
+  *" --version "*) echo "herdr 999.0.0" ;;
+  *" agent list "*) echo '{"result":{"agents":[]}}' ;;
+  *" tab focus "*) echo '{"code":"tab_not_found","message":"test scene not found"}' >&2; exit 1 ;;
+  *) echo '{"result":{}}' ;;
+esac
+`, { mode: 0o700 });
 const staleAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 await utimes(automaticTempFile, staleAt, staleAt);
 const webhookEvents = [];
@@ -128,6 +136,12 @@ const service = new WorkspaceService(workspace);
 // UI regression tests never start the user's signed-in model or Herdr Session.
 // Real transport and arbitrary CLI behavior are covered by onboarding-smoke.
 await service.execute({ type: "agents.configure", preferences: { concierge: "/missing/crewvane-test-agent" } });
+await service.execute({
+  type: "workspace.autonomy.set",
+  acceptance: "human-review",
+  initialize: true,
+  actor: "你",
+});
 const app = await electron.launch({
   executablePath: resolve(process.env.CREWVANE_APP_PATH ||
     "apps/desktop/release/Crewvane-darwin-arm64/Crewvane.app/Contents/MacOS/Crewvane"),
@@ -808,9 +822,17 @@ try {
       tabId: "w1:t2",
     },
   });
-  await service.execute({ type: "goal.update", goalId: sceneGoal.id, patch: { next: "继续核实现场入口" } });
+  const sceneUpdate = await page.evaluate(goalId =>
+    window.crewvane.command({
+      type: "goal.update",
+      goalId,
+      patch: { next: "继续核实现场入口" },
+    }), sceneGoal.id);
+  assert.equal(sceneUpdate.herdr?.paneId, "w1:p2");
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
-  await page.locator(".goal-row").filter({ hasText: "现场入口验证" }).click();
+  const sceneRow = page.locator(".goal-row").filter({ hasText: "现场入口验证" });
+  await sceneRow.waitFor();
+  await sceneRow.click();
   await page.locator(".error").getByText(/Herdr|管家|现场/).first().waitFor();
   assert.equal(await page.locator(".goal-detail-modal").count(), 0,
     "a live goal scene failure must stay out of the full-detail modal");

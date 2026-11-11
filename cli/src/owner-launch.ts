@@ -24,6 +24,7 @@ export type HerdrCommandRunner = (args: string[]) => Promise<string>;
 export interface OwnerLaunchInput {
   goalId: string;
   name: string;
+  role?: "owner" | "verifier";
   task?: string;
   taskFile?: string;
   resume?: OwnerResume;
@@ -187,6 +188,32 @@ function automaticTask(goal: {
     `实际执行由你完成；咨询用 crewvane goal progress ${goal.id} --summary "<具体答案>" 写回。只有等待用户和所有 Agent 之外的具名外部第三方时，才用 crewvane goal wait ${goal.id} --reason "<外部等待原因>" --owner "<外部联系人或机构>"；需要用户选择、确认、提供信息或操作时，用 crewvane goal decide ${goal.id} --question "<具体问题>" 提出问题并结束本回合，不得记为 waiting。你、管家、工人和其他 Agent 之间的内部协调保持 active，通过 progress 写回实际结果；不要把终端空闲或结束一回合当成等待。remind 只设置提醒，不改变生命周期。只有有实际可验收成果时才运行真实检查并用 crewvane goal review 提交成果摘要、位置与检查记录；不要为等待或咨询伪造交付。`,
   ].filter(Boolean).join("\n\n");
 }
+function automaticVerificationTask(goal: {
+  id: string;
+  title: string;
+  description: string;
+  next: string;
+  delivery?: { id?: string; candidate?: { revision: string }; evidence?: Array<{ id: string }> };
+  brief?: {
+    criteria: Array<{ id: string; statement: string; required: boolean }>;
+    verificationPlan: { requiredEvidenceKinds: string[] };
+  };
+}) {
+  const required = goal.brief?.criteria.filter(criterion => criterion.required) ?? [],
+    evidenceIds = (goal.delivery?.evidence ?? []).map(evidence => evidence.id),
+    exampleCriterion = required[0]?.id ?? "criterion-id";
+  return [
+    `你是目标「${goal.title}」的独立复核者，不负责实现、不修改代码、不代表用户验收。`,
+    `目标 ID：${goal.id}`,
+    `运行 crewvane goal show ${goal.id} --json，读取委托摘要、候选版本和交付证据；再独立读取实际成果并运行必要的真实检查。`,
+    "不得复用原负责人现场，不得让原负责人自检代替本次复核，不得相信只有文字声明而没有可定位证据的结论。",
+    `必选完成条件：${required.map(criterion => `${criterion.id}：${criterion.statement}`).join("；") || "未提供"}`,
+    `交付证据 ID：${evidenceIds.join("、") || "未提供"}`,
+    `每项必选条件都要给出 passed 或 failed，并引用真实证据 ID。所有必选条件通过时才可提交 --outcome passed。`,
+    `提交示例：crewvane goal verify ${goal.id} --delivery ${goal.delivery?.id ?? "<delivery-id>"} --outcome passed --summary "<具体复核结论>" --criterion "${exampleCriterion}::passed::<evidence-id>"`,
+    "若证据不足、候选不一致、无法确认独立性或检查失败，使用 --outcome failed，并写明缺失证据和复现结果。提交后结束，不轮询，不进入实现返工。",
+  ].join("\n\n");
+}
 
 async function resolveTask(
   service: WorkspaceService,
@@ -233,6 +260,7 @@ export async function launchOwner(
   } = {},
 ): Promise<OwnerLaunchResult> {
   const environment = options.environment ?? process.env;
+  const verifier = input.role === "verifier";
   if (environment.HERDR_ENV !== "1")
     throw new Error("负责人只能从 Herdr 管家的受管现场启动");
   const session = environment.HERDR_SESSION?.trim() ?? "";
@@ -243,11 +271,14 @@ export async function launchOwner(
   const state = await service.read();
   const goal = state.goals.find((item) => item.id === input.goalId);
   if (!goal) throw new Error("找不到当前案卷");
-  if (!["active", "waiting"].includes(goal.status))
+  if (verifier) {
+    if (goal.status !== "review" || !goal.delivery?.id || !goal.brief)
+      throw new Error("只有提交交付和委托摘要的待复核目标可以启动独立复核者");
+  } else if (!["active", "waiting"].includes(goal.status))
     throw new Error("已结束的目标不能启动负责人");
   if (goal.mode !== "concierge")
     throw new Error("这件事由人安排，请先明确交给管家再启动负责人");
-  if (goal.herdr)
+  if (!verifier && goal.herdr)
     throw new Error("该目标已经有负责人现场；请直接联系原负责人");
   const project = state.projects.find((item) => item.id === goal.projectId);
   const cwd = await realpath(input.resume?.cwd || project?.path?.trim() || service.root);
@@ -255,7 +286,9 @@ export async function launchOwner(
     throw new Error("目标关联项目不是有效目录");
 
   const run = options.run ?? createRunner(environment);
-  const task = `${await resolveTask(service, goal, input)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
+  const task = verifier
+    ? input.task?.trim() || automaticVerificationTask(goal)
+    : `${await resolveTask(service, goal, input)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
   const restoredArgs = resumeAgentArgs(input.resume?.agentSession);
   const configured = state.agents?.owner?.trim() || state.agents?.concierge?.trim() || "codex";
   const command = restoredArgs
@@ -270,28 +303,33 @@ export async function launchOwner(
     environment.HOME || "",
   );
   const adapter = runtimeAdapter(command.kind, executable) ?? "custom";
-  const attemptId = newId("attempt"),
-    hookToken = randomBytes(32).toString("hex"),
-    hookTokenHash = createHash("sha256").update(hookToken).digest("hex");
-  await service.execute({
-    type: "agent.runtime.register",
-    goalId: goal.id,
-    attempt: {
+  const attemptId = verifier ? undefined : newId("attempt"),
+    hookToken = verifier ? undefined : randomBytes(32).toString("hex"),
+    hookTokenHash = hookToken
+      ? createHash("sha256").update(hookToken).digest("hex")
+      : undefined;
+  if (!verifier) {
+    await service.execute({
+      type: "agent.runtime.register",
       goalId: goal.id,
-      attemptId,
-      agent: input.name,
-      adapter,
-      startedAt: new Date().toISOString(),
-    },
-    hookTokenHash,
-    capabilities: agentRuntimeCapabilities(adapter),
-  });
+      attempt: {
+        goalId: goal.id,
+        attemptId: attemptId!,
+        agent: input.name,
+        adapter,
+        startedAt: new Date().toISOString(),
+      },
+      hookTokenHash: hookTokenHash!,
+      capabilities: agentRuntimeCapabilities(adapter),
+    });
+  }
   const executableDirectory = executable.includes("/")
     ? dirname(executable)
     : "";
   const label = `Crewvane · ${goal.title.trim().slice(0, 60)}`;
 
   let tabId: string | undefined;
+  let verifierReference: HerdrReference | undefined;
   let bound = false;
   try {
     const created = payload(await run([
@@ -331,13 +369,17 @@ export async function launchOwner(
 
     const ownerEnvironment = [
       "unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE",
-      `export CREWVANE_ROLE=owner CREWVANE_AGENT_NAME=${quoteShell(input.name)}`,
+      `export CREWVANE_ROLE=${verifier ? "verifier" : "owner"} CREWVANE_AGENT_NAME=${quoteShell(input.name)}`,
       `export CREWVANE_GOAL_ID=${quoteShell(goal.id)}`,
-      `export CREWVANE_ATTEMPT_ID=${quoteShell(attemptId)}`,
-      `export CREWVANE_HOOK_TOKEN=${quoteShell(hookToken)}`,
+      ...(!verifier ? [
+        `export CREWVANE_ATTEMPT_ID=${quoteShell(attemptId!)}`,
+        `export CREWVANE_HOOK_TOKEN=${quoteShell(hookToken!)}`,
+      ] : []),
       `export CREWVANE_WORKSPACE=${quoteShell(await realpath(service.root))}`,
-      `export CREWVANE_HOOK_SOCKET=${quoteShell(agentRuntimeSocketPath(await realpath(service.root)))}`,
-      `export CREWVANE_HOOK_SPOOL=${quoteShell(join(await realpath(service.root), ".crewvane", "runtime", "spool"))}`,
+      ...(!verifier ? [
+        `export CREWVANE_HOOK_SOCKET=${quoteShell(agentRuntimeSocketPath(await realpath(service.root)))}`,
+        `export CREWVANE_HOOK_SPOOL=${quoteShell(join(await realpath(service.root), ".crewvane", "runtime", "spool"))}`,
+      ] : []),
       `export CREWVANE_HERDR_BINARY=${quoteShell(
         environment.CREWVANE_HERDR_BINARY?.trim() ||
         environment.HERDR_BIN_PATH?.trim() ||
@@ -374,6 +416,16 @@ export async function launchOwner(
       paneId,
       agent: input.name,
     };
+    if (verifier) verifierReference = reference;
+    if (verifier) {
+      await service.execute({
+        type: "goal.verification.site",
+        goalId: goal.id,
+        reference,
+        status: "launching",
+        actor: input.name,
+      });
+    }
     let managedByHerdr = false;
     if (command.kind) {
       try {
@@ -396,18 +448,29 @@ export async function launchOwner(
         // Herdr keeps this live Agent at its startup dialog. Preserve the
         // scene so a person can review Hook/repository trust in the Agent UI.
         // Never answer that dialog, retry startup or submit the task through it.
-        await service.execute({ type: "session.set", goalId: goal.id, reference });
-        bound = true;
-        await service.execute({
-          type: "goal.progress", goalId: goal.id, actor: "管家",
-          summary: "负责人已启动，正在等待现场交互确认；目标任务尚未发送。",
-          next: "在原负责人现场审核启动或 Hook 信任提示，确认就绪后请管家向同一负责人发送目标。",
-        });
-        await service.execute({
-          type: "live.sync", presences: { [goal.id]: {
-            state: "blocked", reachable: true, checkedAt: new Date().toISOString(),
-          } },
-        });
+        if (verifier) {
+          await service.execute({
+            type: "goal.verification.site",
+            goalId: goal.id,
+            reference,
+            status: "blocked",
+            detail: String(error),
+            actor: input.name,
+          });
+        } else {
+          await service.execute({ type: "session.set", goalId: goal.id, reference });
+          bound = true;
+          await service.execute({
+            type: "goal.progress", goalId: goal.id, actor: "管家",
+            summary: "负责人已启动，正在等待现场交互确认；目标任务尚未发送。",
+            next: "在原负责人现场审核启动或 Hook 信任提示，确认就绪后请管家向同一负责人发送目标。",
+          });
+          await service.execute({
+            type: "live.sync", presences: { [goal.id]: {
+              state: "blocked", reachable: true, checkedAt: new Date().toISOString(),
+            } },
+          });
+        }
         return {
           goalId: goal.id, runtime: input.resume?.agentSession?.agent || configured,
           reference,
@@ -478,12 +541,14 @@ export async function launchOwner(
       }
     }
 
-    await service.execute({
-      type: "session.set",
-      goalId: goal.id,
-      reference,
-    });
-    bound = true;
+    if (!verifier) {
+      await service.execute({
+        type: "session.set",
+        goalId: goal.id,
+        reference,
+      });
+      bound = true;
+    }
 
     if (command.kind || managedByHerdr) {
       try {
@@ -498,6 +563,16 @@ export async function launchOwner(
         ]);
       } catch (error) {
         if (!/\bagent_prompt_stalled\b/.test(String(error))) throw error;
+        if (verifier) {
+          await service.execute({
+            type: "goal.verification.site",
+            goalId: goal.id,
+            reference,
+            status: "ready",
+            detail: "Herdr 已接收复核任务，但未及时观察到 working；请先核对现场，禁止重复发送。",
+            actor: input.name,
+          });
+        }
         return {
           goalId: goal.id,
           runtime: input.resume?.agentSession?.agent || configured,
@@ -510,23 +585,45 @@ export async function launchOwner(
       await run(["pane", "run", paneId, terminalText(task)]);
       await new Promise((resolve) => setTimeout(resolve, 750));
     }
+    bound = true;
 
+    if (verifier) {
+      await service.execute({
+        type: "goal.verification.site",
+        goalId: goal.id,
+        reference,
+        status: "ready",
+        actor: input.name,
+      });
+    }
     return {
       goalId: goal.id,
       runtime: input.resume?.agentSession?.agent || configured,
       reference,
     };
   } catch (error) {
+    if (verifier && verifierReference) {
+      await service.execute({
+        type: "goal.verification.site",
+        goalId: goal.id,
+        reference: verifierReference,
+        status: "failed",
+        detail: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+        actor: input.name,
+      }).catch(() => {});
+    }
     if (!bound) {
       await closeTab(run, tabId);
       // A failed launch is a real coordination result. Do not leave the goal
       // showing only an optimistic "assign an owner" next step.
-      const detail = String(error instanceof Error ? error.message : error).slice(0, 1000);
-      await service.execute({
-        type:"goal.progress", goalId:goal.id, actor:"管家",
-        summary:`负责人启动未完成：${detail}`,
-        next:"核对启动命令与真实现场后重试；目标尚未开始执行。",
-      }).catch(() => {});
+      if (!verifier) {
+        const detail = String(error instanceof Error ? error.message : error).slice(0, 1000);
+        await service.execute({
+          type:"goal.progress", goalId:goal.id, actor:"管家",
+          summary:`负责人启动未完成：${detail}`,
+          next:"核对启动命令与真实现场后重试；目标尚未开始执行。",
+        }).catch(() => {});
+      }
     }
     throw error;
   }

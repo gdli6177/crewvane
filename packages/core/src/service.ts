@@ -5,13 +5,23 @@ import {
   validateGoalAttachments,
 } from "./attachments.js";
 import type {
+  AcceptanceCriterion,
   AgentAttempt,
   AgentRuntimeEventV1,
   AgentRuntimeEventType,
   AgentRuntimeText,
+  BotBinding,
+  BotOperation,
   CrewvaneCommand,
+  Delivery,
+  DeliveryCandidate,
+  Evidence,
   Goal,
   GoalAttachment,
+  GoalBrief,
+  ReleaseTarget,
+  Verification,
+  VerificationCriterion,
   WorkspaceState,
   WorkflowStep,
 } from "./types.js";
@@ -26,11 +36,38 @@ import {
   riskCategoryForText,
   riskSummary,
 } from "./governance.js";
-import { attentionRequest, defaultProjectPolicy, pendingSceneReply } from "./model.js";
+import {
+  attentionRequest,
+  defaultProjectAutonomy,
+  defaultProjectPolicy,
+  defaultWorkspaceAutonomy,
+  goalIsAutonomous,
+  pendingSceneReply,
+} from "./model.js";
 import { observeSceneWork } from "./scene.js";
 import { inspectWatchdog, reportWatchdog } from "./watchdog.js";
 import { hasDueReminder, intakeArrangement } from "./task-pool.js";
 import { externalWaitTarget, leaveExternalWait } from "./waiting.js";
+import {
+  acceptanceMandateRevision,
+  autoAcceptanceGate,
+  briefProblems,
+  claimContinuation,
+  continuationEligible,
+  failureFingerprint,
+  finishContinuation,
+  isAcceptanceMode,
+  isEvidenceKind,
+  isReleaseOnMerge,
+  parseGoalBrief,
+  releaseApprovalValid,
+  releaseMergeGate,
+  reportContinuation,
+  resolveAcceptance,
+  sameCandidate,
+  scheduleContinuation,
+  workspaceAutonomy,
+} from "./autonomy.js";
 export const nowIso = () => new Date().toISOString();
 function text(value: unknown, label: string, limit = 20_000): string {
   if (
@@ -86,6 +123,151 @@ function preservedOwnerResume(value: unknown): NonNullable<Goal["ownerResume"]> 
     ...(cwd ? { cwd } : {}),
     agentSession: { source, agent, kind: session.kind, value: sessionValue },
   };
+}
+function humanOnly(actor: string | undefined, message: string) {
+  if (actor !== "你") throw new Error(message);
+}
+function deliveryCandidate(value: unknown): DeliveryCandidate | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("候选版本无效");
+  const candidate = value as Partial<DeliveryCandidate>;
+  const revision = text(candidate.revision, "候选修订", 240);
+  if (candidate.digest !== undefined && !/^[a-f0-9]{64}$/i.test(candidate.digest))
+    throw new Error("候选摘要必须是 SHA-256");
+  if (candidate.version !== undefined) text(candidate.version, "候选版本", 120);
+  return {
+    revision,
+    ...(candidate.digest ? { digest: candidate.digest.toLowerCase() } : {}),
+    ...(candidate.version ? { version: candidate.version.trim() } : {}),
+  };
+}
+function writableGoalKind(value: unknown): "delivery" | "discovery" {
+  if (value !== "delivery" && value !== "discovery")
+    throw new Error("目标类型只能是 delivery 或 discovery；发布目标必须通过 release create 建立");
+  return value;
+}
+function rememberBrief(item: Goal, brief: GoalBrief) {
+  if (item.brief)
+    item.briefHistory = [...(item.briefHistory ?? []), item.brief].slice(-20);
+  item.brief = brief;
+}
+function finishWaitContinuation(
+  item: Goal,
+  at: string,
+  status: "settled" | "cancelled" = "cancelled",
+) {
+  if (item.autonomy?.continuation?.trigger === "wait-due")
+    finishContinuation(item, at, status);
+}
+function evidenceItems(value: unknown, at: string, checks: Delivery["checks"]): Evidence[] {
+  if (value !== undefined && !Array.isArray(value))
+    throw new Error("证据列表无效");
+  if (Array.isArray(value) && value.length > 100)
+    throw new Error("一次最多提交 100 条证据");
+  if (value !== undefined) {
+    const ids = new Set<string>();
+    return value.map((item, index) => {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        throw new Error(`第 ${index + 1} 条证据无效`);
+      const evidence = item as Partial<Evidence>,
+        evidenceId = id(evidence.id),
+        kind = evidence.kind,
+        result = evidence.result;
+      if (ids.has(evidenceId)) throw new Error("证据 ID 不能重复");
+      ids.add(evidenceId);
+      if (!isEvidenceKind(kind) || !["observed", "passed", "failed"].includes(String(result)))
+        throw new Error(`证据 ${evidenceId} 的类型或结果无效`);
+      if (evidence.sha256 !== undefined && !/^[a-f0-9]{64}$/i.test(evidence.sha256))
+        throw new Error(`证据 ${evidenceId} 的 SHA-256 无效`);
+      const observedAt = evidence.observedAt ? iso(evidence.observedAt) : at;
+      return {
+        id: evidenceId,
+        kind,
+        label: text(evidence.label, "证据名称", 240),
+        result: result as Evidence["result"],
+        observedAt,
+        ...(evidence.command ? { command: text(evidence.command, "证据命令", 2_000) } : {}),
+        ...(evidence.location ? { location: text(evidence.location, "证据位置", 2_000) } : {}),
+        ...(evidence.sourceRevision
+          ? { sourceRevision: text(evidence.sourceRevision, "证据修订", 240) }
+          : {}),
+        ...(evidence.sha256 ? { sha256: evidence.sha256.toLowerCase() } : {}),
+        ...(evidence.note ? { note: text(evidence.note, "证据说明", 4_000) } : {}),
+      };
+    });
+  }
+  return checks.map((check, index) => ({
+    id: `evidence_check_${index + 1}`,
+    kind: "command" as const,
+    label: check.name,
+    result: check.result === "passed" ? "passed" as const : "failed" as const,
+    observedAt: at,
+    command: check.command,
+    ...(check.note ? { note: check.note } : {}),
+  }));
+}
+function verificationItems(
+  value: VerificationCriterion[],
+  delivery: Delivery,
+  brief: GoalBrief,
+): VerificationCriterion[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50)
+    throw new Error("独立复核至少需要一个完成条件结论");
+  const criterionIds = new Set(brief.criteria.map(criterion => criterion.id)),
+    evidenceIds = new Set((delivery.evidence ?? []).map(evidence => evidence.id)),
+    seen = new Set<string>();
+  return value.map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      throw new Error("复核条件结论无效");
+    const criterionId = id(item.criterionId);
+    if (!criterionIds.has(criterionId) || seen.has(criterionId))
+      throw new Error(`复核包含未知或重复的完成条件：${criterionId}`);
+    seen.add(criterionId);
+    if (!["passed", "failed"].includes(item.result))
+      throw new Error("复核结果无效");
+    if (!Array.isArray(item.evidenceIds) || item.evidenceIds.length < 1)
+      throw new Error(`完成条件 ${criterionId} 必须引用证据`);
+    for (const evidenceId of item.evidenceIds)
+      if (!evidenceIds.has(evidenceId))
+        throw new Error(`复核引用了交付中不存在的证据：${evidenceId}`);
+    return {
+      criterionId,
+      result: item.result,
+      evidenceIds: [...new Set(item.evidenceIds)],
+      ...(item.note ? { note: text(item.note, "复核说明", 4_000) } : {}),
+    };
+  });
+}
+function ensureGoalAutonomy(item: Goal, defaultLimit = 3) {
+  item.autonomy ??= {
+    attempts: {
+      used: 0,
+      limit: defaultLimit,
+    },
+  };
+  return item.autonomy;
+}
+function completionRecord(
+  state: WorkspaceState,
+  item: Goal,
+  kind: "automatic" | "human",
+  by: string,
+  at: string,
+  note?: string,
+  verificationId?: string,
+) {
+  const record = {
+    id: newId("acceptance"),
+    kind,
+    at,
+    by,
+    mandateRevision: acceptanceMandateRevision(state, item),
+    ...(verificationId ? { verificationId } : {}),
+    ...(note ? { note } : {}),
+  };
+  ensureGoalAutonomy(item).acceptance = record;
+  return record;
 }
 function steps(value: unknown): WorkflowStep[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 30)
@@ -233,6 +415,7 @@ export class WorkspaceService {
           kind: "progress",
           text: `已删除图片：${attachment.name}`,
         });
+        item.revision = (item.revision ?? 0) + 1;
         item.updatedAt = at;
         return { goal: item, attachment };
       });
@@ -276,6 +459,7 @@ export class WorkspaceService {
             kind: "progress",
             text: `已清理保留期满的 ${removedHere.length} 张图片。`,
           });
+          item.revision = (item.revision ?? 0) + 1;
           item.updatedAt = at;
         }
         return expired;
@@ -285,6 +469,159 @@ export class WorkspaceService {
       (goal.attachments ?? []).map(item => item.path));
     const orphans = await cleanupOrphanAttachmentFiles(this.root, referenced, 24 * 60 * 60 * 1000, Date.parse(at));
     return { removed: removed.length, orphans };
+  }
+  private async executeBotRequest(
+    command: Extract<CrewvaneCommand, { type: "bot.request" }>,
+  ) {
+    if (command.schema !== "crewvane.bot.v1")
+      throw new Error("Bot 协议版本不受支持");
+    const botId = id(command.botId),
+      requestId = text(command.requestId, "Bot 请求 ID", 200),
+      operation = command.operation;
+    if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(requestId))
+      throw new Error("Bot 请求 ID 格式无效");
+    const reservation = await this.store.update("bot.request.reserve", state => {
+      const binding = state.bots?.find(item => item.id === botId);
+      if (!binding || binding.status !== "active")
+        throw new Error("Bot 绑定不存在或已撤销");
+      if (Date.parse(binding.expiresAt) <= Date.now())
+        throw new Error("Bot 绑定已过期");
+      if (!binding.operations.includes(operation))
+        throw new Error("Bot 没有该操作的权限");
+      const existing = state.botRequests?.find(receipt =>
+        receipt.botId === botId && receipt.requestId === requestId);
+      if (existing?.status === "completed") {
+        const current = existing.goalId
+          ? state.goals.find(goal => goal.id === existing.goalId)
+          : undefined;
+        return {
+          duplicate: true as const,
+          receipt: existing,
+          ...(current ? { goal: current } : {}),
+        };
+      }
+      if (existing)
+        throw new Error(`Bot 请求此前未确认（${existing.status}），请先读取目标再决定是否重试`);
+      state.botRequests ??= [];
+      state.botRequests.push({
+        botId,
+        requestId,
+        operation,
+        at: nowIso(),
+        status: "pending",
+      });
+      state.botRequests = state.botRequests.slice(-2_000);
+      return { duplicate: false as const };
+    });
+    if (reservation.duplicate) {
+      return {
+        schema: "crewvane.bot.v1",
+        requestId,
+        operation,
+        duplicate: true,
+        receipt: reservation.receipt,
+        ...(reservation.goal ? { goal: reservation.goal } : {}),
+      };
+    }
+    try {
+      const payload = command.payload;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload))
+        throw new Error("Bot 请求载荷必须是对象");
+      const binding = (await this.store.read()).bots?.find(item => item.id === botId);
+      if (!binding || binding.status !== "active")
+        throw new Error("Bot 绑定已撤销");
+      const data = payload as Record<string, unknown>;
+      let result: unknown,
+        goalId: string | undefined;
+      if (operation === "goal.submit") {
+        const textValue = text(data.text, "目标说明", 20_000),
+          projectId = data.projectId === undefined ? "personal" : id(data.projectId);
+        if (!binding.projectIds.includes(projectId))
+          throw new Error("Bot 不能向未绑定项目提交目标");
+        const created = await this.execute({
+          type: "goal.intake",
+          text: textValue,
+          projectId,
+          handling: "concierge",
+        }) as Goal;
+        result = created;
+        goalId = created.id;
+      } else {
+        goalId = id(data.goalId);
+        const state = await this.store.read(),
+          target = state.goals.find(goal => goal.id === goalId);
+        if (!target) throw new Error("找不到目标");
+        if (!binding.projectIds.includes(target.projectId))
+          throw new Error("Bot 不能访问未绑定项目的目标");
+        if (operation === "goal.read") result = target;
+        else if (operation === "goal.message")
+          result = await this.execute({
+            type: "goal.message",
+            goalId,
+            text: text(data.text, "消息", 12_000),
+            actor: `Bot · ${binding.name}`,
+          });
+        else if (operation === "goal.checkpoint")
+          result = await this.execute({
+            type: "goal.checkpoint",
+            goalId,
+            summary: text(data.summary, "本轮进展", 12_000),
+            next: text(data.next, "下一动作", 2_000),
+            ...(data.dueAt ? { dueAt: iso(data.dueAt) } : {}),
+            actor: `Bot · ${binding.name}`,
+          });
+        else if (operation === "goal.boundary")
+          result = await this.execute({
+            type: "goal.boundary",
+            goalId,
+            change: data.change as Extract<
+              CrewvaneCommand,
+              { type: "goal.boundary" }
+            >["change"],
+            actor: `Bot · ${binding.name}`,
+          });
+        else if (operation === "delivery.submit") {
+          const delivery = data.delivery;
+          if (!delivery || typeof delivery !== "object" || Array.isArray(delivery))
+            throw new Error("Bot 交付内容无效");
+          result = await this.execute({
+            type: "goal.review",
+            goalId,
+            delivery: delivery as Extract<
+              CrewvaneCommand,
+              { type: "goal.review" }
+            >["delivery"],
+            actor: `Bot · ${binding.name}`,
+          });
+        } else throw new Error("不支持的 Bot 操作");
+      }
+      const receipt = await this.store.update("bot.request.complete", state => {
+        const current = state.botRequests?.find(item =>
+          item.botId === botId && item.requestId === requestId);
+        if (!current) throw new Error("Bot 请求回执丢失");
+        current.status = "completed";
+        current.goalId = goalId;
+        return current;
+      });
+      return {
+        schema: "crewvane.bot.v1",
+        requestId,
+        operation,
+        duplicate: false,
+        receipt,
+        result,
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.store.update("bot.request.failed", state => {
+        const current = state.botRequests?.find(item =>
+          item.botId === botId && item.requestId === requestId);
+        if (!current) return;
+        current.status = "failed";
+        current.detail = detail.slice(0, 1_000);
+      }).catch(() => {});
+      throw error;
+    }
   }
   async execute(command: CrewvaneCommand): Promise<unknown> {
     if (
@@ -297,6 +634,7 @@ export class WorkspaceService {
     if (command.type === "goal.attachment.remove") return this.removeGoalAttachment(command);
     if (command.type === "goal.delete") return this.deleteEndedGoal(command);
     if (command.type === "attachments.cleanup") return this.cleanupAttachments(command);
+    if (command.type === "bot.request") return this.executeBotRequest(command);
     return this.store.update(command.type, async (state) => {
       const goal = (goalId: string) => {
         const found = state.goals.find((item) => item.id === id(goalId));
@@ -304,6 +642,7 @@ export class WorkspaceService {
         return found;
       };
       const stamp = (item: Goal) => {
+        item.revision = (item.revision ?? 0) + 1;
         item.updatedAt = nowIso();
       };
       const activity = (
@@ -352,6 +691,7 @@ export class WorkspaceService {
       };
       const handBackExternalWait = (item: Goal) => {
         if (item.status !== "waiting") return;
+        finishWaitContinuation(item, nowIso());
         activity(item, "session",
           `已交回 Agent 核查。此前等待外部：${item.waitingFor}。${item.next}${item.remindAt ? `\n原跟进时间：${item.remindAt}` : ""}`,
           "系统");
@@ -378,6 +718,34 @@ export class WorkspaceService {
         case "workspace.recovery.dismiss":
           delete state.recovery;
           return true;
+        case "workspace.autonomy.set": {
+          humanOnly(command.actor, "自主目标设置只能由人修改");
+          const autonomy = state.autonomy ?? defaultWorkspaceAutonomy();
+          if (command.acceptance !== undefined && !isAcceptanceMode(command.acceptance))
+            throw new Error("无效的验收方式");
+          if (command.paused !== undefined && typeof command.paused !== "boolean")
+            throw new Error("无效的暂停状态");
+          if (command.maxRecoveryAttempts !== undefined &&
+            (!Number.isSafeInteger(command.maxRecoveryAttempts) ||
+              command.maxRecoveryAttempts < 1 || command.maxRecoveryAttempts > 20))
+            throw new Error("默认恢复次数必须是 1 到 20 的整数");
+          if (command.noProgressMinutes !== undefined &&
+            (!Number.isSafeInteger(command.noProgressMinutes) ||
+              command.noProgressMinutes < 5 || command.noProgressMinutes > 10_080))
+            throw new Error("无进展检测时间必须是 5 到 10080 分钟的整数");
+          if (command.acceptance !== undefined) autonomy.acceptance = command.acceptance;
+          if (command.paused !== undefined) autonomy.paused = command.paused;
+          if (command.maxRecoveryAttempts !== undefined)
+            autonomy.maxRecoveryAttempts = command.maxRecoveryAttempts;
+          if (command.noProgressMinutes !== undefined)
+            autonomy.noProgressMinutes = command.noProgressMinutes;
+          if (command.initialize || command.acceptance !== undefined)
+            autonomy.initializedAt ??= nowIso();
+          autonomy.revision += 1;
+          autonomy.updatedAt = nowIso();
+          state.autonomy = autonomy;
+          return autonomy;
+        }
         case "agents.configure": {
           const startup = (value: unknown) => {
             if (typeof value !== "string" || !value.trim() || value.length > 2000 || /[\x00-\x1f\x7f;&|<>`$]/.test(value)) throw new Error("无效的 Agent 启动命令：请使用单行 CLI 命令与参数，不支持 shell 表达式");
@@ -398,6 +766,8 @@ export class WorkspaceService {
             id: newId("project"),
             name,
             policy: defaultProjectPolicy(),
+            autonomy: defaultProjectAutonomy(),
+            releaseOnMerge: "unknown" as const,
             ...(command.path
               ? { path: text(command.path, "项目路径", 1000) }
               : {}),
@@ -415,6 +785,60 @@ export class WorkspaceService {
             (p) => p.id !== id(command.projectId),
           );
           return true;
+        }
+        case "bot.binding.set": {
+          humanOnly(command.actor, "Bot 绑定只能由人创建或修改");
+          const binding = command.binding;
+          if (!binding || typeof binding !== "object")
+            throw new Error("Bot 绑定内容无效");
+          const botId = id(binding.id),
+            name = text(binding.name, "Bot 名称", 120),
+            expiresAt = iso(binding.expiresAt),
+            allowedOperations: BotOperation[] = [
+              "goal.submit",
+              "goal.read",
+              "goal.message",
+            ];
+          if (Date.parse(expiresAt) <= Date.now())
+            throw new Error("Bot 绑定必须有一个未来有效期");
+          if (!["initiator", "executor"].includes(binding.role))
+            throw new Error("无效的 Bot 角色");
+          if (binding.role !== "initiator")
+            throw new Error("0.9 只开放本地发起方 Bot；执行方 Bot 需要后续独立安全评审");
+          if (!Array.isArray(binding.projectIds) || binding.projectIds.length < 1 ||
+            binding.projectIds.length > 50)
+            throw new Error("Bot 至少需要绑定一个项目");
+          const projectIds = [...new Set(binding.projectIds.map(value => id(value)))];
+          if (projectIds.some(projectId =>
+            !state.projects.some(project => project.id === projectId)))
+            throw new Error("Bot 绑定了不存在的项目");
+          if (!Array.isArray(binding.operations) || binding.operations.length < 1)
+            throw new Error("Bot 至少需要一个操作权限");
+          const operations = [...new Set(binding.operations)];
+          if (operations.some(operation => !allowedOperations.includes(operation)))
+            throw new Error("0.9 的 Bot 只能提交目标、读取状态和追加消息");
+          const saved: BotBinding = {
+            id: botId,
+            name,
+            role: binding.role,
+            projectIds,
+            operations,
+            expiresAt,
+            status: "active",
+          };
+          state.bots ??= [];
+          const index = state.bots.findIndex(item => item.id === botId);
+          if (index < 0) state.bots.push(saved);
+          else state.bots[index] = saved;
+          return saved;
+        }
+        case "bot.binding.revoke": {
+          humanOnly(command.actor, "Bot 绑定只能由人撤销");
+          const botId = id(command.botId),
+            binding = state.bots?.find(item => item.id === botId);
+          if (!binding) throw new Error("找不到 Bot 绑定");
+          binding.status = "revoked";
+          return binding;
         }
         case "project.policy.set": {
           if (command.actor !== "你")
@@ -435,6 +859,23 @@ export class WorkspaceService {
           };
           return project;
         }
+        case "project.autonomy.set": {
+          humanOnly(command.actor, "项目自主目标设置只能由人修改");
+          const project = state.projects.find(item => item.id === id(command.projectId));
+          if (!project) throw new Error("找不到项目");
+          if (command.acceptance !== "inherit" && !isAcceptanceMode(command.acceptance))
+            throw new Error("无效的项目验收方式");
+          if (!isReleaseOnMerge(command.releaseOnMerge))
+            throw new Error("无效的合并发布声明");
+          const revision = (project.autonomy?.revision ?? 0) + 1;
+          project.autonomy = {
+            acceptance: command.acceptance,
+            revision,
+            updatedAt: nowIso(),
+          };
+          project.releaseOnMerge = command.releaseOnMerge;
+          return { autonomy: project.autonomy, releaseOnMerge: project.releaseOnMerge };
+        }
         case "workflow.save": {
           const workflow = {
             id: id(command.workflow.id),
@@ -450,6 +891,9 @@ export class WorkspaceService {
           const input = command.input;
           if (!input || !["concierge", "manual"].includes(input.mode))
             throw new Error("无效的目标");
+          const kind = input.kind === undefined
+            ? "delivery" as const
+            : writableGoalKind(input.kind);
           const project = state.projects.find(
             (p) => p.id === id(input.projectId),
           );
@@ -467,6 +911,8 @@ export class WorkspaceService {
             ),
             mode: input.mode,
             status: "active",
+            kind,
+            revision: 1,
             steps: [],
             next:
               input.next?.trim() ||
@@ -507,6 +953,9 @@ export class WorkspaceService {
         case "goal.intake": {
           const request = text(command.text, "事情说明", 20_000);
           const arrangement = intakeArrangement(command.handling ?? "concierge");
+          const kind = command.kind === undefined
+            ? "delivery" as const
+            : writableGoalKind(command.kind);
           const goalAttachments = await validateGoalAttachments(this.root, command.attachments);
           const projectId = command.projectId && command.projectId !== "personal" ? command.projectId : "personal";
           const project = state.projects.find(item => item.id === id(projectId));
@@ -515,6 +964,7 @@ export class WorkspaceService {
           const item: Goal = {
             id: newId("goal"), projectId: project.id,
             title: automaticGoalTitle(request), description: request,
+            kind, revision: 1,
             ...arrangement,
             steps: [],
             attention: null,
@@ -534,6 +984,8 @@ export class WorkspaceService {
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           if (command.goalId) {
             const item = goal(command.goalId);
+            if (command.kind !== undefined)
+              throw new Error("已有目标请使用 goal kind 明确切换类型");
             if (command.handling)
               throw new Error("终端补充消息不能改变执行安排，请使用明确的开始命令");
             if (["completed", "dropped"].includes(item.status))
@@ -557,6 +1009,7 @@ export class WorkspaceService {
                 ? { attachmentIds: incomingAttachments.map(attachment => attachment.id) }
                 : {}),
             });
+            item.revision = (item.revision ?? 0) + 1;
             item.updatedAt = at;
             return item;
           }
@@ -565,10 +1018,14 @@ export class WorkspaceService {
           const project = state.projects.find(item => item.id === id(projectId));
           if (!project) throw new Error("请选择有效项目");
           const arrangement = intakeArrangement(command.handling ?? "concierge");
+          const kind = command.kind === undefined
+            ? "delivery" as const
+            : writableGoalKind(command.kind);
           const at = nowIso();
           const item: Goal = {
             id: newId("goal"), projectId: project.id,
             title: automaticGoalTitle(request), description: request,
+            kind, revision: 1,
             ...arrangement,
             steps: [],
             next: arrangement.mode === "concierge"
@@ -690,6 +1147,7 @@ export class WorkspaceService {
               ? { attachmentIds: incomingAttachments.map(attachment => attachment.id) }
               : {}),
           });
+          item.revision = (item.revision ?? 0) + 1;
           item.updatedAt = at;
           return item;
         }
@@ -715,6 +1173,7 @@ export class WorkspaceService {
           delete item.watchdog;
           delete item.live;
           cancelAgentReceipt(item);
+          finishContinuation(item, nowIso(), "cancelled");
           activity(item, "session", "你已接管这个目标，不再向管家发送后续更新。", "你");
           return item;
         }
@@ -731,6 +1190,7 @@ export class WorkspaceService {
           item.waitingFor = undefined;
           item.remindAt = undefined;
           item.attention = null;
+          finishWaitContinuation(item, nowIso());
           item.dispatch = { id: newId("handoff"), kind: "feedback", status: "pending", at: nowIso() };
           delete item.watchdog;
           activity(item, "session", "已重新交给管家统筹。", "你");
@@ -740,6 +1200,7 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (item.status !== "dropped" || item.mode !== "manual" || item.herdr)
             throw new Error("只有已移出且没有执行现场的个人事项可以恢复到待办池");
+          finishContinuation(item, nowIso(), "cancelled");
           Object.assign(item, intakeArrangement("later"));
           item.attention = null;
           delete item.remindAt;
@@ -790,6 +1251,20 @@ export class WorkspaceService {
             }
           }
           activity(item, "progress", "已更新目标说明与下一步。");
+          if (item.status === "active" || !item.remindAt)
+            finishWaitContinuation(item, nowIso());
+          if (item.status === "waiting" && item.mode === "concierge" &&
+            item.brief && item.remindAt) {
+            const autonomy = ensureGoalAutonomy(
+              item,
+              item.brief.attemptBudget.maxRecoveryAttempts,
+            );
+            autonomy.continuation = scheduleContinuation(item, "wait-due", {
+              at: nowIso(),
+              dueAt: item.remindAt,
+              idempotencyKey: `${item.id}:wait-due:${item.remindAt}`,
+            });
+          }
           return item;
         }
         case "goal.dispatch": {
@@ -830,6 +1305,7 @@ export class WorkspaceService {
           if (item.status !== "waiting") throw new Error("只有等待中的目标可以恢复推进");
           if (!["concierge", "manual"].includes(command.mode)) throw new Error("请选择由谁继续推进");
           const note = text(command.note, "最新结果与下一步", 2000);
+          finishWaitContinuation(item, nowIso());
           item.status = "active";
           item.mode = command.mode;
           item.next = note;
@@ -853,6 +1329,7 @@ export class WorkspaceService {
           if (item.mode !== "concierge")
             throw new Error("个人事项请恢复到待办池，不需要重启 Agent");
           const note = text(command.note, "交给管家的重启说明", 12_000);
+          finishContinuation(item, nowIso(), "cancelled");
           item.status = "active";
           item.attention = null;
           item.waitingFor = undefined;
@@ -894,6 +1371,502 @@ export class WorkspaceService {
           activity(item, "session", `已请求管家跟进：${note}`, "你");
           return item;
         }
+        case "goal.brief": {
+          const item = goal(command.goalId);
+          ongoing(item);
+          if (item.mode !== "concierge")
+            throw new Error("个人目标不需要 Agent 委托摘要");
+          if (command.expectedRevision !== undefined &&
+            command.expectedRevision !== (item.revision ?? 1))
+            throw new Error("委托摘要已更新；请重新读取目标后再提交");
+          const existing = item.brief,
+            actor = command.actor?.trim() ? text(command.actor, "摘要提交者", 120) : "管家",
+            at = nowIso(),
+            brief = parseGoalBrief(command.brief, {
+              revision: (existing?.revision ?? 0) + 1,
+              setBy: actor,
+              setAt: at,
+            });
+          const problems = briefProblems(brief, item);
+          if (problems.length) throw new Error(problems.join("；"));
+          if (existing && actor !== "你") {
+            const criteria = (value: GoalBrief) => value.criteria
+              .map(criterion => `${criterion.id}:${criterion.required}:${criterion.statement}`)
+              .sort().join("|");
+            if (existing.outcome !== brief.outcome ||
+              criteria(existing) !== criteria(brief) ||
+              JSON.stringify(existing.externalEffects) !== JSON.stringify(brief.externalEffects) ||
+              JSON.stringify(existing.outOfScope) !== JSON.stringify(brief.outOfScope))
+              throw new Error("结果、完成条件或外部影响发生变化，请提交边界变更");
+          }
+          rememberBrief(item, brief);
+          const autonomy = ensureGoalAutonomy(item, brief.attemptBudget.maxRecoveryAttempts);
+          autonomy.attempts.limit = brief.attemptBudget.maxRecoveryAttempts;
+          finishWaitContinuation(item, nowIso());
+          item.status = "active";
+          item.waitingFor = undefined;
+          activity(
+            item,
+            "progress",
+            `委托摘要 v${brief.revision} 已建立：${brief.outcome}`,
+            actor,
+          );
+          return item;
+        }
+        case "goal.checkpoint": {
+          const item = goal(command.goalId);
+          ongoing(item);
+          if (item.mode !== "concierge")
+            throw new Error("个人目标不参与自主续跑");
+          const actor = command.actor?.trim() ? text(command.actor, "负责人", 120) : "负责人",
+            summary = substantiveAgentText(command.summary, "本轮进展", 12_000),
+            next = substantiveAgentText(command.next, "下一动作", 2_000);
+          item.status = "active";
+          item.waitingFor = undefined;
+          item.remindAt = undefined;
+          item.next = next;
+          if (item.attention?.kind === "follow_up") item.attention = null;
+          activity(item, "progress", summary, actor);
+          const autonomy = ensureGoalAutonomy(
+            item,
+            item.brief?.attemptBudget.maxRecoveryAttempts ??
+              workspaceAutonomy(state).maxRecoveryAttempts,
+          );
+          autonomy.continuation = scheduleContinuation(item, "checkpoint", {
+            at: nowIso(),
+            dueAt: command.dueAt ? iso(command.dueAt) : nowIso(),
+          });
+          return item;
+        }
+        case "goal.boundary": {
+          const item = goal(command.goalId);
+          ongoing(item);
+          if (item.mode !== "concierge")
+            throw new Error("个人目标不参与边界变更");
+          const change = command.change;
+          if (!change || typeof change !== "object")
+            throw new Error("边界变更内容无效");
+          const at = nowIso(),
+            proposedCriteria = change.proposedCriteria === undefined
+              ? undefined
+              : parseGoalBrief({
+                  outcome: item.brief?.outcome ?? item.description,
+                  inScope: item.brief?.inScope ?? [],
+                  outOfScope: item.brief?.outOfScope ?? [],
+                  criteria: change.proposedCriteria,
+                  constraints: item.brief?.constraints ?? [],
+                  externalEffects: change.proposedExternalEffects ??
+                    item.brief?.externalEffects ?? [],
+                  verificationPlan: item.brief?.verificationPlan ?? {
+                    requiredEvidenceKinds: ["inspection"],
+                    independentReviewer: true,
+                  },
+                  attemptBudget: item.brief?.attemptBudget ?? {
+                    maxRecoveryAttempts: workspaceAutonomy(state).maxRecoveryAttempts,
+                  },
+                  source: item.brief?.source ?? {
+                    activityIds: [],
+                    ruleRefs: [],
+                  },
+                }, {
+                  revision: item.brief?.revision ?? 1,
+                  setBy: item.brief?.setBy ?? "管家",
+                  setAt: item.brief?.setAt ?? at,
+                }).criteria;
+          const boundary = {
+            id: newId("boundary"),
+            reason: text(change.reason, "边界变更原因", 4_000),
+            ...(change.proposedOutcome
+              ? { proposedOutcome: text(change.proposedOutcome, "建议结果", 4_000) }
+              : {}),
+            ...(proposedCriteria ? { proposedCriteria } : {}),
+            ...(change.proposedExternalEffects
+              ? {
+                  proposedExternalEffects: change.proposedExternalEffects.map(value =>
+                    text(value, "建议外部影响", 2_000)),
+                }
+              : {}),
+            evidence: Array.isArray(change.evidence)
+              ? change.evidence.map(value => text(value, "边界证据", 2_000)).slice(0, 20)
+              : [],
+            alternatives: Array.isArray(change.alternatives)
+              ? change.alternatives.map(value => text(value, "可选方案", 2_000)).slice(0, 20)
+              : [],
+            recommendation: text(change.recommendation, "推荐方案", 4_000),
+            status: "pending" as const,
+            createdAt: at,
+          };
+          if (!boundary.evidence.length || !boundary.alternatives.length)
+            throw new Error("边界变更必须附证据和可选方案");
+          ensureGoalAutonomy(item).boundaryChange = boundary;
+          item.attention = {
+            id: newId("attention"),
+            kind: "decision",
+            summary: `边界变更：${boundary.reason}`,
+            since: at,
+            source: "governance",
+            decisionKey: `boundary:${item.id}:${boundary.id}`,
+          };
+          item.next = "自主推进已暂停，等待你批准或拒绝边界变更。";
+          activity(item, "boundary", boundary.reason, command.actor || "管家");
+          return item;
+        }
+        case "goal.verify": {
+          const item = goal(command.goalId);
+          if (item.status !== "review" || !item.delivery)
+            throw new Error("只有待复核的交付可以提交独立复核");
+          if (!item.brief)
+            throw new Error("缺少委托摘要，不能提交自主复核");
+          const delivery = item.delivery,
+            reviewer = text(
+              command.reviewer || command.actor || process.env.CREWVANE_AGENT_NAME,
+              "复核人",
+              120,
+            );
+          if (!delivery.id)
+            throw new Error("交付缺少稳定 ID，请重新提交验收");
+          if (reviewer === delivery.submittedBy || reviewer === item.owner)
+            throw new Error("复核人不能是交付提交者或当前负责人");
+          const reviewerHerdr = command.reviewerHerdr ??
+            (item.autonomy?.verificationSite?.status === "ready"
+              ? item.autonomy.verificationSite.reference
+              : undefined);
+          if (reviewerHerdr && reviewerHerdr.agent && reviewerHerdr.agent !== reviewer)
+            throw new Error("复核站点与复核人身份不一致");
+          if (reviewerHerdr && item.herdr) {
+            const samePane = reviewerHerdr.paneId &&
+              reviewerHerdr.paneId === item.herdr.paneId;
+            const sameTab = reviewerHerdr.tabId &&
+              reviewerHerdr.tabId === item.herdr.tabId;
+            if (samePane || sameTab)
+              throw new Error("复核站点不能复用交付执行者的现场");
+          }
+          if (command.deliveryId !== delivery.id)
+            throw new Error("复核必须绑定当前交付");
+          const criteria = verificationItems(command.criteria, delivery, item.brief),
+            required = item.brief.criteria.filter(criterion => criterion.required),
+            missing = required.filter(criterion =>
+              !criteria.some(result => result.criterionId === criterion.id));
+          if (missing.length)
+            throw new Error(`复核未覆盖必选完成条件：${missing.map(item => item.id).join("、")}`);
+          if (command.outcome === "passed" &&
+            required.some(criterion =>
+              criteria.find(result => result.criterionId === criterion.id)?.result !== "passed"))
+            throw new Error("必选完成条件未全部通过，不能将复核标记为通过");
+          if (!["passed", "failed"].includes(command.outcome))
+            throw new Error("无效的复核结论");
+          const at = nowIso(),
+            verification: Verification = {
+              id: newId("verification"),
+              deliveryId: delivery.id!,
+              outcome: command.outcome,
+              summary: substantiveAgentText(command.summary, "复核摘要", 12_000),
+              criteria,
+              reviewer,
+              ...(reviewerHerdr
+                ? { reviewerHerdr: structuredClone(reviewerHerdr) }
+                : {}),
+              verifiedAt: at,
+            },
+            autonomy = ensureGoalAutonomy(item);
+          autonomy.lastVerification = verification;
+          finishContinuation(item, at);
+          if (verification.outcome === "passed") {
+            const gate = autoAcceptanceGate(state, item);
+            if (gate.eligible) {
+              const acceptance = completionRecord(
+                state,
+                item,
+                "automatic",
+                "Crewvane",
+                at,
+                `独立复核通过：${verification.summary}`,
+                verification.id,
+              );
+              item.status = "completed";
+              item.attention = null;
+              item.waitingFor = undefined;
+              item.remindAt = undefined;
+              item.next = "目标已在验证授权内自动验收，不表示生产发布已完成。";
+              activity(
+                item,
+                "accepted",
+                `自动验收通过（授权修订 ${acceptance.mandateRevision}）：${verification.summary}`,
+                "系统",
+              );
+              return item;
+            }
+            if (gate.reason === "human_review") {
+              item.attention ??= {
+                id: newId("attention"),
+                kind: "review",
+                summary: "独立复核已通过，等待你完成人工验收。",
+                since: at,
+              };
+              item.next = "查看交付、证据和独立复核，再完成最终验收。";
+              activity(item, "verification", verification.summary, reviewer);
+              return item;
+            }
+            item.attention = {
+              id: newId("attention"),
+              kind: "intervention",
+              summary: `独立复核通过，但自动验收门禁未满足：${gate.reason}`,
+              since: at,
+              source: "governance",
+            };
+            item.next = "查看缺失证据或授权，再决定人工验收、补充复核或继续返工。";
+            activity(item, "verification", verification.summary, reviewer);
+            return item;
+          }
+          const fingerprint = failureFingerprint(delivery, verification),
+            repeated = autonomy.attempts.failureFingerprint === fingerprint;
+          autonomy.attempts.used += 1;
+          autonomy.attempts.failureFingerprint = fingerprint;
+          const limit = Math.min(
+            autonomy.attempts.limit,
+            item.brief.attemptBudget.maxRecoveryAttempts,
+          );
+          if (repeated || autonomy.attempts.used >= limit) {
+            item.status = "active";
+            item.attention = {
+              id: newId("attention"),
+              kind: "intervention",
+              summary: repeated
+                ? "复核再次报告同一失败且没有新证据，已停止自动重试。"
+                : `复核失败且恢复预算已用尽（${autonomy.attempts.used}/${limit}）。`,
+              since: at,
+              source: "governance",
+            };
+            item.next = "查看失败证据和已尝试方案，决定人工接手、调整边界或提供新信息。";
+            activity(item, "verification", verification.summary, reviewer);
+            return item;
+          }
+          item.status = "active";
+          item.attention = null;
+          item.next = `复核未通过，基于新证据继续返工：${verification.summary}`;
+          activity(item, "verification", verification.summary, reviewer);
+          autonomy.continuation = scheduleContinuation(item, "recovery", {
+            at: nowIso(),
+            attempt: autonomy.attempts.used + 1,
+          });
+          return item;
+        }
+        case "goal.verification.site": {
+          const item = goal(command.goalId);
+          if (item.status !== "review" || !item.delivery)
+            throw new Error("只有待复核交付可以登记复核现场");
+          if (!["launching", "ready", "blocked", "failed"].includes(command.status))
+            throw new Error("无效的复核现场状态");
+          const reference = command.reference;
+          if (!reference || typeof reference.session !== "string" ||
+            !/^[a-zA-Z0-9_-]{1,80}$/.test(reference.session))
+            throw new Error("复核现场缺少有效 Herdr Session");
+          if (!reference.paneId && !reference.tabId)
+            throw new Error("复核现场缺少 Pane 或 Tab 标识");
+          if (reference.agent !== undefined &&
+            !/^[a-z][a-z0-9_-]{0,31}$/.test(reference.agent))
+            throw new Error("复核现场 Agent 名称无效");
+          const at = nowIso(),
+            autonomy = ensureGoalAutonomy(item);
+          autonomy.verificationSite = {
+            reference: structuredClone(reference),
+            status: command.status,
+            at,
+            ...(command.detail ? { detail: text(command.detail, "复核现场说明", 1_000) } : {}),
+          };
+          if (command.status === "ready" &&
+            item.attention?.source === "governance" &&
+            /独立复核者/.test(item.attention.summary)) {
+            item.attention = null;
+            item.next = "独立复核现场已就绪，等待复核者提交逐项结果。";
+          } else if (command.status === "blocked" || command.status === "failed") {
+            item.attention = {
+              id: newId("attention"),
+              kind: "intervention",
+              summary: command.status === "blocked"
+                ? "独立复核者等待现场交互确认，复核尚未开始。"
+                : "独立复核者启动失败，复核尚未开始。",
+              since: at,
+              source: "governance",
+            };
+            item.next = command.status === "blocked"
+              ? "在复核者现场审核启动或 Hook 信任提示，确认就绪后重新安排独立复核。"
+              : "查看复核现场记录，修复启动条件后重新安排独立复核。";
+          }
+          activity(
+            item,
+            "verification",
+            command.status === "ready"
+              ? "独立复核现场已就绪。"
+              : `独立复核现场：${command.status}${command.detail ? `；${command.detail}` : ""}`,
+            command.actor || "系统",
+          );
+          return item;
+        }
+        case "goal.boundary.resolve": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "边界变更只能由人批准或拒绝");
+          const boundary = item.autonomy?.boundaryChange;
+          if (!boundary || boundary.id !== command.boundaryId ||
+            boundary.status !== "pending")
+            throw new Error("当前没有匹配的待处理边界变更");
+          if (!["approved", "rejected"].includes(command.outcome))
+            throw new Error("无效的边界变更决定");
+          const note = text(command.note, "边界变更决定原话", 4_000),
+            at = nowIso();
+          boundary.status = command.outcome;
+          boundary.resolvedAt = at;
+          item.attention = null;
+          if (command.outcome === "approved") {
+            if (item.brief) {
+              rememberBrief(item, {
+                ...item.brief,
+                revision: item.brief.revision + 1,
+                ...(boundary.proposedOutcome ? { outcome: boundary.proposedOutcome } : {}),
+                ...(boundary.proposedCriteria ? { criteria: boundary.proposedCriteria } : {}),
+                ...(boundary.proposedExternalEffects
+                  ? { externalEffects: boundary.proposedExternalEffects }
+                  : {}),
+                setBy: "你",
+                setAt: at,
+              });
+            }
+            const autonomy = ensureGoalAutonomy(item);
+            autonomy.attempts.used = 0;
+            delete autonomy.attempts.failureFingerprint;
+            item.status = "active";
+            item.next = `边界变更已批准，从既有成果继续：${note}`;
+            activity(item, "boundary", `边界变更批准：${note}`, "你");
+            finishContinuation(item, at);
+            autonomy.continuation = scheduleContinuation(item, "decision-resolved", {
+              at: nowIso(),
+            });
+          } else {
+            item.status = "active";
+            item.next = `边界变更已拒绝：${note}`;
+            activity(item, "boundary", `边界变更拒绝：${note}`, "你");
+            finishContinuation(item, at, "cancelled");
+          }
+          return item;
+        }
+        case "goal.kind.set": {
+          const item = goal(command.goalId);
+          ongoing(item, false, true);
+          if (item.kind === "release" || item.release)
+            throw new Error("发布目标类型不能通过 goal kind 修改");
+          const kind = writableGoalKind(command.kind);
+          if ((item.kind ?? "delivery") === kind) return item;
+          item.kind = kind;
+          activity(
+            item,
+            "progress",
+            kind === "discovery"
+              ? "目标已标记为探索：先收集证据和候选方向，不据此自动决定产品方向。"
+              : "目标已标记为交付：按委托摘要产出可独立复核的成果。",
+            command.actor || "管家",
+          );
+          return item;
+        }
+        case "goal.autonomy.pause":
+        case "goal.autonomy.resume": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "自主推进只能由人暂停或恢复");
+          if (["completed", "dropped"].includes(item.status))
+            throw new Error("已结束的目标不能修改自主推进");
+          const autonomy = ensureGoalAutonomy(item);
+          if (command.type === "goal.autonomy.pause") {
+            autonomy.paused = true;
+            item.next = item.attention?.summary ?? "自主推进已暂停；当前 Agent 回合不会被强制终止。";
+            activity(item, "autonomy", "你暂停了新的自主续跑。", "你");
+          } else {
+            autonomy.paused = false;
+            item.next = "自主推进已恢复。";
+            activity(item, "autonomy", "你恢复了自主续跑。", "你");
+            if (item.mode === "concierge" && item.brief &&
+              !["review", "waiting"].includes(item.status)) {
+              finishContinuation(item, nowIso(), "cancelled");
+              autonomy.continuation = scheduleContinuation(item, "recovery", {
+                at: nowIso(),
+              });
+            }
+            if (item.mode === "concierge" && item.status !== "review")
+              item.dispatch = {
+                id: newId("handoff"),
+                kind: "feedback",
+                note: "用户已恢复该目标的自主推进。请读取最新结构，继续下一个短回合。",
+                status: "pending",
+                at: nowIso(),
+              };
+          }
+          return item;
+        }
+        case "goal.autonomy.acceptance": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "目标验收方式只能由人修改");
+          if (item.kind === "release" || item.release)
+            throw new Error("发布目标不能继承交付目标的自动验收设置");
+          if (["completed", "dropped"].includes(item.status))
+            throw new Error("已结束的目标不能修改验收方式");
+          if (command.acceptance !== "inherit" &&
+            !isAcceptanceMode(command.acceptance))
+            throw new Error("无效的目标验收方式");
+          const autonomy = ensureGoalAutonomy(
+            item,
+            item.brief?.attemptBudget.maxRecoveryAttempts ??
+              workspaceAutonomy(state).maxRecoveryAttempts,
+          );
+          if (command.acceptance === "inherit") delete autonomy.override;
+          else autonomy.override = command.acceptance;
+          const resolved = resolveAcceptance(state, item);
+          activity(
+            item,
+            "autonomy",
+            command.acceptance === "inherit"
+              ? `目标验收覆盖已移除，当前生效：${resolved.mode}（${resolved.source}）。`
+              : `目标验收方式已设为 ${resolved.mode}，仅作用于当前目标。`,
+            "你",
+          );
+          return item;
+        }
+        case "goal.reopen": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "只有人可以重新打开目标");
+          if (!["completed", "dropped"].includes(item.status))
+            throw new Error("只有已完成或已放弃的目标可以重新打开");
+          const note = text(command.note, "重新打开原因", 4_000),
+            at = nowIso();
+          finishContinuation(item, at, "cancelled");
+          item.status = "active";
+          item.attention = null;
+          item.waitingFor = undefined;
+          item.remindAt = undefined;
+          item.next = note;
+          const autonomy = item.autonomy;
+          if (autonomy) {
+            autonomy.paused = false;
+            autonomy.attempts.used = 0;
+            delete autonomy.attempts.failureFingerprint;
+            delete autonomy.lastVerification;
+            delete autonomy.boundaryChange;
+          }
+          if (item.mode === "concierge") {
+            item.dispatch = {
+              id: newId("handoff"),
+              kind: "feedback",
+              note,
+              status: "pending",
+              at,
+            };
+          }
+          activity(item, "reopened", `重新打开：${note}`, "你");
+          if (item.mode === "concierge" && item.brief && autonomy) {
+            finishContinuation(item, nowIso(), "cancelled");
+            autonomy.continuation = scheduleContinuation(item, "decision-resolved", {
+              at: nowIso(),
+            });
+          }
+          return item;
+        }
         case "goal.progress": {
           const item = goal(command.goalId);
           ongoing(item);
@@ -901,6 +1874,7 @@ export class WorkspaceService {
             summary = actor.startsWith("你")
               ? text(command.summary, "实际结果", 12_000)
               : substantiveAgentText(command.summary, "实际结果", 12_000);
+          finishWaitContinuation(item, nowIso());
           item.status = "active";
           item.remindAt = undefined;
           item.waitingFor = undefined;
@@ -930,6 +1904,17 @@ export class WorkspaceService {
           activity(item, "waiting", `等待外部：${target}。${command.reason}${item.remindAt ? `\n跟进时间：${item.remindAt}` : ""}`, command.actor || "管家");
           delete item.recovery;
           delete item.watchdog;
+          if (item.mode === "concierge" && item.brief && item.remindAt) {
+            const autonomy = ensureGoalAutonomy(
+              item,
+              item.brief.attemptBudget.maxRecoveryAttempts,
+            );
+            autonomy.continuation = scheduleContinuation(item, "wait-due", {
+              at: nowIso(),
+              dueAt: item.remindAt,
+              idempotencyKey: `${item.id}:wait-due:${item.remindAt}`,
+            });
+          }
           return item;
         }
         case "goal.decide": {
@@ -938,6 +1923,7 @@ export class WorkspaceService {
           const question = text(command.question, "问题", 2000);
           const key = normalizeDecisionKey(command.key ? text(command.key, "决定键", 300) : question);
           const known = latestDecision(state, item.projectId, key);
+          finishWaitContinuation(item, nowIso());
           item.status = "active";
           item.waitingFor = undefined;
           item.remindAt = undefined;
@@ -974,6 +1960,7 @@ export class WorkspaceService {
             command.actionKey ? text(command.actionKey, "动作键", 300) : summary,
           )}`;
           const at = nowIso(), known = latestDecision(state, item.projectId, actionKey);
+          finishWaitContinuation(item, at);
           item.risk = { category: command.category, summary, actionKey, at };
           item.status = "active";
           item.waitingFor = undefined;
@@ -998,9 +1985,181 @@ export class WorkspaceService {
           delete item.recovery;
           return item;
         }
+        case "release.create": {
+          humanOnly(command.actor, "发布目标只能由人建立");
+          if (!Array.isArray(command.sourceGoalIds) || !command.sourceGoalIds.length ||
+            command.sourceGoalIds.length > 20)
+            throw new Error("发布目标至少需要一个来源目标");
+          const sourceGoalIds = [...new Set(command.sourceGoalIds.map(value => id(value)))],
+            sources = sourceGoalIds.map(goal),
+            projectIds = new Set(sources.map(source => source.projectId));
+          if (projectIds.size !== 1)
+            throw new Error("发布目标的来源必须属于同一项目");
+          const environment = text(command.environment, "发布环境", 120),
+            candidate = deliveryCandidate(command.candidate);
+          if (!candidate) throw new Error("发布目标必须绑定候选修订");
+          const unaccepted = sources.find(source =>
+            source.kind !== "delivery" ||
+            source.status !== "completed" ||
+            !source.delivery?.candidate ||
+            !source.autonomy?.acceptance);
+          if (unaccepted)
+            throw new Error(`来源目标「${unaccepted.title}」必须已完成并通过验收`);
+          const mismatched = sources.find(source =>
+            !sameCandidate(source.delivery!.candidate, candidate));
+          if (mismatched)
+            throw new Error(`来源目标「${mismatched.title}」的候选与发布候选不一致`);
+          const at = nowIso(),
+            projectId = sources[0]!.projectId,
+            releaseTarget: ReleaseTarget = {
+              sourceGoalIds,
+              environment,
+              candidate,
+              status: "awaiting-authorization",
+            },
+            item: Goal = {
+              id: newId("goal"),
+              projectId,
+              title: `发布 ${candidate.version ?? candidate.revision} 到 ${environment}`,
+              description: `发布目标，来源：${sources.map(source => source.title).join("、")}`,
+              kind: "release",
+              revision: 1,
+              mode: "concierge",
+              status: "active",
+              steps: [],
+              next: "等待你对本次生产发布作单独批准。",
+              owner: "待分配负责人",
+              attention: {
+                id: newId("attention"),
+                kind: "decision",
+                summary: `请批准将候选 ${candidate.revision} 发布到 ${environment}。`,
+                since: at,
+                source: "governance",
+                decisionKey: `release:${environment}:${candidate.revision}`,
+              },
+              release: releaseTarget,
+              autonomy: {
+                attempts: {
+                  used: 0,
+                  limit: 1,
+                },
+              },
+              activities: [{
+                id: newId("act"),
+                at,
+                actor: "你",
+                kind: "release",
+                text: `建立独立发布目标：${environment} · ${candidate.revision}`,
+              }],
+              createdAt: at,
+              updatedAt: at,
+            };
+          state.goals.push(item);
+          return item;
+        }
+        case "release.approve": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "生产发布必须由人逐次批准");
+          if (item.kind !== "release" || !item.release)
+            throw new Error("当前目标不是发布目标");
+          if (!["drafting", "awaiting-authorization"].includes(item.release.status))
+            throw new Error("当前发布不在可批准状态");
+          const note = text(command.note, "发布批准原话", 4_000),
+            at = nowIso(),
+            authorization = {
+              id: newId("release_approval"),
+              approvedAt: at,
+              approvedBy: "你" as const,
+              candidateRevision: item.release.candidate.revision,
+              ...(item.release.candidate.digest
+                ? { candidateDigest: item.release.candidate.digest }
+                : {}),
+              note,
+            };
+          item.release.authorization = authorization;
+          item.release.status = "authorized";
+          item.attention = null;
+          item.next = `本次 ${item.release.environment} 发布已获批准，等待执行器报告真实结果。`;
+          item.dispatch = {
+            id: newId("handoff"),
+            kind: "feedback",
+            note: `用户已单独批准候选 ${item.release.candidate.revision} 发布到 ${item.release.environment}。请安排执行并只报告真实结果；批准不能扩展到其他候选或环境。`,
+            status: "pending",
+            at,
+          };
+          activity(item, "release", `发布批准：${note}`, "你");
+          return item;
+        }
+        case "release.reject": {
+          const item = goal(command.goalId);
+          humanOnly(command.actor, "生产发布必须由人逐次决定");
+          if (item.kind !== "release" || !item.release)
+            throw new Error("当前目标不是发布目标");
+          if (["succeeded", "cancelled"].includes(item.release.status))
+            throw new Error("当前发布已经结束");
+          const note = text(command.note, "拒绝发布原话", 4_000);
+          item.release.status = "cancelled";
+          item.status = "dropped";
+          item.attention = null;
+          item.next = `发布已取消：${note}`;
+          item.dispatch = undefined;
+          activity(item, "release", `拒绝本次发布：${note}`, "你");
+          return item;
+        }
+        case "release.result": {
+          const item = goal(command.goalId);
+          if (item.kind !== "release" || !item.release)
+            throw new Error("当前目标不是发布目标");
+          if (!releaseApprovalValid(item.release))
+            throw new Error("发布授权无效或候选版本已经变化");
+          if (!Array.isArray(command.evidence) || command.evidence.length < 1)
+            throw new Error("发布结果至少需要一项真实证据");
+          if (!["succeeded", "failed"].includes(command.outcome))
+            throw new Error("无效的发布结果");
+          const evidence = command.evidence.map(value =>
+            text(value, "发布证据", 4_000)).slice(0, 50),
+            at = nowIso();
+          item.release.status = command.outcome;
+          item.release.result = {
+            outcome: command.outcome,
+            evidence,
+            reportedAt: at,
+          };
+          if (command.outcome === "succeeded") {
+            item.status = "review";
+            item.attention = {
+              id: newId("attention"),
+              kind: "review",
+              summary: "生产发布已执行完成，请查看真实结果并作最终确认。",
+              since: at,
+              source: "governance",
+            };
+            item.next = "核对发布环境、候选版本和实际结果，确认后完成目标。";
+          } else {
+            item.status = "active";
+            item.attention = {
+              id: newId("attention"),
+              kind: "intervention",
+              summary: "生产发布失败，需要你决定恢复方案。",
+              since: at,
+              source: "governance",
+            };
+            item.next = "查看失败证据、环境与候选版本，决定重试、回滚或终止。";
+          }
+          activity(
+            item,
+            "release",
+            `发布${command.outcome === "succeeded" ? "成功" : "失败"}：${evidence.join("；")}`,
+            command.actor || "发布执行器",
+          );
+          return item;
+        }
         case "goal.ship": {
           const item = goal(command.goalId);
-          ongoing(item);
+          if (item.status === "dropped")
+            throw new Error("已放弃的目标不能执行上线动作");
+          if (item.status === "backlog")
+            throw new Error("尚未开始的目标不能执行上线动作");
           if (!["merge", "deploy"].includes(command.operation))
             throw new Error("无效的上线动作");
           if (typeof command.checksPassed !== "boolean")
@@ -1014,6 +2173,31 @@ export class WorkspaceService {
             item.next = `上线检查未通过，先修复 ${command.operation === "merge" ? "合并" : "部署"}前的问题。`;
             activity(item, "ship", `${command.operation} 检查未通过，未执行上线动作。`, command.actor || "管家");
             return { allowed: false, requiresHuman: false, reason: "checks_failed", policy };
+          }
+          if (command.operation === "merge" && goalIsAutonomous(item)) {
+            const gate = releaseMergeGate(state, item);
+            if (!gate.allowed) {
+              const detail = "detail" in gate
+                ? gate.detail ?? "自主目标的合并发布边界尚未满足。"
+                : "自主目标的合并发布边界尚未满足。";
+              item.attention = {
+                id: newId("attention"),
+                kind: "decision",
+                summary: detail,
+                since: nowIso(),
+                source: "governance",
+                decisionKey: `release-merge:${item.id}:${gate.reason}`,
+              };
+              item.next = detail;
+              activity(item, "ship", detail, command.actor || "管家");
+              return {
+                allowed: false,
+                requiresHuman: true,
+                reason: gate.reason,
+                policy,
+                releaseOnMerge: gate.releaseOnMerge,
+              };
+            }
           }
           const known = latestDecision(state, item.projectId, actionKey);
           if (known?.outcome === "rejected") {
@@ -1077,7 +2261,15 @@ export class WorkspaceService {
           }));
           if (checks.some((check) => check.result !== "passed"))
             throw new Error("仍有检查未通过，请修复后再提交验收");
-          const at = nowIso();
+          const at = nowIso(),
+            candidate = deliveryCandidate(delivery.candidate),
+            evidence = evidenceItems(delivery.evidence, at, checks),
+            acceptance = resolveAcceptance(state, item);
+          finishContinuation(item, at);
+          if (acceptance.mode === "auto-with-verification" && !item.brief)
+            throw new Error("自主目标提交验收前必须先提交委托摘要");
+          if (acceptance.mode === "auto-with-verification" && !candidate)
+            throw new Error("自主目标的交付必须绑定候选修订");
           leaveExternalWait(item);
           delete item.waitingFor;
           delete item.remindAt;
@@ -1097,45 +2289,81 @@ export class WorkspaceService {
             return item;
           }
           item.delivery = {
+            id: newId("delivery"),
             summary: substantiveAgentText(delivery.summary, "成果摘要", 12_000),
             ...(delivery.location
               ? { location: text(delivery.location, "交付位置", 2000) }
               : {}),
             ...(delivery.url ? { url: text(delivery.url, "链接", 2000) } : {}),
+            ...(candidate ? { candidate } : {}),
             checks,
+            evidence,
             submittedAt: at,
             submittedBy: command.actor || "管家",
           };
           item.status = "review";
           item.reviewRounds = reviewRounds + 1;
           item.reviewLimit = reviewLimit;
-          item.attention = {
-            id: newId("attention"),
-            kind: "review",
-            summary: "成果已提交，等待你的验收。",
-            since: at,
-          };
-          item.next = "查看实际成果和检查结果，选择验收通过或退回修改。";
+          if (item.autonomy) delete item.autonomy.lastVerification;
+          if (acceptance.mode === "auto-with-verification") {
+            item.attention = null;
+            item.next = "成果已提交，正在等待独立复核；通过后按授权自动验收。";
+          } else {
+            item.attention = {
+              id: newId("attention"),
+              kind: "review",
+              summary: "成果已提交，等待你的验收。",
+              since: at,
+            };
+            item.next = "查看实际成果和检查结果，选择验收通过或退回修改。";
+          }
           activity(
             item,
             "delivery",
             item.delivery.summary,
             command.actor || "管家",
           );
+          if (acceptance.mode === "auto-with-verification") {
+            ensureGoalAutonomy(
+              item,
+              item.brief?.attemptBudget.maxRecoveryAttempts ??
+                workspaceAutonomy(state).maxRecoveryAttempts,
+            ).continuation = scheduleContinuation(item, "verification", {
+              at: nowIso(),
+            });
+          }
           delete item.watchdog;
           delete item.recovery;
           return item;
         }
         case "goal.accept": {
           const item = goal(command.goalId);
-          if (item.status !== "review" || !item.delivery)
+          if (item.status !== "review")
+            throw new Error("只有提交验收的目标才能通过验收");
+          if (item.kind !== "release" && !item.delivery)
             throw new Error("只有提交验收的目标才能通过验收");
           const actor = command.actor || "你";
+          humanOnly(
+            actor,
+            "成果验收必须由人通过桌面或可信注意力界面完成，受管 Agent 不能代替人验收",
+          );
           const note = command.note?.trim()
             ? text(command.note, "验收依据", 4000)
             : "成果验收通过。";
-          if (actor !== "你" && !command.note?.trim())
-            throw new Error("管家结束目标时必须记录用户明确确认完成的原话");
+          if (item.kind === "release" &&
+            (item.release?.status !== "succeeded" ||
+              item.release.result?.outcome !== "succeeded"))
+            throw new Error("发布目标必须由执行器报告成功后，再由人确认结果");
+          const at = nowIso();
+          completionRecord(
+            state,
+            item,
+            "human",
+            actor,
+            at,
+            note,
+          );
+          finishContinuation(item, at);
           item.status = "completed";
           item.attention = null;
           item.remindAt = undefined;
@@ -1152,9 +2380,15 @@ export class WorkspaceService {
         }
         case "goal.complete": {
           const item = goal(command.goalId);
+          if (item.status === "review")
+            throw new Error("待验收成果必须使用人工验收或独立复核结果，不能直接标记完成");
           ongoing(item, true, true);
           const actor = command.actor || "你";
+          if ((item.brief || item.autonomy) && actor !== "你")
+            throw new Error("自主目标的最终完成必须由人通过桌面或可信注意力界面确认");
           const note = text(command.note, "用户确认完成的原话", 4000);
+          const at = nowIso();
+          finishContinuation(item, at);
           item.status = "completed";
           item.attention = null;
           item.remindAt = undefined;
@@ -1168,6 +2402,8 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (item.status !== "review")
             throw new Error("只有待验收目标可以退回");
+          const at = nowIso();
+          finishContinuation(item, at, "cancelled");
           item.status = "active";
           item.attention = null;
           item.next = text(command.note, "修改意见", 4000);
@@ -1180,6 +2416,7 @@ export class WorkspaceService {
           const actor = command.actor || "你";
           if (actor !== "你" && !command.note?.trim())
             throw new Error("管家放弃目标时必须记录用户明确放弃的原话");
+          finishContinuation(item, nowIso(), "cancelled");
           item.status = "dropped";
           item.attention = null;
           item.remindAt = undefined;
@@ -1191,6 +2428,10 @@ export class WorkspaceService {
         case "goal.resolve": {
           const item = goal(command.goalId);
           ongoing(item, true, true);
+          if (item.kind === "release" && item.attention?.kind === "decision")
+            throw new Error("发布目标必须使用单独的发布批准或拒绝命令");
+          if (item.autonomy?.boundaryChange?.status === "pending")
+            throw new Error("边界变更必须使用边界变更批准或拒绝命令");
           if (item.attention?.kind === "review")
             throw new Error("成果请使用验收通过或退回修改");
           if (!item.attention && !hasDueReminder(item))
@@ -1417,6 +2658,7 @@ export class WorkspaceService {
           } else if (event.type === "agent.blocked") {
             runtime.receipt = undefined;
           }
+          item.revision = (item.revision ?? 0) + 1;
           item.updatedAt = event.at;
           return { accepted: true, goal: item, event };
         }
@@ -1644,8 +2886,82 @@ export class WorkspaceService {
           }
           return { matched };
         }
+        case "autonomy.inspect": {
+          const at = iso(command.at);
+          return state.goals.flatMap(item => {
+            if (!continuationEligible(item, at)) return [];
+            const continuation = item.autonomy!.continuation!;
+            return [{
+              goalId: item.id,
+              continuationId: continuation.id,
+              trigger: continuation.trigger,
+              dueAt: continuation.dueAt,
+              attempt: continuation.attempt,
+              basisRevision: continuation.basisRevision,
+              status: item.status,
+            }];
+          }).sort((left, right) => Date.parse(left.dueAt) - Date.parse(right.dueAt));
+        }
+        case "autonomy.claim": {
+          const item = goal(command.goalId),
+            result = claimContinuation(
+              item,
+              id(command.continuationId),
+              iso(command.at),
+              command.leaseMs,
+            );
+          if (!result.claimed) return result;
+          return {
+            claimed: true,
+            goalId: item.id,
+            continuation: result.continuation,
+            deliveryId: item.delivery?.id,
+            candidate: item.delivery?.candidate,
+          };
+        }
+        case "autonomy.report": {
+          const item = goal(command.goalId),
+            at = iso(command.at),
+            result = reportContinuation(
+              item,
+              id(command.continuationId),
+              command.outcome,
+              at,
+              command.detail,
+              command.leaseId,
+            );
+          if (!result.updated) return result;
+          if (command.outcome === "failed") {
+            item.attention = {
+              id: newId("attention"),
+              kind: "intervention",
+              summary: command.detail
+                ? `自主续跑发送失败：${text(command.detail, "续跑失败说明", 1_000)}`
+                : "自主续跑发送失败，需要你重试或接管。",
+              since: at,
+              source: "governance",
+            };
+          }
+          if (command.outcome !== "sent" || command.detail) {
+            activity(
+              item,
+              "autonomy",
+              command.outcome === "sent"
+                ? `续跑已发送。${command.detail ?? ""}`.trim()
+                : command.outcome === "failed"
+                  ? `续跑失败：${command.detail ?? "未提供原因"}`
+                  : `续跑已结算。${command.detail ?? ""}`.trim(),
+              "系统",
+            );
+          }
+          return { updated: true, continuation: result.continuation };
+        }
         case "watchdog.inspect":
-          return inspectWatchdog(state.goals, iso(command.at));
+          return inspectWatchdog(
+            state.goals,
+            iso(command.at),
+            workspaceAutonomy(state).noProgressMinutes,
+          );
         case "watchdog.report": {
           if (!["contacted", "failed"].includes(command.outcome)) throw new Error("无效的巡检结果");
           reportWatchdog(goal(command.goalId), iso(command.at), iso(command.basis), command.outcome,

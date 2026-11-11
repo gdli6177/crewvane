@@ -1,4 +1,5 @@
 import { attentionKind, attentionRequest, pendingSceneReply } from "../../../../../packages/core/src/model.js";
+import { resolveAcceptance } from "../../../../../packages/core/src/autonomy.js";
 import type {
   Activity,
   Goal,
@@ -32,6 +33,11 @@ export const activityKindLabel: Record<Activity["kind"], string> = {
   session: "会话",
   watchdog: "巡检",
   ship: "上线",
+  autonomy: "续跑",
+  boundary: "边界",
+  verification: "复核",
+  release: "发布",
+  reopened: "重开",
 };
 
 const contentKinds = new Set<Activity["kind"]>([
@@ -84,6 +90,7 @@ export interface GoalPresentation {
   needsIntervention: boolean;
   dispatchFailed: boolean;
   dueFollowUp: boolean;
+  verificationPending: boolean;
   sceneSync?: ReturnType<typeof sceneSyncPresentation>;
 }
 export function sceneSyncPresentation(goal: Goal) {
@@ -178,6 +185,10 @@ export function goalProgressLabel(goal: Goal) {
   if (kind === "intervention") return goal.herdr ? "需要你排障" : "需要你处理";
   if (goal.status === "waiting") return "等待外部";
   if (goal.mode === "manual") return "由你处理";
+  if (goal.status === "review" &&
+    goal.autonomy?.continuation?.trigger === "verification" &&
+    !goal.autonomy.lastVerification)
+    return "独立复核中";
   return executionPresentation(goal).label;
 }
 
@@ -207,6 +218,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const dispatchFailed = !ended && goal.attention?.source === "dispatch";
   const needsIntervention = !ended && kind === "intervention" && !dispatchFailed;
   const dueFollowUp = !ended && kind === "follow_up";
+  const verificationPending = !ended &&
+    goal.status === "review" &&
+    resolveAcceptance(state, goal).mode === "auto-with-verification" &&
+    !goal.autonomy?.lastVerification &&
+    goal.autonomy?.continuation?.trigger === "verification" &&
+    ["scheduled", "claimed", "sent"].includes(goal.autonomy.continuation.status);
   const sceneSync = !ended ? sceneSyncPresentation(goal) : undefined;
   const latest = [...goal.activities]
     .reverse()
@@ -251,6 +268,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     detail = "只记录，不会启动 Agent。准备好后再决定由谁来做。";
     brief = goal.description;
     nextLabel = "准备好再开始";
+  } else if (verificationPending) {
+    tone = "waiting";
+    label = "独立复核中";
+    detail = "系统正在等待未提交该交付的独立复核者核对完成条件和真实证据。";
+    brief = goal.attention?.summary || goal.next;
+    nextLabel = "复核后的安排";
   } else if (goal.status === "review") {
     tone = "review";
     label = "等你验收";
@@ -273,8 +296,16 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     nextLabel = "核对后的安排";
   } else if (needsDecision) {
     tone = "reply";
-    label = "等你决定";
-    detail = "负责人停在这里，需要你的明确授权或选择。";
+    label = goal.kind === "release"
+      ? "等你批准发布"
+      : goal.autonomy?.boundaryChange?.status === "pending"
+        ? "等你批准边界"
+        : "等你决定";
+    detail = goal.kind === "release"
+      ? "这只是本次候选和环境的执行许可；执行完成后仍需你核对真实结果。"
+      : goal.autonomy?.boundaryChange?.status === "pending"
+        ? "结果、完成条件或外部影响将发生变化，需要你明确批准。"
+        : "负责人停在这里，需要你的明确授权或选择。";
     brief = goal.attention?.summary || goal.next;
     nextLabel = "决定后继续";
   } else if (needsIntervention) {
@@ -337,6 +368,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     needsIntervention,
     dispatchFailed,
     dueFollowUp,
+    verificationPending,
     sceneSync,
   };
 }

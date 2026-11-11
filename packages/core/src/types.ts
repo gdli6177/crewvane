@@ -1,4 +1,7 @@
 export type GoalStatus = "backlog" | "active" | "waiting" | "review" | "completed" | "dropped";
+export type GoalKind = "delivery" | "discovery" | "release";
+export type AcceptanceMode = "human-review" | "auto-with-verification";
+export type ReleaseOnMerge = "never" | "production" | "unknown";
 export type IntakeHandling = "concierge" | "later" | "self";
 export type AttentionKind = "decision" | "review" | "follow_up" | "intervention";
 export type LiveState = "working" | "idle" | "done" | "blocked" | "unknown";
@@ -83,7 +86,20 @@ export interface ProjectPolicy {
   revision: number;
   updatedAt: string;
 }
-export interface Project { id: string; name: string; path?: string; policy: ProjectPolicy; createdAt: string }
+export interface ProjectAutonomy {
+  acceptance: "inherit" | AcceptanceMode;
+  revision: number;
+  updatedAt: string;
+}
+export interface Project {
+  id: string;
+  name: string;
+  path?: string;
+  policy: ProjectPolicy;
+  autonomy?: ProjectAutonomy;
+  releaseOnMerge?: ReleaseOnMerge;
+  createdAt: string;
+}
 export interface WorkflowStep { id: string; name: string; prompt: string }
 export interface Workflow { id: string; name: string; steps: WorkflowStep[] }
 export interface AgentPreferences { concierge: string; owner?: string; worker?: string }
@@ -144,20 +160,250 @@ export interface WatchdogState {
   attemptedAt?: string; contactedAt?: string; escalatedAt?: string; lastError?: string;
 }
 export interface DeliveryCheck { name: string; command: string; result: "passed" | "failed"; note?: string }
-export interface Delivery { summary: string; location?: string; url?: string; checks: DeliveryCheck[]; submittedAt: string; submittedBy: string }
-export interface Activity { id: string; at: string; actor: string; kind: "created" | "message" | "progress" | "waiting" | "decision" | "delivery" | "accepted" | "rework" | "dropped" | "resolved" | "reminder" | "session" | "watchdog" | "ship"; text: string; attachmentIds?: string[] }
+export interface DeliveryCandidate {
+  revision: string;
+  digest?: string;
+  version?: string;
+}
+export type EvidenceKind = "command" | "artifact" | "url" | "attachment" | "inspection";
+export interface Evidence {
+  id: string;
+  kind: EvidenceKind;
+  label: string;
+  result: "observed" | "passed" | "failed";
+  observedAt: string;
+  command?: string;
+  location?: string;
+  sourceRevision?: string;
+  sha256?: string;
+  note?: string;
+}
+export interface Delivery {
+  id?: string;
+  summary: string;
+  location?: string;
+  url?: string;
+  candidate?: DeliveryCandidate;
+  checks: DeliveryCheck[];
+  evidence?: Evidence[];
+  submittedAt: string;
+  submittedBy: string;
+}
+export type ContinuationTrigger =
+  | "checkpoint"
+  | "verification"
+  | "recovery"
+  | "wait-due"
+  | "decision-resolved"
+  | "dependency";
+export type ContinuationStatus = "scheduled" | "claimed" | "sent" | "settled" | "cancelled" | "failed";
+export interface Continuation {
+  id: string;
+  trigger: ContinuationTrigger;
+  status: ContinuationStatus;
+  dueAt: string;
+  attempt: number;
+  basisRevision: string;
+  idempotencyKey: string;
+  claimedAt?: string;
+  leaseUntil?: string;
+  leaseId?: string;
+  sentAt?: string;
+  settledAt?: string;
+  lastError?: string;
+}
+export interface AcceptanceCriterion {
+  id: string;
+  statement: string;
+  required: boolean;
+  provenance:
+    | { kind: "user-message"; activityId: string }
+    | { kind: "project-rule"; ref: string }
+    | { kind: "verification-method"; rationale: string };
+}
+export interface GoalBrief {
+  revision: number;
+  outcome: string;
+  inScope: string[];
+  outOfScope: string[];
+  criteria: AcceptanceCriterion[];
+  constraints: string[];
+  externalEffects: string[];
+  verificationPlan: {
+    requiredEvidenceKinds: EvidenceKind[];
+    independentReviewer: true;
+  };
+  attemptBudget: {
+    maxRecoveryAttempts: number;
+  };
+  source: {
+    activityIds: string[];
+    ruleRefs: string[];
+  };
+  setBy: string;
+  setAt: string;
+}
+export interface VerificationCriterion {
+  criterionId: string;
+  result: "passed" | "failed";
+  evidenceIds: string[];
+  note?: string;
+}
+export interface Verification {
+  id: string;
+  deliveryId: string;
+  outcome: "passed" | "failed";
+  summary: string;
+  criteria: VerificationCriterion[];
+  reviewer: string;
+  reviewerHerdr?: HerdrReference;
+  verifiedAt: string;
+}
+export interface VerificationSite {
+  reference: HerdrReference;
+  status: "launching" | "ready" | "blocked" | "failed";
+  at: string;
+  detail?: string;
+}
+export interface AcceptanceRecord {
+  id: string;
+  kind: "automatic" | "human";
+  at: string;
+  by: string;
+  mandateRevision: number;
+  verificationId?: string;
+  note?: string;
+}
+export interface BoundaryChange {
+  id: string;
+  reason: string;
+  proposedOutcome?: string;
+  proposedCriteria?: AcceptanceCriterion[];
+  proposedExternalEffects?: string[];
+  evidence: string[];
+  alternatives: string[];
+  recommendation: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+  resolvedAt?: string;
+}
+export interface GoalAutonomy {
+  override?: AcceptanceMode;
+  paused?: boolean;
+  attempts: {
+    used: number;
+    limit: number;
+    failureFingerprint?: string;
+  };
+  continuation?: Continuation;
+  lastVerification?: Verification;
+  verificationSite?: VerificationSite;
+  acceptance?: AcceptanceRecord;
+  boundaryChange?: BoundaryChange;
+}
+export interface ReleaseTarget {
+  sourceGoalIds: string[];
+  environment: string;
+  candidate: DeliveryCandidate;
+  status:
+    | "drafting"
+    | "awaiting-authorization"
+    | "authorized"
+    | "executing"
+    | "verifying"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  authorization?: {
+    id: string;
+    approvedAt: string;
+    approvedBy: "你";
+    candidateRevision: string;
+    candidateDigest?: string;
+    note: string;
+  };
+  result?: {
+    outcome: "succeeded" | "failed";
+    evidence: string[];
+    reportedAt: string;
+  };
+}
+export interface WorkspaceAutonomy {
+  acceptance: AcceptanceMode;
+  initializedAt?: string;
+  paused: boolean;
+  maxRecoveryAttempts: number;
+  noProgressMinutes: number;
+  revision: number;
+  updatedAt: string;
+}
+export type BotOperation =
+  | "goal.submit"
+  | "goal.read"
+  | "goal.message"
+  | "goal.checkpoint"
+  | "goal.boundary"
+  | "delivery.submit";
+export interface BotBinding {
+  id: string;
+  name: string;
+  role: "initiator" | "executor";
+  projectIds: string[];
+  operations: BotOperation[];
+  expiresAt: string;
+  status: "active" | "revoked";
+}
+export interface BotRequestReceipt {
+  botId: string;
+  requestId: string;
+  operation: BotOperation;
+  at: string;
+  goalId?: string;
+  status: "pending" | "completed" | "failed";
+  detail?: string;
+}
+export interface Activity {
+  id: string;
+  at: string;
+  actor: string;
+  kind:
+    | "created"
+    | "message"
+    | "progress"
+    | "waiting"
+    | "decision"
+    | "delivery"
+    | "accepted"
+    | "rework"
+    | "dropped"
+    | "resolved"
+    | "reminder"
+    | "session"
+    | "watchdog"
+    | "ship"
+    | "autonomy"
+    | "boundary"
+    | "verification"
+    | "release"
+    | "reopened";
+  text: string;
+  attachmentIds?: string[];
+}
 export interface GoalAttachment {
   id: string; name: string; path: string; mime: string; size: number; sha256: string; addedAt: string;
 }
 export interface Goal {
   id: string; projectId: string; title: string; description: string;
+  kind?: GoalKind; revision?: number;
   mode: "concierge" | "manual"; status: GoalStatus;
   steps: WorkflowStep[]; stageId?: string; next: string; owner: string;
   waitingFor?: string; remindAt?: string; attention: Attention | null;
-  delivery?: Delivery; herdr?: HerdrReference; ownerResume?: OwnerResume; live?: LivePresence;
+  delivery?: Delivery; brief?: GoalBrief; briefHistory?: GoalBrief[];
+  autonomy?: GoalAutonomy; release?: ReleaseTarget;
+  herdr?: HerdrReference; ownerResume?: OwnerResume; live?: LivePresence;
   reviewRounds?: number; reviewLimit?: number;
   risk?: RiskEscalation;
-  dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply"; note?: string; status: "pending" | "sent" | "unconfirmed" | "failed"; at: string; detail?: string };
+  dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply" | "continuation" | "verification"; note?: string; status: "pending" | "sent" | "unconfirmed" | "failed"; at: string; detail?: string };
   sceneReply?: SceneReply;
   recovery?: "idle" | "done" | "blocked";
   sceneVisit?: SceneVisit;
@@ -184,7 +430,10 @@ export interface SceneVisit {
   detail?: string;
 }
 export interface WorkspaceState {
-  version: 2; name: string; projects: Project[]; workflows: Workflow[]; goals: Goal[];
+  version: 3; name: string; projects: Project[]; workflows: Workflow[]; goals: Goal[];
+  autonomy: WorkspaceAutonomy;
+  bots?: BotBinding[];
+  botRequests?: BotRequestReceipt[];
   decisions: DecisionRecord[];
   agents?: AgentPreferences;
   recovery?: WorkspaceRecovery;
@@ -199,13 +448,58 @@ type WorkspaceCommand =
   | { type: "workspace.rename"; name: string }
   | { type: "workspace.recovery.dismiss" }
   | { type: "agents.configure"; preferences: AgentPreferences }
+  | {
+      type: "workspace.autonomy.set";
+      acceptance?: AcceptanceMode;
+      paused?: boolean;
+      maxRecoveryAttempts?: number;
+      noProgressMinutes?: number;
+      initialize?: boolean;
+      actor: string;
+    }
   | { type: "project.add"; name: string; path?: string }
   | { type: "project.remove"; projectId: string }
   | { type: "project.policy.set"; projectId: string; policy: Pick<ProjectPolicy, "shipPolicy" | "approvers">; actor: string }
+  | {
+      type: "project.autonomy.set";
+      projectId: string;
+      acceptance: "inherit" | AcceptanceMode;
+      releaseOnMerge: ReleaseOnMerge;
+      actor: string;
+    }
   | { type: "workflow.save"; workflow: Workflow }
-  | { type: "goal.create"; input: { title: string; description?: string; projectId: string; workflowId?: string; mode: "concierge" | "manual"; next?: string; waitingFor?: string; remindAt?: string } }
-  | { type: "goal.intake"; text: string; projectId?: string; handling?: IntakeHandling; remindAt?: string; attachments?: GoalAttachment[] }
-  | { type: "goal.direct"; text: string; goalId?: string; projectId?: string; handling?: IntakeHandling; attachments?: GoalAttachment[] }
+  | {
+      type: "goal.create";
+      input: {
+        title: string;
+        description?: string;
+        projectId: string;
+        workflowId?: string;
+        kind?: Exclude<GoalKind, "release">;
+        mode: "concierge" | "manual";
+        next?: string;
+        waitingFor?: string;
+        remindAt?: string;
+      };
+    }
+  | {
+      type: "goal.intake";
+      text: string;
+      projectId?: string;
+      kind?: Exclude<GoalKind, "release">;
+      handling?: IntakeHandling;
+      remindAt?: string;
+      attachments?: GoalAttachment[];
+    }
+  | {
+      type: "goal.direct";
+      text: string;
+      goalId?: string;
+      projectId?: string;
+      kind?: Exclude<GoalKind, "release">;
+      handling?: IntakeHandling;
+      attachments?: GoalAttachment[];
+    }
   | { type: "goal.attachment.remove"; goalId: string; attachmentId: string; actor?: string }
   | { type: "attachments.cleanup"; retentionDays?: number; at?: string }
   | { type: "goal.delete"; goalId: string; actor?: string }
@@ -235,6 +529,122 @@ type WorkspaceCommand =
   | { type: "goal.risk"; goalId: string; category: HighRiskCategory; summary: string; actionKey?: string; actor?: string }
   | { type: "goal.ship"; goalId: string; operation: "merge" | "deploy"; checksPassed: boolean; actor?: string }
   | { type: "goal.review"; goalId: string; delivery: Omit<Delivery, "submittedAt" | "submittedBy">; actor?: string }
+  | {
+      type: "goal.brief";
+      goalId: string;
+      brief: GoalBriefInput;
+      expectedRevision?: number;
+      actor?: string;
+    }
+  | {
+      type: "goal.checkpoint";
+      goalId: string;
+      summary: string;
+      next: string;
+      dueAt?: string;
+      actor?: string;
+    }
+  | {
+      type: "goal.verify";
+      goalId: string;
+      deliveryId: string;
+      outcome: "passed" | "failed";
+      summary: string;
+      criteria: VerificationCriterion[];
+      reviewer?: string;
+      reviewerHerdr?: HerdrReference;
+      actor?: string;
+    }
+  | {
+      type: "goal.verification.site";
+      goalId: string;
+      reference: HerdrReference;
+      status: VerificationSite["status"];
+      detail?: string;
+      actor?: string;
+    }
+  | {
+      type: "goal.boundary";
+      goalId: string;
+      change: {
+        reason: string;
+        proposedOutcome?: string;
+        proposedCriteria?: AcceptanceCriterion[];
+        proposedExternalEffects?: string[];
+        evidence: string[];
+        alternatives: string[];
+        recommendation: string;
+      };
+      actor?: string;
+    }
+  | {
+      type: "goal.boundary.resolve";
+      goalId: string;
+      boundaryId: string;
+      outcome: "approved" | "rejected";
+      note: string;
+      actor?: string;
+    }
+  | {
+      type: "goal.kind.set";
+      goalId: string;
+      kind: Exclude<GoalKind, "release">;
+      actor?: string;
+    }
+  | { type: "goal.autonomy.pause" | "goal.autonomy.resume"; goalId: string; actor?: string }
+  | {
+      type: "goal.autonomy.acceptance";
+      goalId: string;
+      acceptance: "inherit" | AcceptanceMode;
+      actor?: string;
+    }
+  | { type: "goal.reopen"; goalId: string; note: string; actor?: string }
+  | {
+      type: "release.create";
+      sourceGoalIds: string[];
+      environment: string;
+      candidate: DeliveryCandidate;
+      actor?: string;
+    }
+  | { type: "release.approve" | "release.reject"; goalId: string; note: string; actor?: string }
+  | {
+      type: "release.result";
+      goalId: string;
+      outcome: "succeeded" | "failed";
+      evidence: string[];
+      actor?: string;
+    }
+  | { type: "autonomy.inspect"; at: string }
+  | {
+      type: "autonomy.claim";
+      goalId: string;
+      continuationId: string;
+      at: string;
+      leaseMs?: number;
+    }
+  | {
+      type: "autonomy.report";
+      goalId: string;
+      continuationId: string;
+      outcome: "sent" | "failed" | "settled";
+      detail?: string;
+      leaseId?: string;
+      at: string;
+    }
+  | {
+      type: "bot.binding.set";
+      binding: Omit<BotBinding, "status">;
+      actor: string;
+    }
+  | { type: "bot.binding.revoke"; botId: string; actor: string }
+  | {
+      type: "bot.request";
+      schema: "crewvane.bot.v1";
+      requestId: string;
+      operation: BotOperation;
+      botId: string;
+      payload: unknown;
+    }
   | { type: "goal.accept" | "goal.complete" | "goal.drop"; goalId: string; note?: string; actor?: string }
   | { type: "goal.resolve"; goalId: string; note?: string; actor?: string; outcome?: DecisionOutcome; source?: "desktop" | "herdr" | "cli" | "scene" }
   | { type: "goal.rework"; goalId: string; note: string; actor?: string }
@@ -271,4 +681,25 @@ type WorkspaceCommand =
 export type CrewvaneCommand = WorkspaceCommand & {
   attentionId?: string;
   sceneReplyId?: string;
+  requestId?: string;
 };
+
+export interface GoalBriefInput {
+  outcome: string;
+  inScope: string[];
+  outOfScope: string[];
+  criteria: AcceptanceCriterion[];
+  constraints: string[];
+  externalEffects: string[];
+  verificationPlan: {
+    requiredEvidenceKinds: EvidenceKind[];
+    independentReviewer: true;
+  };
+  attemptBudget: {
+    maxRecoveryAttempts: number;
+  };
+  source: {
+    activityIds: string[];
+    ruleRefs: string[];
+  };
+}

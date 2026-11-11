@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { completeAutonomySetup } from "./lib/autonomy-setup.mjs";
 import { verifyReconciliationPresentation } from "./lib/reconciliation-presentation.mjs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -80,6 +81,7 @@ async function launchInstalled(appPath, label) {
     const page = await app.firstWindow();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    await completeAutonomySetup(page);
     await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
     assert.equal(await app.evaluate(({ app }) => app.getVersion()), version);
     assert.equal(await page.evaluate(() => typeof window.require), "undefined");
@@ -89,7 +91,7 @@ async function launchInstalled(appPath, label) {
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("button", { name: "重新安装", exact: true }).waitFor();
     const cli = join(home, ".local/bin/crewvane");
-    assert.ok((await exec(cli, ["status", "--root", workspace, "--json"])).stdout.includes('"version": 2'));
+    assert.ok((await exec(cli, ["status", "--root", workspace, "--json"])).stdout.includes('"version": 3'));
     const created = JSON.parse((await exec(cli, ["goal", "create", "--title", "安装包 CLI 验收",
       "--project", "personal", "--root", workspace, "--json"])).stdout);
     await writeFile(join(trial, `${label}-cli.json`), JSON.stringify(created));

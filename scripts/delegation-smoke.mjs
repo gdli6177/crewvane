@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import { completeAutonomySetup } from "./lib/autonomy-setup.mjs";
 
 const exec = promisify(execFile);
 const trial = await realpath(await mkdtemp("/tmp/cv-delegate-"));
@@ -51,6 +52,7 @@ try {
   });
   page = await app.firstWindow();
   page.on("pageerror", error => errors.push(String(error)));
+  await completeAutonomySetup(page);
   await expect.poll(async () => (await page.evaluate(() => window.crewvane.environment())).workspace).toBe(workspace);
   await page.evaluate(preferences => window.crewvane.command({type:"agents.configure",preferences}), {
     concierge:trialAgent, owner:trialAgent, worker:trialAgent,

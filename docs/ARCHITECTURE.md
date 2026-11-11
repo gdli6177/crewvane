@@ -1,13 +1,15 @@
 # Crewvane 架构
 
-产品基线见 [全局管家与注意力中心开发说明](product/attention-center-development.md)。
+产品基线见 [全局管家与注意力中心开发说明](product/attention-center-development.md)
+与 [Crewvane 自主目标规格](product/autonomous-goals.md)。
 
 ## 边界
 
 ```text
 Electron 主进程      可信文件选择、Herdr、系统通知、受约束 IPC
 React 渲染进程       注意力、目标详情、设置；无 Node 或任意命令能力
-packages/core        目标、消息、附件、注意力、决定、状态命令、锁与原子存储
+Autonomy scheduler   状态变化即触发 + 10 秒补偿；领取持久续跑并交给管家收件箱
+packages/core        目标、委托、续跑、复核、验收、发布、Bot、锁与原子存储
 cli                  人用消息入口与受信任 Agent 状态协议，调用同一个 core 服务
 Agent Adapter        Codex、Claude Code、Cursor、Qoder 与 OMP 生命周期接入
 Herdr                Session、Tab、Pane、Agent 生命周期与消息
@@ -20,18 +22,28 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 
 工作区由用户选择，状态位于 `<workspace>/.crewvane/`。`state.json` 是完整快照，`events.jsonl` 是追加事件记录；事件只保存状态摘要的 SHA-256 与字节数，不再为每次修改复制整份 workspace。日志超过 16 MB 时在状态写锁内只保留最近约 4 MB、最多 2,000 条完整事件，并原子替换旧日志，避免长时间运行产生数 GB 的重复快照。工作区根目录的 `.crewvane-lock/` 串行化桌面和 CLI 的读取、恢复与并发写入，确保旧状态被整体归档时不会与写入交错。每次修改先写临时文件，再原子替换快照。`decisions.md` 与 `rejected.md` 由结构化决定记录派生，供 Agent 和人直接阅读。图片原图位于 `.crewvane/attachments/`，状态只保存相对路径、MIME、大小和 SHA-256；导入校验真实文件魔数并限制数量与体积。已结束目标保留图片 30 天，应用启动时清理，也支持逐张或随目标永久删除。
 
-`WorkspaceState.version = 2` 当前包含项目及项目上线策略、目标、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 保留原记录并按下述等待语义纠正后读取。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v2 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
+`WorkspaceState.version = 3` 当前包含项目及上线策略、工作区/项目自主设置、目标、委托摘要、续跑、复核、验收、独立发布目标、Bot 绑定、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 原地迁移为 v3，先保存 `.crewvane/state.v2.backup.json`，再为现有目标补 `kind=delivery`、工作区 `human-review`、项目 `inherit/unknown`，不批量开启自主推进。有效 v3 保留原记录。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v3 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
 
-目标可选保存 `agentRuntime`：当前 `AgentAttempt`、Adapter 能力、最后事件、当前 turn、最新 Prompt / 回复和 Stop 回执。`AgentAttempt` 在负责人启动、重启或恢复时新建，并由 `crewvane owner launch` 导出目标 ID、attempt ID、Hook token 与 Agent 名称。原生事件只接受版本、事件 ID、单调序号、来源、Agent、attempt、turn 与受限内容；事件 ID 和 `attemptId + sequence` 去重排序，旧 attempt、旧 turn 与迟到事件只写诊断日志。有效 v2 工作区不需要破坏性迁移。
+目标可选保存 `agentRuntime`：当前 `AgentAttempt`、Adapter 能力、最后事件、当前 turn、最新 Prompt / 回复和 Stop 回执。`AgentAttempt` 在负责人启动、重启或恢复时新建，并由 `crewvane owner launch` 导出目标 ID、attempt ID、Hook token 与 Agent 名称。原生事件只接受版本、事件 ID、单调序号、来源、Agent、attempt、turn 与受限内容；事件 ID 和 `attemptId + sequence` 去重排序，旧 attempt、旧 turn 与迟到事件只写诊断日志。有效 v2 工作区先写 `.crewvane/state.v2.backup.json`，再原地迁移为 v3，不归档整个目录。
 
 目标内容与状态命令分离：
 
 - `goal.message` / `goal.direct` 保存人的原话和附件，不从正文推断批准、验收或完成。外部等待目标交回管家处理时先恢复 `active`、清除旧等待与提醒，保留原下一步；管家根据明确事实重新确立外部等待、进展或注意力。人工事项的普通备注保留等待与提醒。
 - `goal.progress`、`goal.wait`、`goal.review`、`goal.decide` 等是 Agent 或受信任适配器提交的明确状态事实。`waiting` 仅用于具名外部第三方，不能等待用户、管家、负责人或工人；`goal.wait --owner` 必填，外部对象存入 `waitingFor`，不覆盖执行负责人。需要人处理使用注意力，内部协调保持 `active`。`goal.remind` 只设置提醒，活动目标也可到期进入注意力。
-- `goal.accept`、`goal.complete`、`goal.rework`、`goal.drop`、`goal.resolve` 由人通过明确操作触发，或由当前案卷管家在用户明确说完成后执行；结束与决定必须保存用户原话，不从“可以”“继续”等顺承词自动推断。
+- `goal.accept`、`goal.complete`、`goal.rework`、`goal.drop`、`goal.resolve` 由人通过明确操作触发；非自主事项可以由当前案卷管家依据用户明确原话记录结束。自主目标进入 `review` 后只能走人工验收或独立复核门禁，不能由 `goal.complete` 绕过；结束与决定仍必须保存用户原话，不从“可以”“继续”等顺承词自动推断。
 - 活动记录按 `goalId` 隔离，原始 Agent 内容保持不透明；UI 不要求固定摘要模板。
 
 读取有效 v2 快照时纠正旧版等待语义：等待对象缺失、指向用户或内部 Agent，或仍有未解决的决定、验收、介入事项时恢复活动状态（已有交付的验收保留 `review`），保留历史与注意力。旧版等用户且缺少注意力时补回介入项。真正的外部等待及其到期跟进保留，不归档整个工作区；后续修改时保存纠正结果。
+
+### 自主目标闭环
+
+`GoalBrief` 保存结果、范围、完成条件、外部影响、证据类型和有限恢复预算。完成条件必须引用目标内的人的原话、项目规则或可核对验证方法；Agent 修改结果、完成条件或外部影响时必须走 `BoundaryChange`，批准前不领取续跑。`briefHistory` 保留最近修订，活动记录继续保存完整时间线。
+
+`Goal.autonomy.continuation` 是控制面状态，不在 Agent 中常驻。checkpoint、独立复核、恢复、外部等待到期、决定解决和可信依赖都会创建或替换一条持久续跑；领取必须有未过期租约，回执同时校验 continuation 与 lease，目标修订变化、暂停、人工接管或结束会阻止旧回执生效。Electron 调度器监听状态变化且每 10 秒补偿；同一工作区仍由协调收件箱串行管家案卷，负责人可并行。
+
+验收方式按 `goal.override > project.acceptance > workspace.acceptance` 解析，默认人工验收。`auto-with-verification` 只有在摘要来源、候选版本、通过证据、独立复核人、必选条件、审查轮次、暂停与人工接管等门禁全部满足时才由 core 自动完成；失败证据不能被通过结论引用。人可以随时改为人工验收、暂停、重新打开或要求新复核。生产发布另建 `kind=release` 目标，每次批准绑定环境和候选，执行成功后仍进入人工结果确认。
+
+本地 Bot 只通过 `crewvane.bot.v1` envelope 使用同一目标与交付事实源。绑定由人创建和撤销，按项目和操作授权，按 `(botId, requestId)` 幂等；它不能提交复核、验收、发布批准或策略修改。远程网络入口和 Bot 复核能力不在 0.9 首期范围。
 
 注意力是独立派生：
 
@@ -39,17 +51,17 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 | --- | --- |
 | 人工或管家请求决定 | 是 |
 | 项目上线策略要求审批，或命中九类高风险动作 | 是；决定账本已有记录时直接沿用 |
-| 提交了带真实检查的交付 | 是，等待验收 |
+| 提交了带真实检查的交付 | 生效方式为人工验收时是；自动验收目标进入独立复核，门禁通过后不生成“请验收” |
 | 等待事项到达提醒时间 | 是 |
 | 当前 attempt 的 Agent Hook 报告阻塞 | 先请管家核查，不等同完成或失败 |
 | Herdr Agent 为 `blocked` / 不可达，或目标长期无进展 | 先请管家核查；联系失败或未恢复再提示人介入 |
 | Herdr `idle` / `done` / `unknown` 或普通进展 | 否 |
 
-`done` 只是 Agent 空闲，Crewvane 只有在交付检查记录通过且人验收后才把目标设为完成。
+`done` 只是 Agent 空闲。目标只有在交付检查与证据完整、且人工验收或独立复核门禁通过后才会完成；自动完成不表示已经合并或上线。
 
 活跃目标的负责人持续 `idle` / `done` 90 秒且仍未写回结果时，巡检请管家核对该负责人是否遗漏结果、真实等待或交付。运行标签由列表和详情共享的事实映射生成：仅空闲显示“负责人空闲”，当前 turn 已写回显示“本轮已回报”；真正持久记录核对请求后才显示“待管家核对”，确认送达后显示“已请管家核对”，不声称管家正在执行。旧 `recovery` 提示本身不能产生核对请求。需要人处理、验收、外部等待和人工接管的业务事实优先于运行标签。恢复 `working` 或提交新的结构化决定、交付后清除旧核对提示。`active` 只表示目标仍需跟进。终端空闲不自动改变业务状态，也不会直接产生人的注意力事项或自动验收。
 
-可信 Stop Hook 进一步缩短这段反馈链：回合结束后等待 5 秒，若当前 turn 仍没有结构化 Crewvane 写回，就向同一负责人发送一次命令提醒；再等 30 秒仍缺失时标记 `protocol_missing` 并交给管家，不直接打扰人。Hook heartbeat 不进入 `Activity`，不会重置 30 分钟业务无进展计时。没有受支持 Hook 的 Agent 继续使用 90 秒 Herdr 路径。详细 Adapter 矩阵、事件模型、隐私限制和故障降级见 [Agent Runtime Hooks](product/agent-runtime-hooks.md)。
+可信 Stop Hook 进一步缩短这段反馈链：回合结束后等待 5 秒，若当前 turn 仍没有结构化 Crewvane 写回，就向同一负责人发送一次命令提醒；再等 30 秒仍缺失时标记 `protocol_missing` 并交给管家，不直接打扰人。Hook heartbeat 不进入 `Activity`，不会重置工作区配置的业务无进展计时（默认 30 分钟）。没有受支持 Hook 的 Agent 继续使用 90 秒 Herdr 路径。详细 Adapter 矩阵、事件模型、隐私限制和故障降级见 [Agent Runtime Hooks](product/agent-runtime-hooks.md)。
 
 状态归并顺序固定为：明确 Crewvane CLI 语义写回 > 当前 attempt Hook > Herdr 生命周期 > Watchdog。任何 Hook、Stop 或 Agent 回复都不能推断完成、等待外部、找人决定或验收放行。
 
@@ -93,7 +105,7 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 自定义 CLI 先按 Pane 进程身份管理。若 Herdr 随后自动识别并登记该 Agent，Crewvane 会把该 Pane 上的 Agent 改名为受管负责人名称，并改用生命周期感知的 `agent prompt`；无法识别的 CLI 继续按前台 PID 校验后用 Pane 输入，两者都不会把任务发给已经退出的 shell。
 
-管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind 和 session；`goal list`、attention、ask、message 和跨目标读写会被拒绝。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
+管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、kind、brief、checkpoint、boundary、complete、rework、drop、resolve、remind、scene-reply 和 session，并可启动负责人或独立复核者；`goal list`、attention、ask、message、验收、自主设置、发布批准和跨目标读写会被拒绝。自主目标进入 `review` 后不能由管家调用 `complete` 绕过验收。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
 首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、attempt ID、Hook token、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。若 Pane 刚创建、Herdr 尚报 `agent_pane_busy`，CLI 只在同一个 Pane 上按 100 ms 起的指数退避重试，最长 15 秒；其他可能在进程创建后发生的启动错误不重放，避免重复启动。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
 

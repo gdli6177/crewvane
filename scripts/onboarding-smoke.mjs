@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import { completeAutonomySetup } from "./lib/autonomy-setup.mjs";
 const exec = promisify(execFile);
 // macOS AF_UNIX has a short socket path limit. Keep isolated HOME/session short.
 const home = await mkdtemp("/tmp/cv-onboarding-");
@@ -73,8 +74,9 @@ try {
   const { stdout } = await exec(installedExecutable, ["--version"]); assert.ok(stdout.includes(installed.version));
   await picker(rootA);
   await page.getByRole("button", { name: "选择存储位置并开始" }).click();
-  await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
   await page.getByText("已打开工作区：所有事项", { exact: true }).waitFor();
+  await completeAutonomySetup(page);
+  await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
   assert.equal((await page.evaluate(() => window.crewvane.environment())).workspace, await realpath(rootA));
   await expect.poll(async () => {
     const plugin = (await page.evaluate(() => window.crewvane.herdrStatus())).plugin;
@@ -121,11 +123,12 @@ try {
   await expect.poll(async () =>
     (await page.evaluate(() => window.crewvane.environment())).workspace
   ).toBe(await realpath(legacy));
+  await completeAutonomySetup(page);
   await page.getByText("旧版工作区已自动保护", { exact: true }).waitFor();
   await page.screenshot({ path: join(home, "legacy-recovered-dark.png"), animations:"disabled" });
   const recovered = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
   assert.equal(recovered.recovery.reason, "unsupported-version");
-  assert.equal(JSON.parse(await readFile(join(legacy, ".crewvane/state.json"), "utf8")).version, 2);
+  assert.equal(JSON.parse(await readFile(join(legacy, ".crewvane/state.json"), "utf8")).version, 3);
   assert.equal((await stat(recovered.recovery.archivedPath)).isDirectory(), true);
   assert.equal(
     JSON.parse(await readFile(join(recovered.recovery.archivedPath, "state.json"), "utf8")).version,
@@ -144,6 +147,7 @@ try {
   await expect.poll(async () =>
     (await page.evaluate(() => window.crewvane.environment())).workspace
   ).toBe(await realpath(rootB));
+  await completeAutonomySetup(page);
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const command = `"${customCli}" --model "local test model"`;
   await page.getByLabel("管家启动命令").fill(command);

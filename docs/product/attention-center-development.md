@@ -1,6 +1,10 @@
-# Crewvane 0.6 开发与验收说明
+# Crewvane 注意力中心开发与验收说明
 
-状态：开发基线。本说明替代旧版运行时调度方案，作为实现、评审和验收的共同依据。
+状态：持续开发基线。0.6 定义注意力中心，0.8 增加持久协调收件箱，0.9 增加自主目标闭环。
+
+> 0.9 的自主目标、验收授权、续跑、独立复核、边界变更、发布目标和 Bot 协议以
+> [自主目标规格](autonomous-goals.md) 为准；本文继续定义注意力、目标生命周期、
+> 管家职责和桌面交互的共同基线。
 
 ## 1. 要解决的问题
 
@@ -24,7 +28,7 @@ Crewvane 0.6 是一个**全局管家与注意力中心**。用户把事项告诉
 - 验收以实际成果、检查记录和可访问的 Herdr 现场为依据。Agent 自称完成、Herdr `done` 或终端空闲均不等于验收通过。
 - 项目可选择 `external-approval`、`auto-merge-manual-deploy` 或 `auto`；默认外部审批。Crewvane 只判定项目策略是否放行，不会替 Agent 执行 Git、部署或外发。
 - 删除数据、停服、花钱、外部发消息、改变产品方向、新建或轮换密钥、修改权限、修改上线策略，九类动作在任何策略下都必须先问人。
-- 旧版未投入实际使用。0.6 不读取 v1 语义，也不把它猜测转换成新目标；发现不兼容、损坏或缺快照的旧工作区时，先整库归档到相邻 `.crewvane.backup-*`，再自动创建可用的 v2 工作区，并在界面显示备份原因与打开入口。
+- 旧版未投入实际使用。当前不读取 v1 语义，也不把它猜测转换成新目标；发现不兼容、损坏或缺快照的旧工作区时，先整库归档到相邻 `.crewvane.backup-*`，再自动创建可用的 v3 工作区，并在界面显示备份原因与打开入口。有效 v2 原地备份并保守迁移到 v3。
 - 注意力中的真实现场介入直接进入 Herdr；决定、验收、到期跟进和派发失败使用轻量动作卡。普通活动目标有已登记现场时优先打开现场；已结束目标保留历史记录。现场上方仅展示结构化目标事实，不把终端滚动内容注入 Agent 上下文。
 
 ## 2. 产品结构
@@ -88,7 +92,7 @@ Crewvane 工作区
 
 ### 工作区
 
-一个工作区保存一份 `.crewvane/state.json`、完整快照事件日志和写锁。`WorkspaceState.version` 为 `2`；发现其他版本、损坏 JSON、缺字段快照或只有旧事件日志时，先构造完整的新 v2 目录，再原子归档旧 `.crewvane` 并切换。旧执行状态、审批和 Herdr 现场不自动转换，备份供用户查看；有效 v2 不触发恢复。细节见 [工作区兼容检查与自动恢复](workspace-recovery.md)。
+一个工作区保存一份 `.crewvane/state.json`、完整快照事件日志和写锁。`WorkspaceState.version` 为 `3`；有效 v2 先写 `.crewvane/state.v2.backup.json` 再原地迁移，其他不兼容版本、损坏 JSON、缺字段快照或只有旧事件日志时，先构造完整的新 v3 目录，再原子归档旧 `.crewvane` 并切换。旧执行状态、审批和 Herdr 现场不自动转换，备份供用户查看；有效 v3 不触发恢复。细节见 [工作区兼容检查与自动恢复](workspace-recovery.md)。
 
 核心记录：
 
@@ -103,6 +107,8 @@ Crewvane 工作区
 状态中的 `workflows` 与 `steps` 只作为旧快照结构占位读取，不再出现在产品入口、CLI、目标详情或管家提示词中。
 
 生命周期使用 `backlog | active | waiting | review | completed | dropped`。`backlog` 表示仅暂存、尚未授权执行；`active` 表示仍需跟进，不表示终端一直在执行；`waiting` 仅表示等待用户和所有 Agent 之外的具名外部第三方；`review` 表示已提交给人验收。需要用户决定、确认、提供信息或操作时保持 `active` 并进入注意力；内部 Agent 协调保持 `active`。是否进入注意力由独立注意力或明确到期提醒决定，不能从 Herdr 空闲状态推断。
+
+0.9 起，目标可带 `GoalBrief`、`kind`、持久 `continuation`、独立复核和验收记录。自主推进的正常 checkpoint、发送和自动验收不进入注意力；只有结果取舍、边界变更、恢复预算耗尽、证据矛盾、复核现场不可达或生产发布批准才找人。验收方式按目标覆盖 > 项目 > 工作区解析，默认 `human-review`；`auto-with-verification` 必须先由独立复核逐项覆盖必选完成条件并引用真实通过证据。人可以随时暂停、改为人工验收、重新打开或要求新复核。每次生产发布仍建立独立发布目标并逐次批准，执行成功后由人核对真实结果。完整协议见 [自主目标规格](autonomous-goals.md)。
 
 待办池是同一份 `Goal` 的投影：“先记下”为 `backlog/manual`，“我来做”为 `active/manual`。统一输入框通过 `goal.intake.handling` 选择 `later | self | concierge`。前两者不启动 Agent，也不参与停滞巡检；提醒是独立可选字段，不要求把人工事项改为等待别人。查看和追加备注不清除个人提醒。准备好后通过 `takeover` 或 `delegate` 复用原记录开始；人工完成不要求提交 Agent 验收材料。详见 [待办池开发说明](task-pool-proposal.md)。
 
@@ -125,7 +131,7 @@ Crewvane 工作区
 | 等待外部、暂存或活动目标的 `remindAt <= now` | 是，`follow_up` | 每个提醒时间最多一次，不自动启动 Agent |
 | Herdr 对应 Agent 为 `blocked` / 不可达 | 先由巡检联系管家 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | 活跃目标的负责人 `idle` / `done` 持续 90 秒且没有写回结果 | 先由巡检联系管家核对现场、结果和下一步，显示“待管家核对” | 不直接通知；联系失败或 10 分钟无恢复进展时通知 |
-| 活跃目标 30 分钟未写回实质进展 | 先由巡检联系管家，不以终端忙闲判定失败 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
+| 活跃目标超过工作区配置的无进展阈值（默认 30 分钟） | 先由巡检联系管家，不以终端忙闲判定失败 | 管家不可达或联系后 10 分钟无恢复进展时通知 |
 | Herdr 为 `working` / `idle` / `done` / `unknown` | 否 | 否 |
 | 普通进展更新 | 否 | 否 |
 | 等待外部但未到提醒时间 | 仅在“等待外部” | 否 |
@@ -203,7 +209,8 @@ crewvane goal list [--all] [--json]
 crewvane goal show ID [--json]
 crewvane goal message ID --text TEXT [--attachment PATH ...]
 crewvane goal create --title TEXT --project ID [--description TEXT]
-                     [--mode concierge|manual]
+                     [--kind delivery|discovery] [--mode concierge|manual]
+crewvane goal kind ID --kind delivery|discovery
 crewvane goal update ID [--title TEXT] [--description TEXT] [--next TEXT]
                         [--owner TEXT] [--status active|waiting] [--remind-at ISO]
 crewvane goal progress ID --summary TEXT [--next TEXT] [--owner NAME]
@@ -211,18 +218,43 @@ crewvane goal wait ID --reason TEXT --owner 外部第三方 [--remind-at ISO]
 crewvane goal decide ID --question TEXT [--next TEXT]
 crewvane goal risk ID --category CATEGORY --summary TEXT [--key KEY]
 crewvane goal ship ID --operation merge|deploy --checks passed|failed
+crewvane goal brief ID --file PATH [--expected-revision N]
+crewvane goal checkpoint ID --summary TEXT --next TEXT [--due-at ISO]
+crewvane goal verify ID --delivery ID --outcome passed|failed
+  --summary TEXT --criterion ID::passed|failed::EVIDENCE_ID
+crewvane goal boundary ID --file PATH
 crewvane goal review ID --summary TEXT [--location TEXT] [--url URL]
                         [--check NAME::COMMAND::passed|failed::NOTE]
+                        [--candidate-revision REV] [--candidate-digest SHA256]
+                        [--evidence-file PATH]
 crewvane goal accept ID [--note TEXT]
-crewvane goal complete ID --note TEXT
+crewvane goal complete ID --note "用户明确确认完成的原话"
 crewvane goal rework ID --note TEXT
 crewvane goal drop ID --reason TEXT
 crewvane goal remind ID --at ISO [--note TEXT]
 crewvane goal resolve ID --note TEXT [--outcome approved|rejected]
 crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
+crewvane autonomy set [--acceptance human-review|auto-with-verification]
+  [--paused yes|no] [--max-recovery-attempts N] [--no-progress-minutes N]
+crewvane goal autonomy pause|resume ID
+crewvane goal autonomy acceptance ID
+          --acceptance inherit|human-review|auto-with-verification
+crewvane project autonomy PROJECT_ID [--acceptance inherit|human-review|auto-with-verification]
+  [--release-on-merge never|production|unknown]
+crewvane goal boundary-resolve ID --boundary ID --outcome approved|rejected --note TEXT
+crewvane goal reopen ID --note TEXT
+crewvane release create --from GOAL_ID --environment production --revision REV
+  [--digest SHA256] [--version VERSION]
+crewvane release approve|reject ID --note TEXT
+crewvane release result ID --outcome succeeded|failed
+  --evidence TEXT | --evidence-file PATH
+crewvane bot bind --id ID --name NAME --role initiator
+  --project ID --operation OPERATION --expires-at ISO
+crewvane bot call --file ENVELOPE.json
+crewvane bot revoke ID
 ```
 
-`--json` 输出可供 Agent 读取的结构化记录；默认输出简洁中文。写操作输出更新后的目标。所有时间使用 ISO 8601；ID 和路径按服务端验证。`goal accept` 只接受已有交付记录的目标；`goal complete` 用于用户明确要求结束、但没有正式交付审查的事项。两者都只结束 Crewvane 目标，不产生 Git 或部署副作用。`rework` 将目标退回 `active` 并清除待验收注意力；`resolve` 只解决决定 / 跟进，不代替成果验收。`goal ship` 只返回策略判断，不自行执行外部动作。
+`--json` 输出可供 Agent 读取的结构化记录；默认输出简洁中文。写操作输出更新后的目标。所有时间使用 ISO 8601；ID 和路径按服务端验证。`goal accept` 只接受已有交付记录的目标，并且 core 只接受人用可信入口；`goal complete` 用于用户明确要求结束、但没有正式交付审查的非自主事项，不能绕过 `review` 验收或自主目标门禁。两者都只结束 Crewvane 目标，不产生 Git 或部署副作用。`rework` 将目标退回 `active` 并清除待验收注意力；`resolve` 只解决决定 / 跟进，不代替成果验收。`goal ship` 只返回策略判断，不自行执行外部动作。`goal autonomy acceptance`、边界决定、重新打开和发布批准只能由人操作。发布执行器通过 `release result` 报告真实结果，但成功后仍进入人工最终确认。
 
 上线策略默认 `external-approval`。`goal ship` 先要求本地检查通过：默认档的合并和部署都等待人，`auto-merge-manual-deploy` 的部署等待人，`auto` 在检查通过后放行。人可在桌面修改项目策略；受管管家 CLI 没有策略修改入口。
 
@@ -232,7 +264,7 @@ crewvane session set ID [--workspace ID] [--tab ID] [--pane ID] [--agent NAME]
 
 `ask` 与桌面单框新建共用 `goal.intake`，立即保存完整原文、附件和持久派发请求；桌面未运行或用户稍后启动时会补发。`goal message` 与 `direct` 保存原话和附件，不从正文推断批准、验收或完成；外部等待交回 Agent 时先恢复 `active`、清除旧等待与提醒，原下一步保留；`direct` 不接受 `--next`。`progress`、`wait`、`review`、`decide` 等是 Agent 或受信任适配器在明确事实发生后使用的高级状态协议。`board` 是 Herdr 插件使用的同源终端 Pane：交互模式支持选择、补充/决定、等待跟进、继续推进、人工接管、验收、退回和聚焦负责人现场，`--once` 输出静态文本供测试和诊断。
 
-管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind、session；不得 list、attention、ask、message 或跨目标访问。这个应用层闸门不冒充操作系统文件沙箱。
+管理人 CLI 时，每次通知由唯一案卷 scope 限定。受管管家 CLI 只可读取当前目标、查看精简 status，写入当前目标的 update、progress、wait、decide、risk、ship、brief、checkpoint、boundary、kind、complete、rework、drop、resolve、remind、scene-reply、session，并可启动负责人或独立复核者；不得 list、attention、ask、message、accept、autonomy、release、project policy 或跨目标访问。`complete` 在自主目标上仍受 core 门禁约束，进入 `review` 的交付不能绕过验收；独立复核者只能读取当前目标的精简 status、查看当前目标和写 `goal verify`，不能更新其他目标、冒用 `--reviewer` 身份或验收。这个应用层闸门不冒充操作系统文件沙箱。
 
 外部等待目标的桌面操作是输入一句话交给管家，并保留 `goal.remind`（稍后提醒）作为独立次级动作。交给管家的 `goal.message`、`direct` 与显式跟进会先恢复 `active` 并清除旧等待与提醒，表示管家正在处理，并不证明外部已完成；管家核查后仍需等外部时，重新执行 `wait` 并安排提醒。个人事项的普通备注保留真实外部等待与提醒。管家依据明确事实调用 `progress`、`wait`、`accept`、`complete`、`rework`、`drop`、`resolve` 或 `remind`。待发送消息持久化为带 ID 的 `dispatch` 请求，只有已送达才能标记 `sent`；失败可以重试，旧回执不能覆盖新请求。人工接管会取消派发；已移出且没有现场的个人记录允许显式恢复到暂存，不恢复任何 Agent 执行状态。
 

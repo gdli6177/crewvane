@@ -39,6 +39,10 @@ export function GoalActionDock({
 }) {
   const [decisionText, setDecisionText] = useState("");
   const [manualDecision, setManualDecision] = useState(false);
+  const releaseDecision = goal.kind === "release" && goal.attention?.kind === "decision";
+  const pendingBoundary = goal.autonomy?.boundaryChange?.status === "pending"
+    ? goal.autonomy.boundaryChange
+    : undefined;
 
   async function act(command: CrewvaneCommand, receipt?: string) {
     try {
@@ -98,6 +102,104 @@ export function GoalActionDock({
           <Button variant="ghost" onClick={() => setManualDecision(true)}>直接处理</Button>
         </div>
       </div>
+    );
+  }
+
+  if (releaseDecision) {
+    return (
+      <form
+        className="goal-decision-form"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (await act({
+            type: "release.approve",
+            goalId: goal.id,
+            note: decisionText,
+            actor: "你",
+          }, "已批准本次发布，正在交给执行器")) {
+            setDecisionText("");
+          }
+        }}
+      >
+        <div className="goal-action-copy">
+          <span>生产发布批准</span>
+          <strong>只批准当前候选与环境；执行后仍需你核对真实结果。</strong>
+        </div>
+        <textarea
+          aria-label="发布批准原话"
+          value={decisionText}
+          onChange={(event) => setDecisionText(event.target.value)}
+          placeholder="写清批准哪个候选发布到哪个环境。"
+        />
+        <div className="goal-action-buttons">
+          <Button variant="secondary" onClick={() => setReplyMode("message")}>
+            补充意见
+          </Button>
+          <Button
+            variant="danger"
+            disabled={busy || !decisionText.trim()}
+            onClick={() => void act({
+              type: "release.reject",
+              goalId: goal.id,
+              note: decisionText,
+              actor: "你",
+            }, "已拒绝并取消本次发布")}
+          >
+            拒绝发布
+          </Button>
+          <Button type="submit" variant="primary" disabled={busy || !decisionText.trim()}>
+            批准本次发布
+          </Button>
+        </div>
+      </form>
+    );
+  }
+
+  if (pendingBoundary) {
+    const resolveBoundary = (outcome: "approved" | "rejected") =>
+      act({
+        type: "goal.boundary.resolve",
+        goalId: goal.id,
+        boundaryId: pendingBoundary.id,
+        outcome,
+        note: decisionText,
+        actor: "你",
+      }, outcome === "approved" ? "已批准边界变更" : "已拒绝边界变更");
+    return (
+      <form
+        className="goal-decision-form"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (await resolveBoundary("approved")) setDecisionText("");
+        }}
+      >
+        <div className="goal-action-copy">
+          <span>边界变更待批准</span>
+          <strong>{pendingBoundary.reason}</strong>
+          <small>{pendingBoundary.recommendation}</small>
+        </div>
+        <textarea
+          aria-label="边界变更决定原话"
+          value={decisionText}
+          onChange={(event) => setDecisionText(event.target.value)}
+          placeholder="写下批准或拒绝的理由与补充边界。"
+        />
+        <div className="goal-action-buttons">
+          <Button variant="secondary" onClick={() => setReplyMode("message")}>
+            补充意见
+          </Button>
+          <Button
+            variant="danger"
+            disabled={busy || !decisionText.trim()}
+            onClick={() => void resolveBoundary("rejected")}
+          >
+            拒绝变更
+          </Button>
+          <Button type="submit" variant="primary" disabled={busy || !decisionText.trim()}>
+            批准变更
+          </Button>
+        </div>
+      </form>
     );
   }
 
@@ -166,6 +268,22 @@ export function GoalActionDock({
   }
 
   if (goal.status === "review") {
+    if (view.verificationPending) {
+      return (
+        <div className="goal-quiet-row waiting">
+          <span><Clock3 size={18} /></span>
+          <div>
+            <strong>独立复核进行中</strong>
+            <small>复核通过后会在授权内自动验收；没有任何状态变化时不需要你处理。</small>
+          </div>
+          <div className="goal-action-buttons">
+            <Button variant="secondary" onClick={() => setReplyMode("message")}>
+              问管家
+            </Button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="goal-decision-row">
         <div className="goal-action-copy">
@@ -189,6 +307,7 @@ export function GoalActionDock({
                   type: "goal.accept",
                   goalId: goal.id,
                   note: "已查看成果与检查记录，验收通过。",
+                  actor: "你",
                 },
                 "验收完成，这件事可以放下了",
               )

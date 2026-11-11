@@ -191,7 +191,7 @@ test("new goals no longer use workflow definitions", async () => {
   const { service } = await fixture();
   const item = await create(service);
   const state = await service.read();
-  assert.equal(state.version, 2);
+  assert.equal(state.version, 3);
   assert.deepEqual(state.goals[0]?.steps, []);
   assert.equal(item.mode, "concierge");
   assert.equal(state.concierge.session, "crewvane");
@@ -351,7 +351,7 @@ test("concurrent services retain both updates and state file is valid", async ()
   assert.equal(
     JSON.parse(await readFile(join(root, ".crewvane/state.json"), "utf8"))
       .version,
-    2,
+    3,
   );
 });
 test("incompatible state is archived and a recoverable v2 workspace is created", async () => {
@@ -365,7 +365,7 @@ test("incompatible state is archived and a recoverable v2 workspace is created",
   await writeFile(join(legacy, "attachments", "legacy.txt"), "preserved");
 
   const recovered = await service.read();
-  assert.equal(recovered.version, 2);
+  assert.equal(recovered.version, 3);
   assert.equal(recovered.recovery?.reason, "unsupported-version");
   assert.match(recovered.recovery?.detail ?? "", /版本 1/);
   assert.ok(recovered.recovery?.archivedPath);
@@ -378,7 +378,7 @@ test("incompatible state is archived and a recoverable v2 workspace is created",
     await readFile(join(recovered.recovery!.archivedPath, "attachments/legacy.txt"), "utf8"),
     "preserved",
   );
-  assert.equal(JSON.parse(await readFile(join(legacy, "state.json"), "utf8")).version, 2);
+  assert.equal(JSON.parse(await readFile(join(legacy, "state.json"), "utf8")).version, 3);
   assert.equal((await service.read()).recovery?.id, recovered.recovery?.id);
   assert.equal(
     (await readdir(root)).filter(name => name.startsWith(".crewvane.backup-")).length,
@@ -448,7 +448,7 @@ test("unreadable state JSON is preserved instead of blocking the workspace", asy
   );
 });
 test("future versions and malformed nested snapshots are also protected", async () => {
-  for (const [version, goals] of [[3, []], [2, [null]]] as const) {
+  for (const [version, goals] of [[4, []], [3, [null]]] as const) {
     const { root, service } = await fixture();
     await mkdir(join(root, ".crewvane"), { recursive: true });
     await writeFile(join(root, ".crewvane/state.json"), JSON.stringify({
@@ -461,13 +461,13 @@ test("future versions and malformed nested snapshots are also protected", async 
       concierge: { session: "crewvane", status: "not_ready" },
     }));
     const recovered = await service.read();
-    assert.equal(recovered.version, 2);
+    assert.equal(recovered.version, 3);
     assert.equal(recovered.recovery?.reason,
-      version === 3 ? "unsupported-version" : "invalid-state");
+      version === 4 ? "unsupported-version" : "invalid-state");
     assert.equal((await readdir(root)).filter(name => name.startsWith(".crewvane.backup-")).length, 1);
   }
 });
-test("a compatible v2 snapshot is reused without creating a backup", async () => {
+test("a compatible v3 snapshot is reused without creating a backup", async () => {
   const { root, service } = await fixture();
   const created = await create(service);
   const second = await service.read();

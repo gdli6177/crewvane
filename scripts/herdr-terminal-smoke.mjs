@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import { completeAutonomySetup } from "./lib/autonomy-setup.mjs";
 
 const exec = promisify(execFile);
 async function readSystemClipboard() {
@@ -54,6 +55,7 @@ try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await page.waitForFunction(() => !!window.crewvane);
+  await completeAutonomySetup(page);
   await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
   herdrExecutable = (await page.evaluate(() => window.crewvane.herdrStatus())).executable;
   assert.ok(herdrExecutable);
