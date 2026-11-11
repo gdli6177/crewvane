@@ -36,19 +36,34 @@ export class HerdrInstallation {
   private async installed() {
     // A file existing is not enough: wrong-architecture/stale executables must
     // not be advertised as usable. Continue looking after an invalid candidate.
-    const candidates = [...new Set([
+    const privateCandidates = [...new Set([
       this.managedPath,
       ...(this.bundledPath ? [this.bundledPath] : []),
-      ...(await this.tools.paths()).map(dir => `${dir}/herdr`),
     ])];
-    let best: { executable: string; version: string } | undefined;
-    for (const executable of candidates) {
+    const systemCandidates = (await this.tools.paths()).map(dir => `${dir}/herdr`);
+    const probe = async (executable: string) => {
       try {
         const text = (await exec(executable, ["--version"], { timeout: 10_000 })).stdout;
         const found = version(text);
-        if (found && /^herdr\s/i.test(text.trim()) && (!best || compare(found, best.version) > 0))
-          best = { executable, version: found };
+        if (found && /^herdr\s/i.test(text.trim()))
+          return { executable, version: found };
       } catch { /* try other installation locations */ }
+    };
+    let best: { executable: string; version: string } | undefined;
+    // Crewvane owns a dedicated Herdr session. Prefer its private runtime over
+    // a Homebrew/mise binary so the app and every child CLI address the same
+    // server even when the user's shell has a different Herdr installation.
+    for (const executable of privateCandidates) {
+      const candidate = await probe(executable);
+      if (candidate && (!best || compare(candidate.version, best.version) > 0))
+        best = candidate;
+    }
+    if (!best) {
+      for (const executable of systemCandidates) {
+        const candidate = await probe(executable);
+        if (candidate && (!best || compare(candidate.version, best.version) > 0))
+          best = candidate;
+      }
     }
     return best;
   }

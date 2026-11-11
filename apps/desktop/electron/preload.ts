@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("crewvane", {
   writeClipboardText: (value: string) => ipcRenderer.invoke("crewvane:clipboard-write", value),
   openTerminal: () => ipcRenderer.invoke("crewvane:open-terminal"),
   installCli: () => ipcRenderer.invoke("crewvane:install-cli"), prepareConcierge: () => ipcRenderer.invoke("crewvane:prepare-concierge"),
+  coordinatorStatus: () => ipcRenderer.invoke("crewvane:coordinator-status"),
   dispatchGoal: (goalId: string) => ipcRenderer.invoke("crewvane:dispatch-goal", goalId),
   restartGoal: (goalId: string, note: string) =>
     ipcRenderer.invoke("crewvane:restart-goal", goalId, note),

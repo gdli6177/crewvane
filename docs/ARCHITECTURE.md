@@ -77,7 +77,21 @@ Crewvane 不向 Codex 或其他 Agent CLI 注入运行时专属的 `workspace-wr
 
 Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接在管家终端追加入口时，管家先调用 `crewvane direct` 写回原始消息：带当前案卷时追加活动，明确的新事项创建新目标并标记为已经从终端送达，避免桌面再次派发同一文本。`direct --new` 成功后会把管家的案卷 scope 原子切到新目标，允许同一回合继续读取、整理和派发新案卷。桌面监听 `.crewvane/state.json`，外部 CLI 写入后立即刷新，不需要等待 10 秒巡检。这个同步依赖管家执行协议；未经 CLI 写回的终端聊天仍只是终端内容。
 
-职责边界通过初始身份说明、每次目标通知与巡检消息传达。身份初始化是一个没有案卷的独立回合，只确认长期职责后结束，不得读取或猜测目标。每次目标与巡检通知只包含一个 `case_id` 和一个目标的快照，并以案子标记包裹；同一工作区的通知由队列严格串行，必须等当前管家回合进入 `idle` / `done` / `blocked` 后再发送下一案卷，不同工作区可以并行。处理案卷的回合不得创建后台任务、循环轮询或等待负责人完成，否则旧案卷会悬挂并污染下一条通知的 scope。每次应用启动后首次恢复已有管家时，只有 Herdr 状态为 `idle` / `done` 才刷新身份说明，同一运行中按实际管家引用去重；`working` / `blocked` / `unknown` 只保留并聚焦真实现场，不发送身份 prompt。“找管家”直接打开已登记的 Tab/Pane，让用户处理阻塞 UI；已知 blocked 时派发返回可操作状态，不自动发送 Enter、Esc 或其他输入。它是 Agent 行为契约，不是操作系统权限隔离；Crewvane 无法拦截任意第三方 CLI 内部的工具调用。
+职责边界通过初始身份说明、每次目标通知与巡检消息传达。身份初始化是一个没有案卷的独立回合，只确认长期职责后结束，不得读取或猜测目标。每次目标与巡检通知只包含一个 `case_id` 和一个目标的快照，并以案子标记包裹；同一工作区的通知由持久协调收件箱严格串行，必须等当前管家回合进入 `idle` / `done` / `blocked` 后再发送下一案卷，不同工作区可以并行。处理案卷的回合不得创建后台任务、循环轮询或等待负责人完成，否则旧案卷会悬挂并污染下一条通知的 scope。每次应用启动后首次恢复已有管家时，只有 Herdr 状态为 `idle` / `done` 才刷新身份说明，同一运行中按实际管家引用去重；`working` / `blocked` / `unknown` 只保留并聚焦真实现场，不发送身份 prompt。“找管家”直接打开已登记的 Tab/Pane，让用户处理阻塞 UI；已知 blocked 时派发返回可操作状态，不自动发送 Enter、Esc 或其他输入。它是 Agent 行为契约，不是操作系统权限隔离；Crewvane 无法拦截任意第三方 CLI 内部的工具调用。
+
+### 协调收件箱
+
+`CoordinatorInbox` 把人工反馈、注意力、普通目标和后台巡检保存到工作区私有文件 `.crewvane/coordinator-inbox.json`，权限为 `0600`。排序固定为 `human > attention > normal > background`；同一目标只保留最新有效通知，新请求与旧请求同级时用新请求替换，旧请求为更高优先级时不降级。已经 `processing` 的请求不丢失，新变化在其后重新排队。
+
+`CoordinatorDispatcher` 每个工作区只有一个 drain，因此一次只有一个 Crewvane 管家回合。负责人创建、执行、交付和 Herdr 现场仍按目标并行；协调收件箱不串行化负责人。单个目标失败后继续处理其他目标。优先级只在当时可排队项之间生效，已经开始的回合不能被后来的人工消息抢占；较低优先级后台工作可以持续运行，不会饿死人工消息。Herdr 明确报 blocked 时暂停下一次自动尝试；`unconfirmed` 且现场仍 `working` 时也暂停，留到下一次轮询或新事件唤醒。收件箱只保留最近 240 条终态记录，超过容量不会删除排队或处理中项目。
+
+每条目标通知在发送前原子更新 `coordinator-scope.json`；巡检路径也执行同一步骤。请求绑定 `requestId`，旧回执不能修改新目标状态。管家单回合观察上限为 30 秒。累计完成 40 个案卷或估算约 240,000 字符后，应用只在管家 `idle` / `done` 且队列为空时关闭并重建管家上下文；所有目标事实仍在 core 状态中，轮换不会清理消息、附件、交付或注意力。
+
+应用启动时，持久化为 `queued` 的请求继续处理；`processing` 表示应用可能已把请求交给管家却不知道完整结果，因此转为 `unconfirmed` 且不自动重放。顶部状态只统计每个目标最新一条失败或未确认记录，后续成功重试会清除旧提示。详细设计与基准见 [持久协调收件箱](product/coordinator-inbox.md)。
+
+受管 Agent 的沙箱可能禁止连接 Unix Socket，因此桌面同时提供私有 Host Bridge。它只接受随机令牌和 `agent`、`pane`、`tab`、`workspace` 四类命令，并通过系统临时目录下按工作区哈希隔离的原子 request / claim / response 文件工作。目录和文件使用 owner-only 权限；socket 路径不依赖工作区深度，避免 macOS Unix Socket 约 104 字节的路径上限。请求已有 claim 但缺少 response 时表示结果未确认，恢复后只报告状态，不自动重放 Herdr 命令或 Agent prompt。Bridge 始终调用 Crewvane 选定的同一 Herdr 运行时，避免系统 PATH 中另一份 Herdr 指向不同 Session。
+
+自定义 CLI 先按 Pane 进程身份管理。若 Herdr 随后自动识别并登记该 Agent，Crewvane 会把该 Pane 上的 Agent 改名为受管负责人名称，并改用生命周期感知的 `agent prompt`；无法识别的 CLI 继续按前台 PID 校验后用 Pane 输入，两者都不会把任务发给已经退出的 shell。
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、accept、complete、rework、drop、resolve、remind 和 session；`goal list`、attention、ask、message 和跨目标读写会被拒绝。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 

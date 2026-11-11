@@ -803,7 +803,12 @@ export class WorkspaceService {
           item.mode = "concierge";
           item.dispatch = { ...item.dispatch,
             id: command.status === "pending" && !command.requestId ? newId("handoff") : item.dispatch?.id,
-            status: command.status, at, detail };
+            status: command.status, at, detail,
+            ...(command.kind ? { kind: command.kind } : {}),
+            ...(command.note !== undefined
+              ? { note: text(command.note, "派发说明", 12_000) }
+              : {}),
+          };
           if (command.status !== "failed" && item.attention?.source === "dispatch")
             item.attention = null;
           if (command.status === "failed" && !attentionRequest(item)) item.attention = {

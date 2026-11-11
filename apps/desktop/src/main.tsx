@@ -77,6 +77,7 @@ import type {
   AgentHookAdapterStatus,
   ManagedAdapterId,
 } from "../electron/agent-hook-manager.js";
+import type { CoordinatorInboxStatus } from "../electron/coordinator-inbox.js";
 import pixelMark from "../assets/brand/crewvane-mage.png";
 import "./style.css";
 const HerdrTerminal = lazy(() => import("./terminal.js").then((module) => ({ default: module.HerdrTerminal })));
@@ -160,6 +161,7 @@ function App() {
     [cli, setCli] = useState<any>(),
     [skills, setSkills] = useState<any>(),
     [agentHooks, setAgentHooks] = useState<AgentHookAdapterStatus[]>([]),
+    [coordinatorQueue, setCoordinatorQueue] = useState<CoordinatorInboxStatus>(),
     [webhook, setWebhook] = useState<WebhookSettings>({
       enabled: false,
       configured: false,
@@ -192,10 +194,26 @@ function App() {
     project = state.projects.find((item) => item.id === projectId),
     hasConciergeReference = Boolean(state.concierge.tabId || state.concierge.agent),
     conciergeAvailable = state.concierge.status === "ready" && state.concierge.live?.reachable !== false,
-    conciergeLive = state.concierge.status === "ready" ? state.concierge.live?.state : undefined,
-    conciergeStatus = state.concierge.status === "ready"
-      ? conciergeLive ? conciergeLiveLabel[conciergeLive] : "管家在线"
-      : state.concierge.status === "error" ? "管家需要恢复" : "管家已离线";
+    conciergeLive = state.concierge.status === "ready" ? state.concierge.live?.state : undefined;
+  const activeCoordinatorAlerts = (coordinatorQueue?.alerts ?? []).filter(alert =>
+    state.goals.some(goal => goal.id === alert.goalId &&
+      !["completed", "dropped"].includes(goal.status)));
+  const coordinatorFailedCount = activeCoordinatorAlerts.filter(alert =>
+    alert.status === "failed").length;
+  const coordinatorUnconfirmedCount = activeCoordinatorAlerts.filter(alert =>
+    alert.status === "unconfirmed").length;
+  const conciergeQueueAlert = coordinatorFailedCount + coordinatorUnconfirmedCount;
+  const conciergeStatus = state.concierge.status === "ready"
+    ? coordinatorQueue?.processing
+      ? `管家处理中${coordinatorQueue.queued ? ` · ${coordinatorQueue.queued} 件排队` : ""}`
+      : coordinatorQueue?.queued
+        ? `管家在线 · ${coordinatorQueue.queued} 件排队`
+        : coordinatorFailedCount
+          ? `管家在线 · ${coordinatorFailedCount} 件待重试`
+          : coordinatorUnconfirmedCount
+            ? `管家在线 · ${coordinatorUnconfirmedCount} 件待核对`
+            : conciergeLive ? conciergeLiveLabel[conciergeLive] : "管家在线"
+    : state.concierge.status === "error" ? "管家需要恢复" : "管家已离线";
   const attention = attentionGoals(state.goals),
     taskPoolCount = taskPoolGoals(state.goals, "later").length + taskPoolGoals(state.goals, "self").length,
     waiting = state.goals.filter(
@@ -226,8 +244,10 @@ function App() {
       .then((env) => {
         setWorkspace(env.workspace);
         setVersion(env.version);
-        if (env.workspace)
+        if (env.workspace) {
+          void api.coordinatorStatus().then(setCoordinatorQueue).catch(() => {});
           return api.command({ type: "snapshot" }).then(applyState);
+        }
       })
       .catch(showError);
     const unsubscribe = api.subscribe((event) => {
@@ -236,10 +256,12 @@ function App() {
       if (event.type === "refresh") {
         setTerminal(undefined);
         void api.command({ type: "snapshot" }).then(applyState).catch(showError);
+        void api.coordinatorStatus().then(setCoordinatorQueue).catch(() => {});
       }
       if (event.type === "diagnostic") setError(event.message);
       if (event.type === "herdr-status") setHerdr(event.status);
       if (event.type === "agent-runtime-status") setAgentHooks(event.status);
+      if (event.type === "coordinator-status") setCoordinatorQueue(event.status);
       if (event.type === "cli-status") setCli(event.status);
       if (event.type === "open-goal") openGoal(event.goalId);
       if (event.type === "terminal-available") {
@@ -610,7 +632,15 @@ function App() {
           <div className="top-actions">
             <button
               type="button"
-              className={`live-status live-status--${conciergeLive ?? state.concierge.status}`}
+              aria-atomic="true"
+              aria-live="polite"
+              className={`live-status live-status--${
+                coordinatorQueue?.processing
+                  ? "working"
+                  : conciergeQueueAlert
+                    ? "blocked"
+                    : conciergeLive ?? state.concierge.status
+              }`}
               disabled={!workspace || busy}
               title={hasConciergeReference ? "打开管家现场" : "准备并打开管家"}
               onClick={() => void openScene()}

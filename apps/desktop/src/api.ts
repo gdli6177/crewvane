@@ -5,6 +5,7 @@ import type { WebhookSaveInput, WebhookSettings } from "../electron/webhook-noti
 import type { SkillsInstallResult, SkillsStatus } from "../electron/skill-installer.js";
 import type { CacheCleanupResult, CacheStatus } from "../electron/cache-maintenance.js";
 import type { AgentHookAdapterStatus, ManagedAdapterId } from "../electron/agent-hook-manager.js";
+import type { CoordinatorInboxStatus } from "../electron/coordinator-inbox.js";
 export interface DesktopApi {
   command(command: CrewvaneCommand): Promise<any>;
   importAttachments(inputs: { name: string; bytes: ArrayBuffer }[]): Promise<GoalAttachment[]>;
@@ -28,6 +29,7 @@ export interface DesktopApi {
   ): Promise<AgentHookAdapterStatus>;
   readClipboardText(): Promise<string>; writeClipboardText(value: string): Promise<void>;
   installCli(): Promise<{ output: string }>; prepareConcierge(): Promise<unknown>;
+  coordinatorStatus(): Promise<CoordinatorInboxStatus>;
   dispatchGoal(goalId: string): Promise<unknown>;
   restartGoal(goalId: string, note: string): Promise<unknown>;
   terminalSnapshot(): Promise<{ session: string; data: string; running: boolean; sequence: number; cols: number; rows: number; error?: string } | undefined>;

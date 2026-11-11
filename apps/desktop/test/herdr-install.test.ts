@@ -95,6 +95,28 @@ test("an already installed latest or newer CLI is reused, invalid candidates are
   assert.equal(result.executable, external);
   assert.equal(calls.length, 1);
 }));
+test("the packaged private runtime wins over a newer shell Herdr", () => fixture(async ({ home, tools, path }) => {
+  const bundled = join(home, "app/Contents/Resources/herdr");
+  await mkdir(join(home, "app/Contents/Resources"), { recursive: true });
+  await writeFile(bundled, binary("0.9.5"), { mode: 0o700 });
+  await mkdir(join(home, ".local/bin"), { recursive: true });
+  const external = join(home, ".local/bin/herdr");
+  await writeFile(external, binary("0.10.0"), { mode: 0o700 });
+  const { calls, fetcher } = server();
+  const result = await new HerdrInstallation(
+    tools,
+    path,
+    () => {},
+    fetcher,
+    "darwin",
+    "arm64",
+    bundled,
+  ).ensure();
+  assert.equal(result.executable, bundled);
+  assert.equal(result.version, "0.9.5");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(await readFile(external), binary("0.10.0"));
+}));
 test("an older CLI gets a private latest copy without changing the user's installation", () => fixture(async ({ home, tools, path }) => {
   await mkdir(join(home, ".local/bin"), { recursive: true });
   const external = join(home, ".local/bin/herdr");

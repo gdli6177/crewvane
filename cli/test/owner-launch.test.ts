@@ -34,6 +34,7 @@ function fakeRunner(options: {
   custom?: boolean;
   stallPrompt?: boolean;
   paneShape?: boolean;
+  detectedAgent?: boolean;
 } = {}) {
   const calls: string[][] = [];
   const run: HerdrCommandRunner = async (args) => {
@@ -41,6 +42,11 @@ function fakeRunner(options: {
     const key = args.slice(0, 2).join(" ");
     if (key === "agent start" && args.includes("--help"))
       return "[possible values: omp, codex]";
+    if (key === "agent list" && options.detectedAgent)
+      return JSON.stringify({ result: { agents: [{
+        agent: "codex",
+        pane_id: "w7:p3",
+      }] } });
     if (key === "tab create")
       return JSON.stringify({
         result: {
@@ -317,6 +323,55 @@ test("launches a custom interactive CLI and records its real foreground process"
   const state = await service.read();
   assert.equal(state.goals[0]?.herdr?.transport, "pane");
   assert.equal(state.goals[0]?.herdr?.processId, 42);
+});
+
+test("names a custom CLI that Herdr detects and uses lifecycle-aware prompts", async () => {
+  const { root, service } = await fixture();
+  const goal = (await service.execute({
+    type: "goal.create",
+    input: {
+      title: "Herdr 已识别的自定义负责人",
+      projectId: "personal",
+      mode: "concierge",
+    },
+  })) as Goal;
+  await service.execute({
+    type: "agents.configure",
+    preferences: {
+      concierge: "codex",
+      owner: '"/opt/Codex Wrapper" --model local',
+    },
+  });
+  const mock = fakeRunner({ custom: true, detectedAgent: true });
+  await launchOwner(
+    service,
+    { goalId: goal.id, name: "detected-owner", task: "执行已识别任务" },
+    {
+      environment: {
+        HERDR_ENV: "1",
+        HERDR_SESSION: "crewvane-test",
+        HOME: root,
+        PATH: "/usr/bin:/bin",
+      },
+      run: mock.run,
+      wait: async () => {},
+    },
+  );
+
+  assert.deepEqual(
+    mock.calls.find(args => args[0] === "agent" && args[1] === "rename"),
+    ["agent", "rename", "w7:p3", "detected-owner"],
+  );
+  const prompt = mock.calls.find(args =>
+    args[0] === "agent" && args[1] === "prompt");
+  assert.equal(prompt?.[2], "detected-owner");
+  assert.match(prompt?.[3] ?? "", /执行已识别任务/);
+  assert.ok(prompt?.includes("--wait"));
+  assert.equal(
+    mock.calls.some(args =>
+      args[0] === "pane" && args[1] === "run" && args[3] === "执行已识别任务"),
+    false,
+  );
 });
 
 test("environment setup never sends one oversized line through a canonical terminal", async () => {
