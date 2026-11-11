@@ -69,6 +69,8 @@ CLI 只接受 PNG、JPEG、WebP、GIF；单张最多 10 MB，每个目标最多 
 
 `crewvane event herdr` 是插件内部入口，读取 Herdr 注入的 `HERDR_PLUGIN_EVENT_JSON`。它把 `pane.agent_status_changed`、`pane.exited`、`pane.closed`、`pane.moved`、`tab.closed` 和 `workspace.closed` 同步到已经登记为对应现场的目标；Pane 移动时以 Herdr 返回的新 Pane、Tab 与 Workspace ID 原子替换旧现场。无关或跨目标现场不会串案。
 
+`crewvane hook ingest --adapter codex|claude-code|cursor|qoder|omp` 是 Agent Adapter 的内部入口，由 Crewvane 安装的受管 Hook 或 OMP Extension 调用。只有负责人环境同时具备目标、attempt、Hook token 和 Agent 名称时才处理；普通 Agent 会话为 no-op。CLI 把原生事件转换为受限生命周期事件，通过本地 Socket 交给桌面；应用未运行时使用 `0600` 私有队列并在重启后补处理，失败永远不会阻止 Agent 回合。该入口不接受人工状态，也不能完成、验收或放行目标。
+
 ## 管家案卷边界
 
 管家由 Crewvane 启动时带有 `CREWVANE_COORDINATOR=1` 和当前案卷 scope。此时 CLI 只允许：

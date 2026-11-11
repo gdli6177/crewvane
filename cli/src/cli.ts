@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runBoard } from "./board.js";
 import { launchOwner } from "./owner-launch.js";
+import { ingestAgentHook } from "./hook-ingest.js";
 const exec = promisify(execFile);
 const usage = `Crewvane — 把所有事整理成清晰的下一步
 
@@ -36,6 +37,8 @@ const usage = `Crewvane — 把所有事整理成清晰的下一步
     --summary "现场已如何处理" [--json]
 
 Agent 状态协议（仅在明确事实发生后使用）：
+  crewvane hook ingest --adapter codex|claude-code|cursor|qoder|omp
+    （由受管 Agent Hook 调用；普通 Agent 会话无目标环境时 no-op）
   crewvane event herdr [--json]
   crewvane goal create --title TEXT [--project ID] [--description TEXT]
     [--mode concierge|manual]
@@ -250,6 +253,34 @@ export async function run(argv: string[], io = { out: console.log, error: consol
   try {
     const args = parse(argv), [group, action, target] = args.positional;
     if (args.has("help") || !group) { io.out(usage); return 0; }
+    if (group === "hook" && action === "ingest") {
+      try {
+        await ingestAgentHook({
+          adapter: args.one("adapter") ?? "",
+          stdin: () => new Promise((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            process.stdin.on("data", chunk => {
+              const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              size += buffer.length;
+              if (size > 512_000) {
+                reject(new Error("Hook payload too large"));
+                process.stdin.destroy();
+                return;
+              }
+              chunks.push(buffer);
+            });
+            process.stdin.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+            process.stdin.once("error", reject);
+          }),
+        });
+      } catch {
+        // Agent lifecycle observation must never make the Agent turn fail.
+      }
+      // Agent lifecycle Hooks are observational. Failure is fail-open and
+      // must never prevent the Agent from starting, running or stopping.
+      return 0;
+    }
     const service = new WorkspaceService(args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd())),
       coordinatorMode = process.env.CREWVANE_COORDINATOR === "1",
       coordinatorContext = await coordinatorCaseId(group === "direct" && args.has("new")),

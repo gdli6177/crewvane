@@ -9,4 +9,5 @@ export * from "./attachments.js";
 export * from "./agent-command.js";
 export * from "./agent-resume.js";
 export * from "./task-pool.js";
+export * from "./agent-runtime.js";
 export { readEvents, withLock } from "./storage.js";

@@ -73,6 +73,10 @@ import {
 } from "./ui/index.js";
 import type { BadgeTone } from "./ui/index.js";
 import type { WebhookSettings } from "../electron/webhook-notifications.js";
+import type {
+  AgentHookAdapterStatus,
+  ManagedAdapterId,
+} from "../electron/agent-hook-manager.js";
 import pixelMark from "../assets/brand/crewvane-mage.png";
 import "./style.css";
 const HerdrTerminal = lazy(() => import("./terminal.js").then((module) => ({ default: module.HerdrTerminal })));
@@ -155,6 +159,7 @@ function App() {
     [herdr, setHerdr] = useState<any>(),
     [cli, setCli] = useState<any>(),
     [skills, setSkills] = useState<any>(),
+    [agentHooks, setAgentHooks] = useState<AgentHookAdapterStatus[]>([]),
     [webhook, setWebhook] = useState<WebhookSettings>({
       enabled: false,
       configured: false,
@@ -234,6 +239,7 @@ function App() {
       }
       if (event.type === "diagnostic") setError(event.message);
       if (event.type === "herdr-status") setHerdr(event.status);
+      if (event.type === "agent-runtime-status") setAgentHooks(event.status);
       if (event.type === "cli-status") setCli(event.status);
       if (event.type === "open-goal") openGoal(event.goalId);
       if (event.type === "terminal-available") {
@@ -255,6 +261,7 @@ function App() {
       void api.herdrStatus().then(setHerdr).catch(showError);
       void api.cliStatus().then(setCli).catch(showError);
       void api.skillsStatus().then(setSkills).catch(showError);
+      void api.agentRuntimeStatus().then(setAgentHooks).catch(showError);
       void api.agentChoices().then(setAgentOptions).catch(showError);
       void api.webhookSettings().then(setWebhook).catch(showError);
     }
@@ -973,6 +980,9 @@ function App() {
               herdr={herdr}
               cli={cli}
               skills={skills}
+              agentHooks={agentHooks}
+              onAgentHooksChange={setAgentHooks}
+              notify={notify}
               agentOptions={agentOptions}
               webhook={webhook}
               saveAgents={async (preferences: AgentPreferences) => {
@@ -1001,9 +1011,13 @@ function App() {
                       ? `Skills 已更新；${result.errors.length} 个目录因已有同名技能而跳过。`
                       : "Crewvane Skills 已安装到检测到的 Agent。");
                   }
+                  if (action === "agent-hooks") {
+                    setAgentHooks(await api.agentRuntimeStatus());
+                  }
                   if (action === "concierge") await api.prepareConcierge();
                   setHerdr(await api.herdrStatus());
                   setAgentOptions(await api.agentChoices());
+                  setAgentHooks(await api.agentRuntimeStatus());
                   setCli(await api.cliStatus());
                   applyState(await api.command({ type: "snapshot" }));
                   const ready = await api.herdrStatus();
@@ -1542,6 +1556,9 @@ function Settings({
   herdr,
   cli,
   skills,
+  agentHooks,
+  onAgentHooksChange,
+  notify,
   theme,
   setTheme,
   onAction,
@@ -1579,7 +1596,7 @@ function Settings({
         <div>
           <span className="eyebrow">YOUR MIND, CLEARER</span>
           <h1>只设置必要的。</h1>
-          <p>没有运行时管理。你已有的工具，在 Herdr 里自然相遇。</p>
+          <p>接管 Agent 的生命周期观测，同时保留你已有的 CLI、模型与工作方式。</p>
         </div>
       </section>
       <div className="settings-groups">
@@ -1612,7 +1629,7 @@ function Settings({
             <span>02</span>
             <div>
               <h2 id="settings-tools-heading">连接与环境</h2>
-              <p>管理 Herdr、命令行入口、Agent Skill 和工作区位置。</p>
+              <p>管理 Herdr、Agent 生命周期事件、命令行入口、Skill 和工作区位置。</p>
             </div>
           </header>
           <div className="ui-settings-grid">
@@ -1679,6 +1696,12 @@ function Settings({
             </Button>
           </div>
         </SettingsSection>
+        <AgentRuntimeSettings
+          adapters={agentHooks ?? []}
+          busy={busy}
+          onChange={onAgentHooksChange}
+          notify={notify}
+        />
         <SettingsSection
           icon={<Zap />}
           title="Crewvane 命令行"
@@ -2004,6 +2027,142 @@ function GovernanceEditor({
           );
         })}
       </div>
+    </SettingsSection>
+  );
+}
+function AgentRuntimeSettings({
+  adapters,
+  busy,
+  onChange,
+  notify,
+}: {
+  adapters: AgentHookAdapterStatus[];
+  busy: boolean;
+  onChange: (adapters: AgentHookAdapterStatus[]) => void;
+  notify: (text: string) => void;
+}) {
+  const [working, setWorking] = useState<ManagedAdapterId>();
+  const [failure, setFailure] = useState("");
+  const labels = {
+    "not-installed": "未检测",
+    installed: "已接入",
+    "waiting-trust": "等待信任",
+    disabled: "已停用",
+    unsupported: "版本不支持",
+    conflict: "配置冲突",
+    error: "接入失败",
+  } as const;
+  async function operate(
+    id: ManagedAdapterId,
+    action: "install" | "disable" | "uninstall" | "refresh",
+  ) {
+    setWorking(id);
+    setFailure("");
+    try {
+      await api.configureAgentRuntime(id, action);
+      const next = await api.agentRuntimeStatus();
+      onChange(next);
+      notify(action === "disable"
+        ? "已停用 Hook；该 Agent 仍可使用 Herdr 与巡检状态。"
+        : action === "uninstall"
+          ? "已移除 Crewvane 管理的 Hook，其他用户 Hook 保持不变。"
+          : "Agent Hook 已更新。");
+    } catch (reason) {
+      setFailure(String(reason).replace(
+        /^Error invoking remote method '[^']+': (?:Error: )?/,
+        "",
+      ));
+    } finally {
+      setWorking(undefined);
+    }
+  }
+  return (
+    <SettingsSection
+      wide
+      icon={<Bot />}
+      title="Agent 接入"
+      description="检测到兼容 Agent 后自动安装受管 Hook。Hook 只证明会话、回合和阻塞等生命周期；目标完成、外部等待、找人决定和验收仍由 Crewvane CLI 结构化写回。"
+    >
+      <div className="agent-runtime-list">
+        {adapters.length ? adapters.map(adapter => {
+          const active = ["installed", "waiting-trust"].includes(adapter.status);
+          return (
+            <div className="agent-runtime-row" key={adapter.id}>
+              <div className="agent-runtime-identity">
+                <span className="agent-runtime-mark"><Bot size={15} aria-hidden="true" /></span>
+                <div>
+                  <strong>{adapter.label}</strong>
+                  <small
+                    title={adapter.configPath}
+                  >
+                    {adapter.version ? `${adapter.version} · ` : ""}
+                    {adapter.status === "not-installed" && adapter.command
+                      ? "未接入" : labels[adapter.status]}
+                  </small>
+                </div>
+              </div>
+              <div className="agent-runtime-detail">
+                <span>
+                  {adapter.status === "waiting-trust"
+                    ? "在 Codex 中打开 /hooks 并信任 Crewvane 的条目后开始生效。"
+                    : adapter.status === "not-installed"
+                      ? adapter.command ? "已检测到本机 CLI，可安装受管 Hook。" : "未检测到本机 CLI。"
+                      : adapter.status === "installed"
+                        ? "生命周期事件已就绪。"
+                        : adapter.detail || "可安装受管生命周期 Hook。"}
+                </span>
+                <small
+                  className="agent-runtime-events"
+                  title={adapter.events.join(" · ")}
+                >
+                  {adapter.events.join(" · ")}
+                </small>
+                {adapter.lastEventAt && <small>最近事件：{time(adapter.lastEventAt)}</small>}
+              </div>
+              <div className="agent-runtime-actions">
+                {active ? (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || Boolean(working)}
+                      onClick={() => void operate(adapter.id, "disable")}
+                    >
+                      停用
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || Boolean(working)}
+                      onClick={() => void operate(adapter.id, "uninstall")}
+                    >
+                      卸载
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy || Boolean(working) || !adapter.command}
+                    onClick={() => void operate(
+                      adapter.id,
+                      ["conflict", "error", "unsupported"].includes(adapter.status)
+                        ? "refresh" : "install",
+                    )}
+                  >
+                    {working === adapter.id ? "处理中…"
+                      : adapter.status === "disabled" ? "恢复接入" : "检查并接入"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        }) : <LoadingState label="正在检测本机 Agent…" />}
+      </div>
+      {failure && <p className="ui-field__error" role="alert">{failure}</p>}
+      <p className="ui-field__hint">
+        Codex 官方 Hook 需要你在其 Hook 审查界面信任后才会运行。Crewvane 不会绕过信任流程，也不会覆盖你已有 Hooks 或 OMP extensions。
+      </p>
     </SettingsSection>
   );
 }

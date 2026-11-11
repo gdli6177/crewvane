@@ -22,6 +22,7 @@ function reasonLabel(reason: WatchdogReason) {
   return reason === "unassigned" ? "尚未登记独立负责人现场"
     : reason === "blocked" ? "负责人正在等待输入或批准"
       : reason === "missing" ? "负责人现场不可达"
+        : reason === "protocol_missing" ? "负责人已停止但未按协议写回结果"
         : reason === "settled" ? "负责人已停止输出但尚未写回结果"
           : "目标 30 分钟没有写回实质进展";
 }
@@ -34,16 +35,28 @@ function record(goal: Goal, at: string, text: string) {
 }
 function reasonFor(goal: Goal, now: number): WatchdogReason | undefined {
   const age = now - Date.parse(progressAt(goal));
+  if (goal.agentRuntime?.receipt?.status === "protocol_missing")
+    return "protocol_missing";
   if (!goal.herdr?.paneId && !goal.herdr?.agent && goal.dispatch?.status !== "pending" &&
     now - Date.parse(goal.dispatch?.at ?? goal.createdAt) >= OWNER_START_GRACE) return "unassigned";
+  if (goal.agentRuntime?.lastEventType === "agent.blocked" &&
+    !(goal.live?.state === "working" &&
+      Date.parse(goal.live.checkedAt) > Date.parse(goal.agentRuntime.lastEventAt)) &&
+    now - Date.parse(goal.agentRuntime.lastEventAt) >= 5_000) return "blocked";
   if (goal.live?.state === "blocked") return "blocked";
   if (goal.live?.reachable === false && age >= OWNER_START_GRACE) return "missing";
+  const receipt = goal.agentRuntime?.receipt;
+  if (age >= STALE_AFTER) return "stale";
+  if (receipt && ["waiting", "reminding", "reminded"].includes(receipt.status) &&
+    now <= Date.parse(receipt.inspectAt) + 15_000)
+    return;
   // A quiet terminal may hold an unrecorded result or an unrecognized input
   // prompt. It is not evidence of delivery, failure or completion. Ask the
   // concierge to reconcile the actual owner, rather than guessing from text.
   if (goal.live?.reachable === true && ["idle", "done"].includes(goal.live.state) &&
-    now - Date.parse(goal.live.checkedAt) >= SETTLED_AFTER) return "settled";
-  if (age >= STALE_AFTER) return "stale";
+    now - Date.parse(goal.live.checkedAt) >= SETTLED_AFTER &&
+    receipt?.status !== "written")
+    return "settled";
 }
 export function inspectWatchdog(goals: Goal[], at: string): WatchdogRequest[] {
   const now = Date.parse(at), requests: WatchdogRequest[] = [];

@@ -32,7 +32,7 @@ It works with interactive CLI agents that can already run in a terminal, keeps
 the terminal sessions in Herdr, and adds the durable workflow around them:
 state, ownership, waiting, evidence, approvals, and recovery.
 
-> **Status:** early preview (`0.6.x`). The desktop UI is currently in Simplified
+> **Status:** early preview (`0.7.x`). The desktop UI is currently in Simplified
 > Chinese and the packaged app supports macOS on Apple Silicon.
 
 ## Why Crewvane
@@ -99,6 +99,21 @@ Herdr provides the persistent terminal sessions and agent communication layer.
 The desktop app includes its own verified Herdr binary, and the optional Herdr
 plugin adds attention, one-line goal intake, and concierge shortcuts inside
 Herdr.
+
+### Instant lifecycle, explicit decisions
+
+Crewvane detects Codex, Claude Code, Cursor, Qoder, and OMP and installs managed
+lifecycle Hooks where the Agent provides an official integration. Events travel
+through a private local socket, or a bounded offline queue when the app is not
+running. User-owned Hooks and OMP extensions are preserved, and Codex still asks
+you to trust new Hooks through its own `/hooks` review.
+
+A Hook proves only that a session or turn changed state. It never marks a goal
+complete, waiting on a third party, ready for review, or safe for an external
+action. Those facts still come from Crewvane's semantic CLI. After a turn stops,
+Crewvane waits briefly for that write-back, reminds the same owner once if it is
+missing, and then asks the concierge to reconcile. Herdr and the watchdog remain
+the fallback when an Agent has no compatible Hook.
 
 ### Evidence before completion
 
@@ -197,8 +212,9 @@ is damaged, redownload the latest release instead of bypassing Gatekeeper.
 ### First run
 
 1. Choose a dedicated workspace directory.
-2. Open **Settings**, install the Crewvane CLI and optional Crewvane Skills, then
-   configure the agent launch command for the concierge, owner, or worker.
+2. Open **Settings**, install the Crewvane CLI and optional Crewvane Skills,
+   review **Agent access**, then configure the agent launch command for the
+   concierge, owner, or worker.
 3. Prepare the concierge.
 4. Click **New goal**, describe the work in natural language, and attach
    screenshots if useful.
@@ -288,7 +304,8 @@ packaged app with an interactive custom CLI. It does not require a model login.
   packaged yet.
 - The desktop UI is currently Simplified Chinese.
 - This is an early preview; storage and CLI details may evolve.
-- Crewvane is not a model gateway, scheduler, runtime manager, or hosted service.
+- Crewvane is not a model gateway, scheduler, or hosted service. Its Agent Hooks
+  observe lifecycle events without replacing each Agent's runtime.
 - Crewvane coordinates goals and agent sites but does not sandbox third-party
   agents. Agent file access and network permissions remain governed by that CLI.
 - Herdr is required for agent execution. Planning, records, reminders, and manual

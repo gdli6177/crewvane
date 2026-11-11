@@ -3,6 +3,80 @@ export type IntakeHandling = "concierge" | "later" | "self";
 export type AttentionKind = "decision" | "review" | "follow_up" | "intervention";
 export type LiveState = "working" | "idle" | "done" | "blocked" | "unknown";
 export type ShipPolicy = "auto" | "auto-merge-manual-deploy" | "external-approval";
+export type AgentRuntimeAdapterId =
+  | "codex"
+  | "claude-code"
+  | "cursor"
+  | "qoder"
+  | "omp"
+  | "custom";
+export type AgentRuntimeEventType =
+  | "session.started"
+  | "turn.started"
+  | "turn.settled"
+  | "turn.interrupted"
+  | "agent.blocked"
+  | "agent.response"
+  | "session.ended";
+export interface AgentRuntimeText {
+  text: string;
+  sha256: string;
+  truncated: boolean;
+}
+export interface AgentAttempt {
+  goalId: string;
+  attemptId: string;
+  agent: string;
+  adapter: AgentRuntimeAdapterId;
+  startedAt: string;
+  currentTurnId?: string;
+  scene?: HerdrReference;
+}
+export interface AgentRuntimeReceipt {
+  turnId: string;
+  status: "waiting" | "reminding" | "reminded" | "written" | "protocol_missing" | "cancelled";
+  settledAt: string;
+  remindAt: string;
+  inspectAt: string;
+  remindedAt?: string;
+  reminderTurnId?: string;
+  reminderError?: string;
+  missingAt?: string;
+  detail?: string;
+}
+export interface AgentRuntimeState {
+  attempt: AgentAttempt;
+  capabilities: AgentRuntimeEventType[];
+  lastEventId: string;
+  lastEventType: AgentRuntimeEventType;
+  lastEventAt: string;
+  lastSequence: number;
+  hookTokenHash: string;
+  currentTurnId?: string;
+  lastPrompt?: AgentRuntimeText;
+  currentTurnStartedAt?: string;
+  lastReply?: AgentRuntimeText;
+  lastSemanticWriteAt?: string;
+  lastSemanticWriteTurnId?: string;
+  receipt?: AgentRuntimeReceipt;
+  seenEventIds?: string[];
+  seenTurnIds?: string[];
+}
+export interface AgentRuntimeEventV1 {
+  version: "v1";
+  eventId: string;
+  sequence: number;
+  at: string;
+  source: "hook";
+  agent: string;
+  adapter: AgentRuntimeAdapterId;
+  goalId: string;
+  attemptId: string;
+  type: AgentRuntimeEventType;
+  turnId?: string;
+  content?: AgentRuntimeText;
+  notificationType?: string;
+}
 export interface ProjectPolicy {
   shipPolicy: ShipPolicy;
   approvers: string[];
@@ -64,7 +138,7 @@ export interface LiveEventReferenceUpdate {
   paneId?: string; tabId?: string; workspaceId?: string; agent?: string;
 }
 export interface LivePresence { state: LiveState; checkedAt: string; reachable?: boolean }
-export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned" | "settled";
+export type WatchdogReason = "blocked" | "missing" | "stale" | "unassigned" | "settled" | "protocol_missing";
 export interface WatchdogState {
   reason: WatchdogReason; basis: string; detectedAt: string;
   attemptedAt?: string; contactedAt?: string; escalatedAt?: string; lastError?: string;
@@ -88,6 +162,7 @@ export interface Goal {
   recovery?: "idle" | "done" | "blocked";
   sceneVisit?: SceneVisit;
   watchdog?: WatchdogState;
+  agentRuntime?: AgentRuntimeState;
   attachments?: GoalAttachment[];
   activities: Activity[]; createdAt: string; updatedAt: string;
 }
@@ -162,6 +237,23 @@ type WorkspaceCommand =
   | { type: "concierge.status"; status: "not_ready" | "ready" | "error"; detail?: string; reference?: HerdrReference; live?: LivePresence | null }
   | { type: "live.sync"; presences: Record<string, LivePresence> }
   | { type: "live.event"; target: LiveEventTarget; presence: LivePresence; reference?: LiveEventReferenceUpdate }
+  | {
+      type: "agent.runtime.register";
+      goalId: string;
+      attempt: AgentAttempt;
+      hookTokenHash: string;
+      capabilities: AgentRuntimeEventType[];
+    }
+  | { type: "agent.runtime.event"; event: AgentRuntimeEventV1 }
+  | {
+      type: "agent.runtime.receipt";
+      goalId: string;
+      attemptId: string;
+      turnId: string;
+      stage: "reminding" | "reminded" | "protocol_missing" | "cancelled";
+      at: string;
+      detail?: string;
+    }
   | { type: "watchdog.inspect"; at: string }
   | { type: "watchdog.report"; goalId: string; at: string; basis: string; outcome: "contacted" | "failed"; detail?: string }
   | { type: "notification.sent"; goalId: string; kind: AttentionKind; at: string };

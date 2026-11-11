@@ -69,6 +69,7 @@ Crewvane 先保证一个可靠内核，再把会变化的部分放到稳定的�
 | 桌面消息框、CLI `goal message`、Herdr `direct` | 原始文本、附件、待派发请求 | 根据正文改状态、下一步、授权或验收 |
 | 管家 / 负责人协议 | 明确的 progress、wait、delivery、decision 事实 | 跳过目标作用域和核心校验直接写文件 |
 | 人的明确操作 | accept、rework、resolve、resume 等 | 把“看过了”“可以”自动解释成操作 |
+| Agent Runtime Adapter | 受限 attempt/turn 事件、Hook 安装状态与错误 | 把 Stop、工具调用或回复文本解释成完成、等待、决定或验收 |
 | Herdr、通知、自动化插件 | 已声明能力范围内的命令和事件 | 直接修改 state、伪造完成或绕过决定账本 |
 
 一次状态变更的顺序固定为：校验调用来源与目标 → 检查当前状态和业务前置条件 → 获取工作区锁 → 修改内存状态 → 原子持久化 → 追加事件 → 发布新快照 → 异步执行可选副作用。副作用失败不回滚已经成立的用户事实；例如通知失败保留目标并产生可重试错误，旧请求回执不能覆盖新状态。
@@ -123,6 +124,7 @@ interface AdapterManifest {
 | `execution` | 把已校验任务交给负责人或工人 | 目标保留，显示派发失败和重试 |
 | `terminal` | 展示或聚焦真实终端现场 | 不影响目标事实，可改用外部 Herdr |
 | `agent-discovery` | 发现本机 CLI 与启动能力 | 只影响新建会话，不影响已有目标 |
+| `agent-runtime` | 通过官方 Hook / Extension 观测会话、turn、阻塞与 Agent 回复 | 回退到 Herdr 生命周期与 Watchdog；不能改变业务状态 |
 | `notification` | 系统通知、Webhook、提醒、摘要 | 进入注意力但不丢目标；失败渠道独立退避 |
 | `automation` | 定时跟进、巡检、外部触发 | 核心手动操作仍可用 |
 | `view` | 目标详情增强、项目面板、业务预览 | 回退到标准原文视图 |

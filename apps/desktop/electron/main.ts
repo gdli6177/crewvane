@@ -37,6 +37,11 @@ import { WebhookNotifier, type WebhookSaveInput } from "./webhook-notifications.
 import { CrewvaneSkillInstaller } from "./skill-installer.js";
 import { launchOwner, type HerdrCommandRunner } from "../../../cli/src/owner-launch.js";
 import { clearManagedCaches, inspectManagedCaches } from "./cache-maintenance.js";
+import {
+  AgentHookManager,
+  type ManagedAdapterId,
+} from "./agent-hook-manager.js";
+import { AgentRuntimeBroker } from "./agent-runtime-broker.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -54,7 +59,7 @@ const terminals = new TerminalHost((event) => {
   if (window && !window.isDestroyed()) window.webContents.send("crewvane:event", event);
 }, process.env);
 const rendererURL = pathToFileURL(join(here, "renderer/index.html")).href;
-let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller;
+let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller, agentHookManager: AgentHookManager, agentRuntimeBroker: AgentRuntimeBroker;
 function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ?? `crewvane-${createHash("sha256").update(path ?? "").digest("hex").slice(0, 10)}`; }
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
@@ -119,6 +124,66 @@ function broadcastHerdrStatus(status: HerdrStatus) {
     },
   });
 }
+type AgentHookStatuses = Awaited<ReturnType<AgentHookManager["status"]>>;
+function broadcastAgentRuntimeStatus(
+  statuses: AgentHookStatuses | Promise<AgentHookStatuses> = agentHookManager?.status() ?? [],
+) {
+  void Promise.resolve(statuses).then(status => {
+    if (window && !window.isDestroyed())
+      window.webContents.send("crewvane:event", {
+        type: "agent-runtime-status",
+        status,
+      });
+  }).catch(() => {});
+}
+async function agentRuntimeStatus() {
+  if (!agentHookManager) return [];
+  return agentHookManager.status();
+}
+async function configureAgentRuntime(id: string, action: string) {
+  if (!agentHookManager || !["codex", "claude-code", "cursor", "qoder", "omp"].includes(id))
+    throw new Error("无效的 Agent Runtime Adapter");
+  let result;
+  if (action === "install") result = await agentHookManager.install(id as ManagedAdapterId);
+  else if (action === "disable") result = await agentHookManager.disable(id as ManagedAdapterId);
+  else if (action === "uninstall") result = await agentHookManager.uninstall(id as ManagedAdapterId);
+  else if (action === "refresh") result = (await agentHookManager.autoInstallDetected())
+    .find(item => item.id === id);
+  else throw new Error("无效的 Agent 接入操作");
+  await agentRuntimeBroker?.refresh();
+  const statuses = await agentHookManager.status();
+  broadcastAgentRuntimeStatus(statuses);
+  return result ?? statuses.find(item => item.id === id);
+}
+async function installDetectedAgentHooks() {
+  if (!agentHookManager) return [];
+  const statuses = await agentHookManager.autoInstallDetected();
+  broadcastAgentRuntimeStatus(statuses);
+  return statuses;
+}
+async function remindRuntimeOwner(goal: Goal, prompt: string) {
+  const herdr = await herdrStatus();
+  if (!herdr.executable || !goal.herdr) throw new Error("负责人现场暂不可达");
+  await client(herdr.executable, activeService().root)
+    .notifyOwnerReminder(goal.herdr, prompt);
+}
+async function notifyRuntimeConcierge(goal: Goal, detail: string) {
+  const target = activeService(), state = await target.read(), herdr = await herdrStatus();
+  if (!herdr.executable || state.concierge.status !== "ready")
+    throw new Error("管家尚未连接");
+  await coordinate(target, async () => {
+    await writeCoordinatorScope(
+      target.root,
+      goal.id,
+      `protocol-missing-${Date.now()}`,
+    );
+    await client(herdr.executable!, target.root).notifyWatchdog(
+      state.concierge,
+      [{ goalId: goal.id, reason: "protocol_missing" }],
+    );
+  });
+  void detail;
+}
 async function executable(command: string, cwd?: string) {
   return tools.find(command, cwd);
 }
@@ -146,28 +211,34 @@ function prepareHerdrCompanions(workspace = root) {
   return companionPreparation;
 }
 async function prepareHerdrCompanionsNow(workspace = root) {
-  const status = await herdrInstallation.ensure();
-  if (!status.executable) return status;
   try {
     await installCli(workspace);
+    await installDetectedAgentHooks();
   } catch (error) {
-    herdrPlugin.fail(`Crewvane CLI 准备失败：${error instanceof Error ? error.message : String(error)}`);
-    throw error;
+    if (window && !window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `Crewvane CLI 或 Agent Hook 准备暂未完成：${error instanceof Error ? error.message : String(error)}`,
+    });
   }
+  const status = await herdrInstallation.ensure();
+  if (!status.executable) return status;
   const plugin = await herdrPlugin.ensure(status.executable);
   broadcastHerdrStatus(status);
   if (plugin.phase === "error") throw new Error(plugin.detail);
   return status;
 }
 async function installHerdr() {
-  const status = await herdrInstallation.ensure(true);
-  if (!status.executable) return status;
   try {
     await installCli();
+    await installDetectedAgentHooks();
   } catch (error) {
-    herdrPlugin.fail(`Crewvane CLI 准备失败：${error instanceof Error ? error.message : String(error)}`);
-    throw error;
+    if (window && !window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `Crewvane CLI 或 Agent Hook 准备暂未完成：${error instanceof Error ? error.message : String(error)}`,
+    });
   }
+  const status = await herdrInstallation.ensure(true);
+  if (!status.executable) return status;
   await herdrPlugin.ensure(status.executable);
   broadcastHerdrStatus(status);
   return status;
@@ -250,6 +321,7 @@ async function restartEndedGoal(target: WorkspaceService, goalId: string, note: 
   if (item.herdr)
     await closeEndedGoalSession(target, item.id);
   const restarted = await target.execute({ type: "goal.restart", goalId, note }) as Goal;
+  void agentRuntimeBroker?.refresh(goalId).catch(() => {});
   void dispatchGoal(target, goalId).catch(error => {
     if (root === target.root && !window.isDestroyed()) window.webContents.send("crewvane:event", {
       type: "diagnostic",
@@ -542,6 +614,7 @@ function watchWorkspaceState(target: WorkspaceService) {
       if (root !== target.root || service !== target) return;
       try {
         const state = await target.read();
+        await agentRuntimeBroker?.refresh();
         deliverGoalStatusChanges(target, state, target.root);
         broadcastSnapshot(state, target.root);
       } catch (error) {
@@ -595,10 +668,17 @@ async function deliverAttentionNotifications(target: WorkspaceService, state: Aw
 async function openWorkspace(path: string) {
   const canonical = await realpath(path); if (!(await stat(canonical)).isDirectory()) throw new Error("工作区必须是目录");
   const opened = new WorkspaceService(canonical), initialState = await opened.read();
+  await agentRuntimeBroker?.stop().catch(() => {});
   deliverGoalStatusChanges(opened, initialState, canonical);
   root = canonical; service = opened;
   lastSnapshotSignature = undefined;
   watchWorkspaceState(opened);
+  await agentRuntimeBroker.start().catch(error => {
+    if (!window.isDestroyed()) window.webContents.send("crewvane:event", {
+      type: "diagnostic",
+      message: `Agent Hook 本地网关暂未启动：${error instanceof Error ? error.message : String(error)}`,
+    });
+  });
   void opened.execute({ type: "attachments.cleanup", retentionDays: 30 }).catch(error => {
     if (!window.isDestroyed()) window.webContents.send("crewvane:event", {
       type: "diagnostic",
@@ -731,6 +811,30 @@ app.whenReady().then(async () => {
   const managedBin = join(app.getPath("userData"), "runtime");
   tools = new Executables(app.getPath("home"), managedBin, process.env,
     !!process.env.CREWVANE_TEST_HOME && process.env.CREWVANE_TEST_ISOLATE_TOOLS === "1");
+  agentHookManager = new AgentHookManager({
+    home: app.getPath("home"),
+    userData: app.getPath("userData"),
+    commandPath: command => tools.find(command),
+  });
+  agentRuntimeBroker = new AgentRuntimeBroker({
+    service: () => service,
+    workspace: () => root,
+    hooks: agentHookManager,
+    remindOwner: remindRuntimeOwner,
+    notifyConcierge: notifyRuntimeConcierge,
+    onChanged: goal => {
+      void activeService().read().then(state => {
+        deliverGoalStatusChanges(activeService(), state, root!);
+        broadcastSnapshot(state, root!);
+      }).catch(() => {});
+      void agentRuntimeStatus().then(broadcastAgentRuntimeStatus);
+      if (goal && root && window && !window.isDestroyed()) {
+        // The event-driven state update above is authoritative; this refresh
+        // only nudges the renderer when the filesystem watcher is delayed.
+        window.webContents.send("crewvane:event", { type: "refresh", workspace: root });
+      }
+    },
+  });
   herdrInstallation = new HerdrInstallation(
     tools,
     join(managedBin, "herdr"),
@@ -812,6 +916,11 @@ app.whenReady().then(async () => {
         await closeEndedGoalSession(target, item.id);
     }
     const result = await target.execute(command);
+    void agentRuntimeBroker?.refresh(
+      "goalId" in command && typeof command.goalId === "string"
+        ? command.goalId
+        : undefined,
+    ).catch(() => {});
     if (command.type === "scene.visit" && command.retry) {
       const status = await herdrStatus();
       if (status.executable) void reconcileSceneReply(target, command.goalId, client(status.executable, target.root)).catch(() => {});
@@ -884,6 +993,16 @@ app.whenReady().then(async () => {
   ipcMain.handle("crewvane:install-cli", (event) => { sender(event); return installCli(); });
   ipcMain.handle("crewvane:skills-status", (event) => { sender(event); return skillsStatus(); });
   ipcMain.handle("crewvane:install-skills", (event) => { sender(event); return installSkills(); });
+  ipcMain.handle("crewvane:agent-runtime-status", (event) => {
+    sender(event);
+    return agentRuntimeStatus();
+  });
+  ipcMain.handle("crewvane:agent-runtime-action", async (event, id: unknown, action: unknown) => {
+    sender(event);
+    if (typeof id !== "string" || typeof action !== "string")
+      throw new Error("Agent 接入参数无效");
+    return configureAgentRuntime(id, action);
+  });
   ipcMain.handle("crewvane:clipboard-read", (event) => { sender(event); return clipboard.readText(); });
   ipcMain.handle("crewvane:clipboard-write", (event, value: unknown) => {
     sender(event);
@@ -956,5 +1075,6 @@ app.on("before-quit", () => {
   quitting = true;
   stateWatcher?.close();
   if (stateRefreshTimer) clearTimeout(stateRefreshTimer);
+  void agentRuntimeBroker?.stop().catch(() => {});
   terminals.dispose();
 });
