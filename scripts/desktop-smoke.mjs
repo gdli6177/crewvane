@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { WorkspaceService } from "../packages/core/src/index.ts";
 import { ingestAgentHook } from "../cli/src/hook-ingest.ts";
+import { verifyReconciliationPresentation } from "./lib/reconciliation-presentation.mjs";
 const run = promisify(execFile);
 const appVersion = JSON.parse(
   await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
@@ -1017,6 +1018,7 @@ try {
     .find(item => item.id === sceneFixture.id)?.agentRuntime?.lastSequence).toBe(1);
   await expect(page.locator(".terminal-panel")).toBeVisible();
   await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
+  await verifyReconciliationPresentation(page, home, "desktop");
   assert.deepEqual(errors, []);
   assert.equal(await page.evaluate(() => typeof window.require), "undefined");
   console.log(
@@ -1051,6 +1053,7 @@ try {
         "reply images are imported into the message activity",
         "background attention changes preserve an in-progress message and its reply images",
         "a live Hook event refreshes goal data without closing the visible terminal",
+        "written idle turns use the same truthful status in goal rows and details; human requests still enter attention",
         "complete goal conversation and substantive owner answer remain visible",
         "external terminal feedback refreshes the app without replaying a handoff",
         "waiting chat handoff and snooze work without ambiguous state buttons",

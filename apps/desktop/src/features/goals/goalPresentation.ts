@@ -94,12 +94,12 @@ export function sceneSyncPresentation(goal: Goal) {
   if (reply) return {
     label: goal.dispatch?.status === "failed" ? "现场答复同步失败"
       : unconfirmed ? "答复已提交，等待现场确认"
-        : delivered ? "答复已送达，事项尚未解决" : "现场已答复，管家核对中",
+        : delivered ? "答复已送达，事项尚未解决" : "现场答复待同步",
     detail: goal.dispatch?.status === "failed"
       ? goal.dispatch.detail || "答复已保存，恢复管家连接后可以重试。"
       : unconfirmed ? goal.dispatch?.detail || "答复已写入本机；Herdr 状态确认超时，先以现场为准。"
         : delivered ? "管家已收到你的原话；当前问题尚未明确解决，可以继续在现场沟通或补充说明。"
-      : "你的原话已保存；管家正在核对这条事项，无需重复答复。",
+      : "你的原话已保存，正在等待交给管家；原事项在明确处理前仍会保留，无需重复答复。",
     quote: reply.quote,
     summary: reply.summary,
     retry: goal.dispatch?.status === "failed" ? "dispatch" as const : undefined,
@@ -122,16 +122,63 @@ export function sceneSyncPresentation(goal: Goal) {
   };
 }
 
-export function goalProgressLabel(goal: Goal) {
-  if (goal.watchdog?.contactedAt) return "管家核对中";
-  if (goal.recovery) return "待管家核对";
+function executionPresentation(goal: Goal): Pick<GoalPresentation, "label" | "detail" | "tone"> {
+  if (goal.watchdog?.contactedAt) return {
+    label: "已请管家核对", tone: "waiting",
+    detail: "核对请求已送达管家，尚未收到新的处理结果；这不表示管家此刻仍在执行。",
+  };
   const receipt = goal.agentRuntime?.receipt?.status;
-  if (receipt === "protocol_missing") return "待管家核对";
-  if (receipt === "waiting") return "检查回执";
-  if (receipt === "reminding" || receipt === "reminded") return "已提醒写回";
-  if (goal.live?.state === "working") return "执行中";
-  if (goal.live?.state === "idle" || goal.live?.state === "done") return "待管家核对";
-  return goal.herdr ? "待管家跟进" : "待分配";
+  if (goal.watchdog || receipt === "protocol_missing") return {
+    label: "待管家核对", tone: "waiting",
+    detail: "已产生核对请求，正在等待交给管家；现在不需要你处理。",
+  };
+  if (receipt === "waiting") return {
+    label: "检查回执", tone: "running",
+    detail: "负责人本轮已结束，正在等待结构化回执；现在不需要你处理。",
+  };
+  if (receipt === "reminding" || receipt === "reminded") return {
+    label: "已提醒写回", tone: "running",
+    detail: "正在处理本轮唯一一次写回提醒；仍缺少结果时再交给管家核对。",
+  };
+  if (goal.live?.reachable === false) return {
+    label: "现场连接中断", tone: "waiting",
+    detail: "当前无法连接负责人现场；这不等于目标完成或失败。",
+  };
+  if (goal.live?.state === "working") return {
+    label: "执行中", tone: "running",
+    detail: "负责人正在执行；暂时不需要你处理。",
+  };
+  if (goal.live?.state === "blocked") return {
+    label: "现场待输入", tone: "waiting",
+    detail: "负责人现场正在等待输入或批准；需要人介入时会明确进入注意力。",
+  };
+  if (receipt === "written") return {
+    label: "本轮已回报", tone: "running",
+    detail: "负责人已写回本轮进展；目标仍按记录的下一步跟进，不代表整个目标已完成。",
+  };
+  if (goal.live?.state === "idle" || goal.live?.state === "done") return {
+    label: "负责人空闲", tone: "waiting",
+    detail: "负责人当前空闲；以已记录的进展和下一步为准，空闲本身不代表目标完成。",
+  };
+  return goal.herdr ? {
+    label: "待管家跟进", tone: "running",
+    detail: "现场已登记，尚未确认负责人当前是否执行；以记录的下一步为准。",
+  } : {
+    label: "待分配", tone: "running",
+    detail: "目标已保存，管家会安排负责人并写回下一步。",
+  };
+}
+
+export function goalProgressLabel(goal: Goal) {
+  if (goal.status === "completed" || goal.status === "dropped") return statusLabel[goal.status];
+  const kind = attentionKind(goal);
+  if (kind === "decision") return "等你决定";
+  if (kind === "review") return "等你验收";
+  if (kind === "follow_up") return "到点跟进";
+  if (kind === "intervention") return goal.herdr ? "需要你排障" : "需要你处理";
+  if (goal.status === "waiting") return "等待外部";
+  if (goal.mode === "manual") return "由你处理";
+  return executionPresentation(goal).label;
 }
 
 export interface GoalSceneContext {
@@ -246,16 +293,6 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       ? `正在等待 ${goal.waitingFor}，现在需要确认是否已有结果。`
       : goal.next || "到了你设定的提醒时间。";
     nextLabel = "下一步";
-  } else if (goal.watchdog?.contactedAt) {
-    tone = "waiting";
-    label = "管家核对中";
-    detail = "负责人已停止输出且结果尚未写回。已请管家核对现场，现在不需要你处理。";
-    nextLabel = "核对后的安排";
-  } else if (goal.recovery) {
-    tone = "waiting";
-    label = "待管家核对";
-    detail = "负责人已停止输出，结果尚未写回。已安排管家核对；现在不需要你处理。";
-    nextLabel = "核对后的安排";
   } else if (goal.status === "waiting") {
     tone = "waiting";
     label = "等待外部";
@@ -264,24 +301,15 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       : "正在等待外部结果；现在不需要你处理。";
     brief = goal.next;
     nextLabel = "恢复推进的条件";
-  } else if (["waiting", "reminding", "reminded", "protocol_missing"]
-    .includes(goal.agentRuntime?.receipt?.status ?? "")) {
-    label = goalProgressLabel(goal);
-    detail = goal.agentRuntime?.receipt?.status === "waiting"
-      ? "负责人本轮已结束，正在等待结构化回执；现在不需要你处理。"
-      : "已向负责人提醒一次写回；仍缺少结果时由管家核对，现在不需要你处理。";
-  } else if (goal.live) {
-    label = goalProgressLabel(goal);
-    detail = goal.live.state === "working"
-      ? "负责人正在执行；暂时不需要你处理。"
-      : goal.live.reachable === false
-        ? "现场连接已中断，管家会核查并写回下一步。"
-        : "负责人当前没有继续输出，结果尚未写回；管家会核对，不会把空闲当作完成。";
   } else if (goal.mode === "manual") {
     tone = "running";
     label = "由你处理";
     detail = "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。";
     brief = goal.next;
+  } else {
+    ({ tone, label, detail } = executionPresentation(goal));
+    if (goal.watchdog || goal.agentRuntime?.receipt?.status === "protocol_missing")
+      nextLabel = "核对后的安排";
   }
   if (sceneSync) {
     label = sceneSync.label;

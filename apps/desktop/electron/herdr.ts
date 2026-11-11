@@ -80,6 +80,14 @@ export function terminalPrompt(text: string) {
     return [...lines, current].join("\n");
   }).join("\n");
 }
+function receiptMarker(text: string) {
+  const marker = text.match(/\[CREWVANE_RECEIPT:[0-9a-f]{24}\]/)?.[0];
+  if (!marker)
+    throw new Error("回执提醒缺少唯一标记，未发送到负责人现场");
+  if (text.includes("\n"))
+    throw new Error("回执提醒必须是单个逻辑行，未发送到负责人现场");
+  return marker;
+}
 function agents(raw: string): any[] {
   const data = payload(raw),
     list = data.result?.agents ?? data.agents ?? data;
@@ -539,7 +547,57 @@ ${ownerSceneReplyInstructions(goal.id)}
   async notifyOwnerReminder(reference: HerdrReference, text: string) {
     if (!reference.agent && reference.transport !== "pane")
       throw new Error("负责人现场不可达，无法发送回执提醒");
-    return this.prompt(reference, text, false);
+    const marker = receiptMarker(text);
+    if (reference.transport === "pane") {
+      await this.prompt(reference, text, false);
+      return {
+        status: "unconfirmed" as const,
+        detail: "自定义 Agent 已通过 Pane 收到回执提醒；需等待 Agent Hook 确认实际开始处理，现在交给管家核对。",
+      };
+    }
+    if (!reference.paneId) throw new Error("负责人现场缺少 Pane，无法确认回执提醒输入");
+    const current = agents(await this.runner.run(["agent", "list"])).find(agent =>
+      agent?.name === reference.agent && agent?.pane_id === reference.paneId,
+    );
+    if (!current) throw new Error("负责人 Agent 已退出或 Pane 已更换，回执提醒未发送");
+    const state = liveState(current);
+    if (state === "working") return {
+      status: "unconfirmed" as const,
+      detail: "负责人仍在工作，未插入自动回执提醒；交给管家核对当前回合。",
+    };
+    if (state === "blocked") return {
+      status: "unconfirmed" as const,
+      detail: "负责人正在等待交互输入，未插入自动回执提醒；交给管家核对。",
+    };
+    if (!["idle", "done"].includes(state)) return {
+      status: "unconfirmed" as const,
+      detail: `负责人当前状态为 ${state}，未确认可安全插入回执提醒；交给管家核对。`,
+    };
+    if (current.interactive_ready === false) return {
+      status: "unconfirmed" as const,
+      detail: "负责人终端尚未恢复输入，未发送自动回执提醒；交给管家核对。",
+    };
+    try {
+      await this.runner.run([
+        "agent", "prompt", reference.agent!, text,
+        "--wait", "--until", "working", "--timeout", "5000",
+      ], 7_000);
+    } catch (error) {
+      if (/\bagent_blocked\b/.test(String(error)))
+        return {
+          status: "unconfirmed" as const,
+          detail: "负责人正在等待输入，没有插入自动回执提醒；交给管家核对。",
+        };
+      if (/\bagent_prompt_stalled\b/.test(String(error)) ||
+        /\btimed out waiting for agent status\b/.test(String(error)) ||
+        /"code"\s*:\s*"timeout"/.test(String(error)))
+        return {
+          status: "unconfirmed" as const,
+          detail: "Herdr 已提交回执提醒，但 5 秒内未确认负责人开始处理；为避免重复，已交给管家核对。",
+        };
+      throw error;
+    }
+    return { status: "sent" as const };
   }
   async presences(
     goals: { id: string; herdr?: HerdrReference }[],

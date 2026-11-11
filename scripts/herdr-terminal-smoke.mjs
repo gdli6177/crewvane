@@ -135,19 +135,44 @@ try {
   const terminalData = await page.evaluate(async () =>
     (await window.crewvane.terminalSnapshot())?.data ?? "");
   assert.ok(terminalData.includes("\x1b]52;c;"), "Herdr copy-on-select must exercise OSC 52");
-  // Paste a shell command from the real system clipboard, then submit it with
-  // Enter. The file is authoritative evidence that the PTY received it.
-  const pasteMarker = `paste_${randomUUID().replaceAll("-", "")}`;
-  const pasteFile = join(workspace, "terminal-paste.txt");
-  const pasteCommand = `/usr/bin/printf '%s' '${pasteMarker}' > '${pasteFile}'`;
-  await writeSystemClipboard(pasteCommand);
-  await textarea.focus();
-  await page.keyboard.press("Meta+V");
-  await page.waitForFunction((value) =>
-    document.querySelector(".xterm-accessibility-tree")?.textContent?.includes(value),
-  pasteMarker, { timeout: 10_000 });
-  await page.keyboard.press("Enter");
-  await expect.poll(() => readFile(pasteFile, "utf8").catch(() => ""), { timeout: 30_000 }).toBe(pasteMarker);
+  // Exercise the macOS shortcut, direct Control+V, a browser paste event and
+  // the real Electron menu/Paste path. The last two protect against xterm,
+  // Chromium or application-menu event ordering swallowing the shortcut.
+  for (const [mode, shortcut] of [
+    ["meta-shortcut", "Meta+V"],
+    ["control-shortcut", "Control+V"],
+    ["paste-event", undefined],
+    ["native-menu-paste", undefined],
+  ]) {
+    const pasteMarker = `paste_${randomUUID().replaceAll("-", "")}`;
+    const pasteFile = join(workspace, `terminal-paste-${pasteMarker}.txt`);
+    const pasteCommand = `/usr/bin/printf '%s' '${pasteMarker}' > '${pasteFile}'`;
+    await writeSystemClipboard(pasteCommand);
+    await textarea.focus();
+    if (mode === "paste-event") {
+      await page.evaluate((value) => {
+        const target = document.querySelector(".xterm-helper-textarea");
+        if (!target) throw new Error("xterm paste target is missing");
+        const transfer = new DataTransfer();
+        transfer.setData("text/plain", value);
+        target.dispatchEvent(new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: transfer,
+        }));
+      }, pasteCommand);
+    } else if (mode === "native-menu-paste") {
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.webContents.paste());
+    } else {
+      await page.keyboard.press(shortcut);
+    }
+    await page.waitForFunction((value) =>
+      document.querySelector(".xterm-accessibility-tree")?.textContent?.includes(value),
+    pasteMarker, { timeout: 10_000 });
+    await page.keyboard.press("Enter");
+    await expect.poll(() => readFile(pasteFile, "utf8").catch(() => ""), { timeout: 30_000 }).toBe(pasteMarker);
+  }
   await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
   assert.equal(await page.locator(".terminal-panel").isVisible(), false);
   await page.locator(".top-actions").getByRole("button", { name: "新目标", exact: true }).click();
@@ -231,7 +256,7 @@ try {
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, home, session, checks: [
     "real Herdr TUI in embedded PTY", "real shell input/output", "collapse/reopen reuses PID",
-    "system clipboard paste through the PTY",
+    "system clipboard paste through Meta+V, Control+V, browser paste and native Electron menu paste",
     "ordinary Herdr drag copies through OSC 52 to the macOS clipboard",
     "fullscreen toggle reuses the terminal process", "dark/light", "reject unrelated terminal input",
     "scene context opens goal record and returns to attention without losing the terminal",

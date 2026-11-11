@@ -189,7 +189,8 @@ test("a settled turn reminds once, then hands protocol_missing to the concierge"
   });
   assert.equal(reminders.length, 1);
   assert.match(reminders[0]!, /crewvane goal progress/);
-  assert.match(reminders[0]!, /每个回合最多一次/);
+  assert.match(reminders[0]!, /不要只回复/);
+  assert.doesNotMatch(reminders[0]!, /\n/);
   assert.equal(clock.scheduled.filter(item => !item.cleared && !item.fired).length, 1);
   assert.equal(clock.scheduled.at(-1)?.delay, 30_000);
 
@@ -361,6 +362,50 @@ test("a reminder transport failure still advances to protocol_missing once", asy
       "protocol_missing",
     );
   });
+  await broker.stop();
+});
+
+test("an unconfirmed reminder is handed to the concierge without claiming delivery", async () => {
+  const base = Date.now(), { root, service, goalId } = await fixture(base);
+  const clock = fakeTimers();
+  clock.setNow(base);
+  let concierge = 0;
+  for (const [sequence, type] of [[1, "turn.started"], [2, "turn.settled"]] as const)
+    await service.execute({
+      type: "agent.runtime.event",
+      event: event(goalId, sequence, type, {
+        at: new Date(base + sequence * 100).toISOString(), turnId: "turn-unconfirmed",
+      }),
+    });
+  const broker = new AgentRuntimeBroker({
+    service: () => service,
+    workspace: () => root,
+    remindOwner: async () => ({
+      status: "unconfirmed", detail: "提醒已提交但没有观察到 working",
+    }),
+    notifyConcierge: async () => { concierge += 1; },
+    now: () => clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  await broker.recover();
+  await clock.fireFirstOpen();
+  await eventually(async () => {
+    const receipt = (await service.read()).goals[0]!.agentRuntime?.receipt;
+    assert.equal(receipt?.status, "reminded");
+    assert.match(receipt?.reminderError ?? "", /没有观察到 working/);
+  });
+  await clock.fireFirstOpen();
+  await eventually(async () => {
+    assert.equal(concierge, 1);
+    assert.equal(
+      (await service.read()).goals[0]!.agentRuntime?.receipt?.status,
+      "protocol_missing",
+    );
+  });
+  assert.equal(clock.scheduled.filter(item =>
+    item.fired && !item.cleared).length, 2,
+  "one reminder and one escalation only");
   await broker.stop();
 });
 

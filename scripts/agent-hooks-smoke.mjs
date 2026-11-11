@@ -11,6 +11,9 @@ import { join, resolve } from "node:path";
 import { WorkspaceService } from "../packages/core/src/index.ts";
 
 const exec = promisify(execFile);
+const { version: appVersion } = JSON.parse(
+  await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
+);
 const trial = await realpath(await mkdtemp("/tmp/cv-hooks-"));
 const home = join(trial, "home"), workspace = join(trial, "workspace");
 const userData = join(trial, "userData"), codexHome = join(home, ".codex");
@@ -140,6 +143,11 @@ try {
   await page.screenshot({ path: join(trial, "runtime-light.png"), animations: "disabled" });
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await herdr(["agent", "wait", "owner-hooks", "--timeout", "120000"], 130_000);
+  await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
+  await page.getByRole("button", { name: "全部目标", exact: true }).click();
+  await expect(page.locator(".goal-row").filter({ hasText: "真实 Codex Hook 验收" })
+    .getByText("本轮已回报", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await page.screenshot({ path: join(trial, "real-written-idle-list.png"), animations: "disabled" });
   await app.close(); app = undefined;
   await herdr(["agent", "prompt", "owner-hooks",
     `现场补充验收：仅运行 ${cli} goal progress ${goalId} --root ${workspace} --summary "应用关闭期间已真实写回" --next "恢复应用检查离线事件"，然后回复 CV_HOOK_OFFLINE_DONE。`,
@@ -195,7 +203,7 @@ try {
   await service.execute({ type: "goal.complete", goalId: benchmark.id, note: "性能夹具已验证" });
   assert.deepEqual(errors, []);
   await writeFile(join(trial, "verified-summary.json"), JSON.stringify({
-    version: "0.7.0", goalId, attempt, adapterStatus: adapterStatus.status,
+    version: appVersion, goalId, attempt, adapterStatus: adapterStatus.status,
     reminders: (await goal()).activities.filter(item => item.kind === "session" &&
       item.text.includes("已发送一次结构化回执提醒")).length,
     receipt: (await goal()).agentRuntime.receipt?.status,

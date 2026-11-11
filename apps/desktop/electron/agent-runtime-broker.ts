@@ -20,7 +20,9 @@ export interface AgentRuntimeBrokerOptions {
   workspace: () => string | undefined;
   hooks?: AgentHookManager;
   onChanged?: (goal?: Goal) => void;
-  remindOwner: (goal: Goal, prompt: string) => Promise<void>;
+  remindOwner: (goal: Goal, prompt: string) => Promise<
+    { status?: "sent" | "unconfirmed"; detail?: string } | void
+  >;
   notifyConcierge: (goal: Goal, detail: string) => Promise<void>;
   now?: () => number;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
@@ -46,17 +48,11 @@ function tokenMatches(token: string, expected: string) {
 }
 
 function runtimeReminder(goal: Goal, runtime: AgentRuntimeState) {
-  return [
-    agentReceiptMarker(runtime.attempt.attemptId, runtime.receipt!.turnId),
-    `你刚结束目标 ${goal.id} 的一次回合，但 Crewvane 没有收到结构化写回。`,
-    "请先核对本轮实际结果，并用当前目标 ID 选择一种命令结束：",
-    `- 有实际进展或咨询答案：crewvane goal progress ${goal.id} --summary "<完整结果>" --next "<下一步>"`,
-    `- 需要用户决定：crewvane goal decide ${goal.id} --question "<具体问题>"`,
-    `- 只在等待人工或 Agent 之外的具名第三方：crewvane goal wait ${goal.id} --reason "<原因>" --owner "<第三方>"`,
-    `- 有真实可验收成果：crewvane goal review ${goal.id} --summary "<成果>" --check "名称::实际检查::passed::结果"`,
-    "不要仅回复已处理，也不要把普通内部协调记为外部等待。此提醒每个回合最多一次。",
-    `当前 attempt：${runtime.attempt.attemptId}；turn：${runtime.receipt?.turnId ?? runtime.currentTurnId ?? "unknown"}`,
-  ].join("\n");
+  // Agent TUI prompt submission is reliable for one logical line. Multi-line
+  // reminders can remain visible in the input box without being submitted, so
+  // keep the transport prompt compact and leave full protocol guidance in the
+  // owner's persistent Crewvane instructions.
+  return `${agentReceiptMarker(runtime.attempt.attemptId, runtime.receipt!.turnId)} Crewvane 未收到目标 ${goal.id} 本回合的结构化写回。请立即用 crewvane goal show ${goal.id} --json 核对实际结果，并按事实运行 crewvane goal progress/decide/wait/review 之一；不要只回复，也不要把这条系统提醒记成用户新目标。`;
 }
 
 export class AgentRuntimeBroker {
@@ -277,7 +273,13 @@ export class AgentRuntimeBroker {
     }
     let reminderError: string | undefined;
     try {
-      await this.options.remindOwner(current.goal, runtimeReminder(current.goal, current.runtime));
+      const delivery = await this.options.remindOwner(
+        current.goal,
+        runtimeReminder(current.goal, current.runtime),
+      );
+      if (delivery?.status === "unconfirmed")
+        reminderError = delivery.detail ||
+          "Herdr 已接收提醒，但没有确认 Agent 开始处理；为避免重复，已交给管家核对。";
     } catch (error) {
       reminderError = (error instanceof Error ? error.message : String(error))
         .slice(0, 1000);

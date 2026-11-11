@@ -164,7 +164,7 @@ async function installDetectedAgentHooks() {
 async function remindRuntimeOwner(goal: Goal, prompt: string) {
   const herdr = await herdrStatus();
   if (!herdr.executable || !goal.herdr) throw new Error("负责人现场暂不可达");
-  await client(herdr.executable, activeService().root)
+  return client(herdr.executable, activeService().root)
     .notifyOwnerReminder(goal.herdr, prompt);
 }
 async function notifyRuntimeConcierge(goal: Goal, detail: string) {

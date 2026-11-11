@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HerdrClient, terminalPrompt, type HerdrRunner } from "../electron/herdr.ts";
+import { agentReceiptMarker } from "../../../packages/core/src/index.ts";
 
 function fake(responses: Record<string, string>) {
   const calls: string[][] = [];
@@ -88,6 +89,95 @@ test("inspects and opens a persisted blocked concierge without prompting or chan
   assert.equal(site?.live.reachable, true);
   await client.open(site!.reference);
   assert.deepEqual(mock.calls.at(-1), ["tab", "focus", "w7:t1"]);
+  assert.equal(mock.calls.some(args => args[0] === "agent" && args[1] === "prompt"), false);
+});
+
+test("owner reminders wait for the exact live Agent to start processing", async () => {
+  const reference = {
+    session: "crewvane-test", paneId: "w1:p2",
+    agent: "owner-a", workspaceId: "w1", tabId: "w1:t2",
+  };
+  const marker = agentReceiptMarker("attempt-test", "turn-test");
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner-a", agent_status: "done", interactive_ready: true,
+      workspace_id: "w1", tab_id: "w1:t2", pane_id: "w1:p2",
+    }] } }),
+    "agent prompt": "{}",
+  });
+  const result = await new HerdrClient(mock.runner, "crewvane-test")
+    .notifyOwnerReminder(reference, `${marker} 请补交结构化回执`);
+  assert.deepEqual(result, { status: "sent" });
+  assert.deepEqual(mock.calls.at(-1), [
+    "agent", "prompt", "owner-a", `${marker} 请补交结构化回执`,
+    "--wait", "--until", "working", "--timeout", "5000",
+  ]);
+});
+
+test("a working or replaced owner Pane never receives a competing reminder", async () => {
+  const reference = {
+    session: "crewvane-test", paneId: "w1:p2", agent: "owner-a",
+    workspaceId: "w1", tabId: "w1:t2",
+  };
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner-a", agent_status: "working", interactive_ready: true,
+      workspace_id: "w1", tab_id: "w1:t2", pane_id: "w1:p2",
+    }] } }),
+  });
+  const result = await new HerdrClient(mock.runner, "crewvane-test")
+    .notifyOwnerReminder(
+      reference,
+      `${agentReceiptMarker("attempt-test", "turn-test")} 请补交结构化回执`,
+    );
+  assert.equal(result.status, "unconfirmed");
+  assert.match(result.detail ?? "", /仍在工作/);
+  assert.equal(mock.calls.some(args => args[0] === "pane" && args[1] === "run"), false);
+});
+
+test("a reminder whose Agent never starts is unconfirmed and is not replayed", async () => {
+  const reference = {
+    session: "crewvane-test", paneId: "w1:p2", agent: "owner-a",
+    workspaceId: "w1", tabId: "w1:t2",
+  };
+  const marker = agentReceiptMarker("attempt-test", "turn-test");
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner-a", agent_status: "idle", interactive_ready: true,
+      workspace_id: "w1", tab_id: "w1:t2", pane_id: "w1:p2",
+    }] } }),
+    "agent prompt": "!Herdr agent prompt：agent_prompt_stalled",
+  });
+  const result = await new HerdrClient(mock.runner, "crewvane-test")
+    .notifyOwnerReminder(reference, `${marker} 请补交结构化回执`);
+  assert.equal(result.status, "unconfirmed");
+  assert.match(result.detail ?? "", /未确认负责人开始处理/);
+  assert.equal(
+    mock.calls.filter(args => args[0] === "agent" && args[1] === "prompt").length,
+    1,
+  );
+});
+
+test("unknown owner state and multi-line reminders never inject terminal input", async () => {
+  const reference = {
+    session: "crewvane-test", paneId: "w1:p2", agent: "owner-a",
+    workspaceId: "w1", tabId: "w1:t2",
+  };
+  const marker = agentReceiptMarker("attempt-test", "turn-test");
+  const mock = fake({
+    "agent list": JSON.stringify({ result: { agents: [{
+      name: "owner-a", agent_status: "unknown", interactive_ready: true,
+      workspace_id: "w1", tab_id: "w1:t2", pane_id: "w1:p2",
+    }] } }),
+  });
+  const client = new HerdrClient(mock.runner, "crewvane-test");
+  const unknown = await client.notifyOwnerReminder(reference, `${marker} 请补交结构化回执`);
+  assert.equal(unknown.status, "unconfirmed");
+  assert.match(unknown.detail ?? "", /状态为 unknown/);
+  await assert.rejects(
+    client.notifyOwnerReminder(reference, `${marker}\n请补交结构化回执`),
+    /单个逻辑行/,
+  );
   assert.equal(mock.calls.some(args => args[0] === "agent" && args[1] === "prompt"), false);
 });
 
