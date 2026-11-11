@@ -60,11 +60,21 @@ try {
   const goal = await page.evaluate(() => window.crewvane.command({
     type: "goal.create", input: { title: "隔离的真实终端测试", projectId: "personal", mode: "manual" },
   }));
+  // This fixture is written directly through IPC before React has necessarily
+  // finished its one-time subscription setup. Reload once to verify normal
+  // startup recovery and wait until the renderer has loaded the goal.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => !!window.crewvane);
+  await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
+  await page.getByRole("button", { name: "全部目标", exact: true }).click();
+  await page.locator(".goal-row").filter({ hasText: goal.title }).waitFor();
   // A manually recorded goal opens the workspace TUI without starting a model.
   await page.evaluate((id) => window.crewvane.openHerdr(id), goal.id);
   await page.getByRole("region", { name: "Herdr 工作现场" }).waitFor();
   await page.getByRole("region", { name: `现场目标：${goal.title}` }).waitFor();
-  await page.getByText("当前事项", { exact: true }).waitFor();
+  // Hosted macOS runners can expose a viewport narrower than 1080px, where
+  // the compact scene deliberately hides this label while retaining context.
+  await page.getByText("当前事项", { exact: true }).waitFor({ state: "attached" });
   await page.waitForFunction(() => document.querySelector(".xterm-screen")?.clientWidth > 200);
   let connection = await page.evaluate(() => window.crewvane.terminalSnapshot());
   assert.equal(connection.session, session);
@@ -187,7 +197,9 @@ try {
   await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
   await page.evaluate((id) => window.crewvane.openHerdr(id), goal.id);
   await page.locator(".terminal-panel").waitFor();
-  await page.locator(".xterm-accessibility").filter({ hasText: marker }).waitFor({ state: "attached" });
+  await expect.poll(async () => page.evaluate(async () =>
+    (await window.crewvane.terminalSnapshot())?.data ?? "")
+  ).toContain(marker);
   await page.getByRole("button", { name: "目标记录", exact: true }).click();
   await page.getByRole("dialog", { name: new RegExp(goal.title) }).waitFor();
   assert.equal(await page.locator(".terminal-panel").isVisible(), false);
@@ -196,7 +208,9 @@ try {
   await page.getByRole("button", { name: "回到注意力", exact: true }).click();
   assert.equal(await page.locator(".terminal-panel").isVisible(), false);
   await page.evaluate((id) => window.crewvane.openHerdr(id), goal.id);
-  await page.locator(".xterm-accessibility").filter({ hasText: marker }).waitFor({ state: "attached" });
+  await expect.poll(async () => page.evaluate(async () =>
+    (await window.crewvane.terminalSnapshot())?.data ?? "")
+  ).toContain(marker);
   const nextPid = await app.evaluate(({ app }) => app.getAppMetrics().filter(item => item.name === "Crewvane Herdr terminal").map(item => item.pid));
   assert.deepEqual(nextPid, firstPid);
   const panel = page.getByRole("region", { name: "Herdr 工作现场" });

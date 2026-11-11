@@ -24,7 +24,12 @@ import { AgentHookManager } from "../electron/agent-hook-manager.js";
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root =>
-    rm(root, { recursive: true, force: true })));
+    rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    })));
 });
 
 const token = "runtime-secret", hash = createHash("sha256").update(token).digest("hex");
