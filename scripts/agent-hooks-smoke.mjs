@@ -184,7 +184,10 @@ try {
     return performance.now() - began;
   }
   const hookTimings = [];
+  await page.evaluate(() => window.crewvane.openTerminal());
+  await expect(page.locator(".terminal-panel")).toBeVisible();
   for (let sample = 0; sample < 25; sample++) hookTimings.push(await invokeHook());
+  await expect(page.locator(".terminal-panel")).toBeVisible();
   const hookP95 = hookTimings.sort((a, b) => a - b)[Math.ceil(hookTimings.length * .95) - 1];
   const offlineHookMs = await invokeHook({ CREWVANE_HOOK_SOCKET: join(trial, "offline.sock") });
   assert.ok(hookP95 < 250, `packaged Hook p95 ${hookP95.toFixed(1)} ms`);

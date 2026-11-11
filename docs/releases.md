@@ -18,6 +18,9 @@ GitHub 自动生成的 **Source code** 是源码，不是可安装应用。安�
 
 0.7.0 增加 Agent Runtime Adapter 与受管生命周期 Hook。Crewvane 会检测 Codex、Claude Code、Cursor、Qoder 和 OMP；前四类使用各 Agent 官方 Hook 配置，OMP 使用官方 Extension API。安装只增删 Crewvane 管理的条目，已有用户 Hook、其他 OMP extension 和未知配置结构保持不变。Codex 仍要求在 `/hooks` 中信任新条目；设置中的“等待信任”不会被 Crewvane 绕过。
 
+修复后台派发或注意力更新清空正在编辑的留言和图片的问题；批准、拒绝等操作仍按独立注意力事项隔离。
+即时 Hook 更新保留已打开的内嵌现场，避免生命周期事件重置终端面板。
+
 Hook 通过短路径本地 Socket 立即送入目标；应用未运行时，事件写入 `.crewvane/runtime/spool/`，使用 `0600` 权限、最多 200 条并保留 7 天。重复事件、旧 attempt、旧 turn 和乱序事件不会覆盖当前状态。Hook 只记录会话、回合、阻塞和可用的 Agent 回复，不保存工具参数、工具输出或终端全文；Prompt 与回复最多保存 12,000 个 Unicode 字符，并保存原文 SHA-256。
 
 目标回合结束后 5 秒仍未收到 `progress`、`wait`、`review`、`decide` 等结构化写回时，Crewvane 向同一负责人提醒一次；再等 30 秒仍缺失时只交给管家核对，不会直接把 Stop 显示成完成、失败或人工待办。每个 turn 最多提醒一次。Herdr 生命周期和原有 90 秒巡检继续作为 Hook 不可用时的兜底。

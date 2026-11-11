@@ -1,11 +1,13 @@
 import { _electron as electron, expect } from "@playwright/test";
-import { access, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { WorkspaceService } from "../packages/core/src/index.ts";
+import { ingestAgentHook } from "../cli/src/hook-ingest.ts";
 const run = promisify(execFile);
 const appVersion = JSON.parse(
   await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
@@ -269,6 +271,21 @@ try {
     buffer: png,
   });
   await page.getByText("reply.png", { exact: true }).waitFor();
+  // A background dispatch result can arrive while the person is composing.
+  // Exercise both removal and replacement of the current attention request.
+  await page.evaluate(id => window.crewvane.command({
+    type: "goal.dispatch", goalId: id, status: "sent",
+  }), goalId);
+  await page.locator(".goal-focus").getByText("联系管家失败", { exact: true })
+    .waitFor({ state: "detached" });
+  await page.evaluate(id => window.crewvane.command({
+    type: "goal.dispatch", goalId: id, status: "failed", detail: "后台确认管家不可达",
+  }), goalId);
+  await page.locator(".goal-focus").getByText("联系管家失败", { exact: true }).waitFor();
+  await expect(page.getByLabel("发给管家的消息", { exact: true }))
+    .toHaveValue("请保留现有验收记录，不要扩大范围。");
+  await page.getByText("reply.png", { exact: true }).waitFor();
+  await expect(page.getByRole("button", { name: "交给管家", exact: true })).toBeEnabled();
   await page.waitForTimeout(250);
   await page.screenshot({ path: join(home, "goal-reply-dark.png"), animations: "disabled" });
   const nextBeforeFeedback = (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).goals[0].next;
@@ -967,6 +984,39 @@ try {
     result.issues.map(issue => ({ ...issue, size: result.size, theme: result.theme, screen: result.screen })));
   assert.deepEqual(uiIssues, [],
     `UI audit found contrast, clipping, accessibility, or target-size issues: ${JSON.stringify(uiIssues.slice(0, 20))}`);
+  // Use a terminal-open UI fixture while the suite deliberately has no Herdr.
+  // The event itself travels through the real Hook Socket and persistent Broker.
+  const sceneFixture = await service.execute({
+    type: "goal.direct", text: "Hook 更新不应关闭正在使用的现场",
+  });
+  const hookToken = "isolated-desktop-hook-token", attemptId = "attempt_live_scene";
+  await service.execute({
+    type: "agent.runtime.register", goalId: sceneFixture.id,
+    attempt: { goalId: sceneFixture.id, attemptId, agent: "owner-live-scene",
+      adapter: "codex", startedAt: new Date().toISOString() },
+    hookTokenHash: createHash("sha256").update(hookToken).digest("hex"),
+    capabilities: ["session.started"],
+  });
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.send("crewvane:event", {
+      type: "terminal-open", session: "cv-live-scene-fixture", title: "隔离现场",
+    }));
+  await expect(page.locator(".terminal-panel")).toBeVisible();
+  const ingested = await ingestAgentHook({
+    adapter: "codex",
+    environment: {
+      CREWVANE_WORKSPACE: await realpath(workspace), CREWVANE_GOAL_ID: sceneFixture.id,
+      CREWVANE_ATTEMPT_ID: attemptId, CREWVANE_AGENT_NAME: "owner-live-scene",
+      CREWVANE_HOOK_TOKEN: hookToken,
+    },
+    stdin: async () => JSON.stringify({ hook_event_name: "SessionStart" }),
+  });
+  assert.equal(ingested.accepted, true);
+  assert.equal(ingested.reason, undefined, "Hook must reach the live Broker instead of spooling");
+  await expect.poll(async () => (await service.read()).goals
+    .find(item => item.id === sceneFixture.id)?.agentRuntime?.lastSequence).toBe(1);
+  await expect(page.locator(".terminal-panel")).toBeVisible();
+  await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
   assert.deepEqual(errors, []);
   assert.equal(await page.evaluate(() => typeof window.require), "undefined");
   console.log(
@@ -999,6 +1049,8 @@ try {
         "keyboard submission for goal intake",
         "goal.message preserves the next step without inferring approval or completion",
         "reply images are imported into the message activity",
+        "background attention changes preserve an in-progress message and its reply images",
+        "a live Hook event refreshes goal data without closing the visible terminal",
         "complete goal conversation and substantive owner answer remain visible",
         "external terminal feedback refreshes the app without replaying a handoff",
         "waiting chat handoff and snooze work without ambiguous state buttons",
