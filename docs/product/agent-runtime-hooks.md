@@ -76,7 +76,7 @@ Hook heartbeat 不写入 `Goal.activities`，因此不会重置 30 分钟业务�
 
 1. 等待 5 秒，给 Agent 的延迟 CLI 写回留出时间；
 2. 当前 turn 已有 `progress / wait / review / decide / risk / ship` 等语义写回时取消；
-3. 仍无写回时，通过同一负责人现场发送一次命令说明，列出各状态命令的适用场景；
+3. 仍无写回时，先核实同一负责人名称与 Pane 仍对应，再发送一个以唯一标记开头的单行提醒，并使用 `agent prompt --wait --until working` 确认负责人实际开始处理；负责人正在工作、终端未恢复输入、状态未知或 Pane 已更换时不插入竞争输入，直接交给管家；
 4. 再等 30 秒仍缺失时标记 `protocol_missing`，交给唯一管家核对；
 5. 新输入、新 turn、目标结束或重启会取消旧计时器；
 6. 有可信 Stop Hook 的 Agent 使用 5 + 30 秒路径；没有 Hook 时继续使用既有 90 秒 Herdr 巡检。

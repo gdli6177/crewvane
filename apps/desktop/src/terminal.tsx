@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
@@ -43,6 +50,7 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
   const container = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | undefined>(undefined);
   const noticeTimer = useRef<number | undefined>(undefined);
+  const lastPaste = useRef<{ text: string; at: number } | undefined>(undefined);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [error, setError] = useState(""), [expanded, setExpanded] = useState(false);
@@ -53,6 +61,46 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
     window.clearTimeout(noticeTimer.current);
     setClipboardNotice(message);
     noticeTimer.current = window.setTimeout(() => setClipboardNotice(""), 2200);
+  }
+  function pasteText(text: string) {
+    const terminal = term.current;
+    if (!terminal) return;
+    if (!text) {
+      announceClipboardNotice("剪贴板里没有可粘贴的文字");
+      terminal.focus();
+      return;
+    }
+    const now = performance.now(), previous = lastPaste.current;
+    if (previous?.text === text && now - previous.at < 250) {
+      terminal.focus();
+      return;
+    }
+    lastPaste.current = { text, at: now };
+    terminal.focus();
+    terminal.paste(text);
+    announceClipboardNotice(`已粘贴 ${Array.from(text).length} 个字符`);
+  }
+  function pasteSystemClipboard() {
+    void api.readClipboardText()
+      .then(pasteText)
+      .catch((reason) => {
+        announceClipboardNotice("读取剪贴板失败");
+        setError(String(reason).replace(/^Error: /, ""));
+      });
+  }
+  function handlePaste(event: ReactClipboardEvent<HTMLElement>) {
+    const text = event.clipboardData.getData("text/plain");
+    event.preventDefault();
+    event.stopPropagation();
+    if (text) pasteText(text);
+    else pasteSystemClipboard();
+  }
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "v") {
+      event.preventDefault();
+      event.stopPropagation();
+      pasteSystemClipboard();
+    }
   }
   useEffect(() => {
     const terminal = new Terminal({
@@ -67,8 +115,6 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
       const key = event.key.toLowerCase();
       const copyShortcut = (event.metaKey && key === "c") ||
         (event.ctrlKey && event.shiftKey && key === "c");
-      const pasteShortcut = (event.metaKey && key === "v") ||
-        (event.ctrlKey && event.shiftKey && key === "v");
       if (copyShortcut) {
         const selection = terminal.getSelection();
         if (!selection) return true;
@@ -76,13 +122,6 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
         void api.writeClipboardText(selection)
           .then(() => announceClipboardNotice(`已复制 ${Array.from(selection).length} 个字符`))
           .catch(report);
-        return false;
-      }
-      if (pasteShortcut) {
-        event.preventDefault();
-        void api.readClipboardText().then(text => {
-          if (text) terminal.paste(text);
-        }).catch(report);
         return false;
       }
       return true;
@@ -227,6 +266,8 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
       aria-label="Herdr 工作现场"
       aria-hidden={!visible}
       inert={!visible}
+      onKeyDownCapture={handleKeyDown}
+      onPasteCapture={handlePaste}
     >
       <header className="terminal-heading terminal-drag-handle" onPointerDown={beginDrag} onDoubleClick={() => setExpanded(value => !value)}>
         <div>

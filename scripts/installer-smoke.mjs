@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { verifyReconciliationPresentation } from "./lib/reconciliation-presentation.mjs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const exec = promisify(execFile);
@@ -94,6 +95,7 @@ async function launchInstalled(appPath, label) {
     await writeFile(join(trial, `${label}-cli.json`), JSON.stringify(created));
     await page.getByRole("button", { name: "全部目标", exact: true }).click();
     await page.getByText("安装包 CLI 验收", { exact: true }).waitFor();
+    await verifyReconciliationPresentation(page, trial, label);
     await page.screenshot({ path: join(trial, `${label}-installed.png`) });
     assert.deepEqual(errors, []);
     console.log(`${label}: installed app starts, icon/signature verified, bundled CLI installs and writes a goal`);
