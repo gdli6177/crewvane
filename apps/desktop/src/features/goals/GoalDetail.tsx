@@ -445,7 +445,7 @@ export function GoalDetail({
 
           <footer className={`goal-action-dock ${view.tone}`}>
             <GoalActionDock
-              key={attentionRequest(goal)?.id}
+              key={replyMode === "message" ? "message" : attentionRequest(goal)?.id}
               goal={goal}
               view={view}
               service={service}

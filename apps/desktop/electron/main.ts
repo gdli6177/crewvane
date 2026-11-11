@@ -822,17 +822,14 @@ app.whenReady().then(async () => {
     hooks: agentHookManager,
     remindOwner: remindRuntimeOwner,
     notifyConcierge: notifyRuntimeConcierge,
-    onChanged: goal => {
-      void activeService().read().then(state => {
-        deliverGoalStatusChanges(activeService(), state, root!);
-        broadcastSnapshot(state, root!);
+    onChanged: () => {
+      const target = service, workspace = root;
+      if (target && workspace) void target.read().then(state => {
+        if (root !== workspace) return;
+        deliverGoalStatusChanges(target, state, workspace);
+        broadcastSnapshot(state, workspace);
       }).catch(() => {});
       void agentRuntimeStatus().then(broadcastAgentRuntimeStatus);
-      if (goal && root && window && !window.isDestroyed()) {
-        // The event-driven state update above is authoritative; this refresh
-        // only nudges the renderer when the filesystem watcher is delayed.
-        window.webContents.send("crewvane:event", { type: "refresh", workspace: root });
-      }
     },
   });
   herdrInstallation = new HerdrInstallation(
