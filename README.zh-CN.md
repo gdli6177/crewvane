@@ -31,7 +31,7 @@ Crewvane 不替代 Codex、Claude Code、OMP、Cursor、Qoder 等 CLI Agent。�
 终端中运行的交互式 Agent，都可以作为工作现场接入。Crewvane 为这些现场补齐
 持久目标、负责人、等待、证据、审批和恢复机制。
 
-> **当前状态：** 早期预览版（`0.6.x`）。桌面界面目前为简体中文，安装包支持
+> **当前状态：** 早期预览版（`0.7.x`）。桌面界面目前为简体中文，安装包支持
 > macOS Apple Silicon。
 
 ## 为什么需要 Crewvane
@@ -88,6 +88,18 @@ Crewvane 把工作单位从**终端会话**变成**目标**。
 
 Herdr 提供持久终端会话和 Agent 通信。桌面应用自带经过校验的 Herdr 二进制文件；
 可选的 Herdr 插件还能在终端内打开注意力、用一句话新建目标、直接回到全局管家。
+
+### 即时生命周期，明确业务决定
+
+Crewvane 会检测 Codex、Claude Code、Cursor、Qoder 和 OMP，并为提供官方接入能力的
+Agent 安装受管生命周期 Hook。事件通过私有本地 Socket 即时进入应用；应用未运行时
+进入有期限和数量上限的离线队列。用户已有的 Hook 与其他 OMP extension 会完整保留，
+Codex 仍要求在它自己的 `/hooks` 界面中审核并信任新条目。
+
+Hook 只证明会话或回合状态发生了变化，绝不会把目标标成完成、等待第三方、可验收或
+允许外部动作。这些业务事实仍只由 Crewvane 语义 CLI 写入。回合结束后，Crewvane
+会短暂等待结构化写回；缺失时只提醒同一负责人一次，再由管家核对。Agent 没有兼容
+Hook 时，Herdr 和原有 Watchdog 继续完整兜底。
 
 ### 有证据，才算完成
 
@@ -178,8 +190,8 @@ Crewvane CLI 运行时和经过校验的 Herdr 二进制文件，无需另装 No
 ### 第一次使用
 
 1. 选择一个专用工作区目录。
-2. 打开“设置”，安装 Crewvane CLI 和可选 Crewvane Skills，再配置管家、负责人
-   或工人的 Agent 启动命令。
+2. 打开“设置”，安装 Crewvane CLI 和可选 Crewvane Skills，检查“Agent 接入”，
+   再配置管家、负责人或工人的 Agent 启动命令。
 3. 准备管家。
 4. 点击“新目标”，用自然语言交代工作；需要时可以粘贴或添加截图。
 
@@ -267,7 +279,8 @@ pnpm test:onboarding
   移动端版本。
 - 桌面 UI 目前为简体中文。
 - 仍处于早期预览阶段，存储细节和 CLI 可能继续演进。
-- Crewvane 不是模型网关、自动调度器、Agent 运行时管理器或云托管服务。
+- Crewvane 不是模型网关、自动调度器或云托管服务。Agent Hooks 只观测生命周期，
+  不替代各 Agent 自己的运行时。
 - Crewvane 协调目标和现场，不为第三方 Agent 提供文件系统或网络沙箱。
   Agent 的访问权限仍由其自身 CLI 决定。
 - Agent 执行依赖 Herdr；Herdr 暂时不可用时，仍可查看目标、提醒和人工验收记录。

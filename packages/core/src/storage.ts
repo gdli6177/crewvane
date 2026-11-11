@@ -95,10 +95,11 @@ function lockHeldMessage(lock: string, owner: LockOwner | null): string {
 export async function withLock<T>(
   directory: string,
   action: () => Promise<T>,
+  timeoutMs = lockTimeoutMs(),
 ): Promise<T> {
   await mkdir(directory, { recursive: true });
   const lock = join(await realpath(directory), ".crewvane-lock");
-  const deadline = Date.now() + lockTimeoutMs();
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       await mkdir(lock);

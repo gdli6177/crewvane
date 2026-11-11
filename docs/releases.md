@@ -14,6 +14,22 @@ GitHub 自动生成的 **Source code** 是源码，不是可安装应用。安�
 
 安装替换应用后，打开设置重新安装 Crewvane CLI，确保 `~/.local/bin/crewvane` 指向当前应用。工作区位于用户选择的目录，不会被覆盖。
 
+## 0.7.0 安装与验收
+
+0.7.0 增加 Agent Runtime Adapter 与受管生命周期 Hook。Crewvane 会检测 Codex、Claude Code、Cursor、Qoder 和 OMP；前四类使用各 Agent 官方 Hook 配置，OMP 使用官方 Extension API。安装只增删 Crewvane 管理的条目，已有用户 Hook、其他 OMP extension 和未知配置结构保持不变。Codex 仍要求在 `/hooks` 中信任新条目；设置中的“等待信任”不会被 Crewvane 绕过。
+
+Hook 通过短路径本地 Socket 立即送入目标；应用未运行时，事件写入 `.crewvane/runtime/spool/`，使用 `0600` 权限、最多 200 条并保留 7 天。重复事件、旧 attempt、旧 turn 和乱序事件不会覆盖当前状态。Hook 只记录会话、回合、阻塞和可用的 Agent 回复，不保存工具参数、工具输出或终端全文；Prompt 与回复最多保存 12,000 个 Unicode 字符，并保存原文 SHA-256。
+
+目标回合结束后 5 秒仍未收到 `progress`、`wait`、`review`、`decide` 等结构化写回时，Crewvane 向同一负责人提醒一次；再等 30 秒仍缺失时只交给管家核对，不会直接把 Stop 显示成完成、失败或人工待办。每个 turn 最多提醒一次。Herdr 生命周期和原有 90 秒巡检继续作为 Hook 不可用时的兜底。
+
+1. 安装 DMG 或 ZIP 后，在设置中重新安装 Crewvane CLI，并检查“Agent 接入”。
+2. 对已安装的受支持 Agent 确认显示“已接入”。Codex 首次显示“等待信任”时，按界面说明在 Codex `/hooks` 中审核并信任 Crewvane 条目。
+3. 启动一个真实负责人，确认目标详情的运行状态条先显示即时生命周期事件；Hook 正常时，Stop 后约 5 秒出现一次回执提醒，负责人用现有 Crewvane CLI 写回后提示消失。
+4. 让负责人结束回合但不写回，确认 30 秒后目标只进入“交给管家核对”，不会直接标成完成或失败，也不会生成人工注意力。
+5. 关闭应用后触发一次受管 Agent Hook，再启动应用，确认离线队列补处理且没有重复事件；在设置中停用一个 Adapter，确认该 Agent 的目标继续由 Herdr 与巡检状态兜底。
+
+当前安装包仍使用完整 ad-hoc 签名，没有 Apple Developer ID 签名与公证。首次打开可能提示“无法验证开发者”；出现“已损坏”时应重新下载，不要绕过 Gatekeeper。
+
 ## 0.6.7 安装与验收
 
 0.6.7 修复执行日志中的长期可靠性缺陷。`events.jsonl` 不再为每条事件重复写入完整工作区快照，历史日志达到 16 MB 后会原子压缩到最近约 4 MB、最多 2,000 条完整事件，避免 15,000 条事件增长到数 GB。管家案卷 scope 改为临时文件加 rename 的原子替换，准备管家时不再先删除 scope，减少派发期间误判“没有当前案卷”的窗口。

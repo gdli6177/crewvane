@@ -1,6 +1,6 @@
 {
   "name": "crewvane",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "description": "Crewvane｜协航 — 一位管家，整理所有事。",
   "license": "MIT",
   "type": "module",
@@ -27,6 +27,7 @@
     "test:settled-watchdog": "tsx scripts/settled-watchdog-smoke.mjs",
     "test:task-pool": "tsx scripts/task-pool-smoke.mjs",
     "test:external-wait": "tsx scripts/external-wait-smoke.mjs",
+    "test:agent-hooks": "tsx scripts/agent-hooks-smoke.mjs",
     "desktop": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
     "package:mac": "pnpm --dir apps/desktop package"

@@ -4,6 +4,7 @@ import type { HerdrPluginStatus } from "../electron/herdr-plugin.js";
 import type { WebhookSaveInput, WebhookSettings } from "../electron/webhook-notifications.js";
 import type { SkillsInstallResult, SkillsStatus } from "../electron/skill-installer.js";
 import type { CacheCleanupResult, CacheStatus } from "../electron/cache-maintenance.js";
+import type { AgentHookAdapterStatus, ManagedAdapterId } from "../electron/agent-hook-manager.js";
 export interface DesktopApi {
   command(command: CrewvaneCommand): Promise<any>;
   importAttachments(inputs: { name: string; bytes: ArrayBuffer }[]): Promise<GoalAttachment[]>;
@@ -20,6 +21,11 @@ export interface DesktopApi {
   testWebhook(): Promise<WebhookSettings>;
   installHerdr(): Promise<unknown>; cliStatus(): Promise<{ installed: boolean; path: string; directory: string }>;
   skillsStatus(): Promise<SkillsStatus>; installSkills(): Promise<SkillsInstallResult>;
+  agentRuntimeStatus(): Promise<AgentHookAdapterStatus[]>;
+  configureAgentRuntime(
+    id: ManagedAdapterId,
+    action: "install" | "disable" | "uninstall" | "refresh",
+  ): Promise<AgentHookAdapterStatus>;
   readClipboardText(): Promise<string>; writeClipboardText(value: string): Promise<void>;
   installCli(): Promise<{ output: string }>; prepareConcierge(): Promise<unknown>;
   dispatchGoal(goalId: string): Promise<unknown>;

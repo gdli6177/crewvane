@@ -4,7 +4,18 @@ import {
   removeAttachmentFiles,
   validateGoalAttachments,
 } from "./attachments.js";
-import type { CrewvaneCommand, Goal, GoalAttachment, WorkspaceState, WorkflowStep } from "./types.js";
+import type {
+  AgentAttempt,
+  AgentRuntimeEventV1,
+  AgentRuntimeEventType,
+  AgentRuntimeText,
+  CrewvaneCommand,
+  Goal,
+  GoalAttachment,
+  WorkspaceState,
+  WorkflowStep,
+} from "./types.js";
+import { agentReceiptMarker, isAgentRuntimeAdapter } from "./agent-runtime.js";
 import {
   isHighRiskCategory,
   isShipPolicy,
@@ -98,6 +109,95 @@ function ongoing(item: Goal, allowReview = false, allowBacklog = false) {
 function attachmentActivity(text: string, attachments: GoalAttachment[]): string {
   if (!attachments.length) return text;
   return `${text}\n\n附带图片：${attachments.map(item => item.name).join("、")}`;
+}
+function runtimeText(value: unknown, label: string): AgentRuntimeText | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`无效的${label}`);
+  const candidate = value as Partial<AgentRuntimeText>;
+  if (typeof candidate.text !== "string" || Array.from(candidate.text).length > 12_000 ||
+    typeof candidate.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(candidate.sha256) ||
+    typeof candidate.truncated !== "boolean")
+    throw new Error(`无效的${label}`);
+  return {
+    text: candidate.text,
+    sha256: candidate.sha256,
+    truncated: candidate.truncated,
+  };
+}
+const semanticActivityKinds = new Set<Goal["activities"][number]["kind"]>([
+  "progress", "waiting", "decision", "delivery", "accepted", "rework",
+  "dropped", "resolved", "ship",
+]);
+const runtimeEventTypes = new Set<AgentRuntimeEventType>([
+  "session.started", "turn.started", "turn.settled", "turn.interrupted",
+  "agent.blocked", "agent.response", "session.ended",
+]);
+function validatedAttempt(value: AgentAttempt): AgentAttempt {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("无效的 Agent attempt");
+  const goalId = id(value.goalId),
+    attemptId = id(value.attemptId),
+    startedAt = iso(value.startedAt);
+  if (value.adapter !== "custom" && !isAgentRuntimeAdapter(value.adapter))
+    throw new Error("不支持的 Agent Runtime Adapter");
+  const agent = text(value.agent, "Agent 类型", 64);
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(agent))
+    throw new Error("Agent 类型格式无效");
+  if (value.currentTurnId !== undefined &&
+    (typeof value.currentTurnId !== "string" || value.currentTurnId.length > 240))
+    throw new Error("Agent turn ID 无效");
+  if (value.scene !== undefined &&
+    (!value.scene || typeof value.scene !== "object" || Array.isArray(value.scene)))
+    throw new Error("Agent attempt 现场无效");
+  return {
+    goalId,
+    attemptId,
+    agent,
+    adapter: value.adapter,
+    startedAt,
+    ...(value.currentTurnId ? { currentTurnId: value.currentTurnId } : {}),
+    ...(value.scene ? { scene: structuredClone(value.scene) } : {}),
+  };
+}
+function validatedRuntimeEvent(value: AgentRuntimeEventV1): AgentRuntimeEventV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+    value.version !== "v1")
+    throw new Error("Agent Runtime 事件版本无效");
+  const goalId = id(value.goalId),
+    attemptId = id(value.attemptId),
+    eventId = text(value.eventId, "Agent 事件 ID", 160),
+    at = iso(value.at),
+    agent = text(value.agent, "Agent 类型", 64);
+  if (!isAgentRuntimeAdapter(value.adapter) ||
+    !runtimeEventTypes.has(value.type) ||
+    value.source !== "hook" ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1)
+    throw new Error("Agent Runtime 事件字段无效");
+  if (value.turnId !== undefined &&
+    (typeof value.turnId !== "string" || !value.turnId.trim() ||
+      value.turnId.length > 240))
+    throw new Error("Agent turn ID 无效");
+  return {
+    version: "v1",
+    eventId,
+    sequence: value.sequence,
+    at,
+    source: "hook",
+    agent,
+    adapter: value.adapter,
+    goalId,
+    attemptId,
+    type: value.type,
+    ...(value.turnId ? { turnId: value.turnId.trim() } : {}),
+    ...(value.content === undefined
+      ? {}
+      : { content: runtimeText(value.content, "Agent 回复") }),
+    ...(value.notificationType === undefined
+      ? {}
+      : { notificationType: text(value.notificationType, "通知类型", 300) }),
+  };
 }
 function substantiveAgentText(value: string | undefined, label: string, limit: number) {
   const result = text(value, label, limit);
@@ -220,6 +320,20 @@ export class WorkspaceService {
           item.dispatch.status = "sent";
           delete item.dispatch.detail;
         }
+        if (semanticActivityKinds.has(kind) && actor !== "系统" &&
+          item.agentRuntime &&
+          !["completed", "dropped"].includes(item.status)) {
+          const now = nowIso();
+          item.agentRuntime.lastSemanticWriteAt = now;
+          if (item.agentRuntime.currentTurnId)
+            item.agentRuntime.lastSemanticWriteTurnId = item.agentRuntime.currentTurnId;
+          if (item.agentRuntime.receipt &&
+            (item.agentRuntime.receipt.turnId === item.agentRuntime.currentTurnId ||
+              item.agentRuntime.receipt.reminderTurnId === item.agentRuntime.currentTurnId))
+            item.agentRuntime.receipt.status = "written";
+          if (["settled", "protocol_missing"].includes(item.watchdog?.reason ?? ""))
+            delete item.watchdog;
+        }
         item.activities.push({
           id: newId("act"),
           at: nowIso(),
@@ -228,6 +342,13 @@ export class WorkspaceService {
           text: text(body, "记录", 12_000),
         });
         stamp(item);
+      };
+      const cancelAgentReceipt = (item: Goal) => {
+        const receipt = item.agentRuntime?.receipt;
+        if (receipt && ["waiting", "reminding", "reminded", "protocol_missing"].includes(receipt.status))
+          receipt.status = "cancelled";
+        if (["settled", "protocol_missing"].includes(item.watchdog?.reason ?? ""))
+          delete item.watchdog;
       };
       const handBackExternalWait = (item: Goal) => {
         if (item.status !== "waiting") return;
@@ -419,6 +540,7 @@ export class WorkspaceService {
               throw new Error("目标已结束，不能再追加终端消息");
             if (item.mode === "concierge") handBackExternalWait(item);
             delete item.sceneReply;
+            cancelAgentReceipt(item);
             const combined = await validateGoalAttachments(this.root, [
               ...(item.attachments ?? []),
               ...incomingAttachments,
@@ -526,6 +648,7 @@ export class WorkspaceService {
           if (item.status === "backlog" && command.routeToConcierge)
             throw new Error("这件事尚未开始，请先明确交给管家");
           const message = text(command.text, "消息", 12_000);
+          cancelAgentReceipt(item);
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           const combined = await validateGoalAttachments(this.root, [
             ...(item.attachments ?? []),
@@ -591,6 +714,7 @@ export class WorkspaceService {
           delete item.sceneReply;
           delete item.watchdog;
           delete item.live;
+          cancelAgentReceipt(item);
           activity(item, "session", "你已接管这个目标，不再向管家发送后续更新。", "你");
           return item;
         }
@@ -749,6 +873,7 @@ export class WorkspaceService {
           delete item.sceneReply;
           delete item.watchdog;
           delete item.recovery;
+          delete item.agentRuntime;
           activity(item, "message", note, "你");
           activity(item, "session", item.next, "系统");
           return item;
@@ -1011,6 +1136,7 @@ export class WorkspaceService {
           item.remindAt = undefined;
           item.waitingFor = undefined;
           item.next = "这件事已完成，不需要继续关注。";
+          cancelAgentReceipt(item);
           activity(
             item,
             "accepted",
@@ -1029,6 +1155,7 @@ export class WorkspaceService {
           item.remindAt = undefined;
           item.waitingFor = undefined;
           item.next = `已结束：${note}`;
+          cancelAgentReceipt(item);
           activity(item, "accepted", note, actor);
           return item;
         }
@@ -1052,6 +1179,7 @@ export class WorkspaceService {
           item.attention = null;
           item.remindAt = undefined;
           item.next = text(command.note || "这件事已放弃。", "原因", 4000);
+          cancelAgentReceipt(item);
           activity(item, "dropped", item.next, actor);
           return item;
         }
@@ -1152,6 +1280,8 @@ export class WorkspaceService {
               !["completed","dropped"].includes(other.status) && other.herdr && sameSite(other.herdr)))
               throw new Error("该现场属于其他目标，请为当前目标创建独立负责人 Tab");
             item.herdr = structuredClone(reference);
+            if (item.agentRuntime)
+              item.agentRuntime.attempt.scene = structuredClone(reference);
             delete item.sceneVisit;
             delete item.live;
             if (item.mode === "concierge" && item.status === "active")
@@ -1165,6 +1295,188 @@ export class WorkspaceService {
           };
           delete state.concierge.live;
           return state.concierge;
+        }
+        case "agent.runtime.register": {
+          const item = goal(command.goalId),
+            attempt = validatedAttempt(command.attempt);
+          ongoing(item);
+          if (attempt.goalId !== item.id)
+            throw new Error("Agent attempt 与目标不一致");
+          attempt.scene ??= item.herdr ? structuredClone(item.herdr) : undefined;
+          if (!/^[a-f0-9]{64}$/.test(command.hookTokenHash))
+            throw new Error("Agent Hook 令牌无效");
+          if (!Array.isArray(command.capabilities) ||
+            command.capabilities.some(capability => !runtimeEventTypes.has(capability)))
+            throw new Error("Agent Runtime 能力声明无效");
+          item.agentRuntime = {
+            attempt,
+            capabilities: [...new Set(command.capabilities)],
+            lastEventId: "",
+            lastEventType: "session.started",
+            lastEventAt: attempt.startedAt,
+            lastSequence: 0,
+            hookTokenHash: command.hookTokenHash,
+            ...(attempt.currentTurnId ? { currentTurnId: attempt.currentTurnId } : {}),
+            seenEventIds: [],
+          };
+          delete item.recovery;
+          delete item.watchdog;
+          return item.agentRuntime;
+        }
+        case "agent.runtime.event": {
+          const event = validatedRuntimeEvent(command.event),
+            item = goal(event.goalId),
+            runtime = item.agentRuntime;
+          if (!runtime) return { accepted: false, reason: "runtime_missing" };
+          if (["completed", "dropped"].includes(item.status))
+            return { accepted: false, reason: "goal_ended" };
+          if (runtime.attempt.attemptId !== event.attemptId)
+            return { accepted: false, reason: "old_attempt" };
+          if (runtime.attempt.adapter !== event.adapter ||
+            runtime.attempt.agent !== event.agent)
+            return { accepted: false, reason: "runtime_mismatch" };
+          if (runtime.seenEventIds?.includes(event.eventId))
+            return { accepted: false, reason: "duplicate" };
+          if (event.sequence <= runtime.lastSequence)
+            return { accepted: false, reason: "late_event" };
+          if (event.type === "turn.started" && event.turnId &&
+            event.turnId !== runtime.currentTurnId &&
+            runtime.seenTurnIds?.includes(event.turnId))
+            return { accepted: false, reason: "old_turn" };
+          const sessionEvent = event.type === "session.started" ||
+            event.type === "session.ended";
+          // A turn may move the runtime forward only through an explicit
+          // turn.started event. Other events carrying a different turn ID are
+          // late writes from a settled/interrupted turn and must not move the
+          // active receipt or replace the newest reply.
+          if (!sessionEvent && event.turnId &&
+            event.type !== "turn.started" &&
+            runtime.currentTurnId && event.turnId !== runtime.currentTurnId)
+            return { accepted: false, reason: "old_turn" };
+
+          runtime.lastEventId = event.eventId;
+          runtime.lastEventType = event.type;
+          runtime.lastEventAt = event.at;
+          runtime.lastSequence = event.sequence;
+          runtime.seenEventIds = [...(runtime.seenEventIds ?? []), event.eventId].slice(-64);
+          if (!sessionEvent && event.turnId) {
+            runtime.currentTurnId = event.turnId;
+            runtime.attempt.currentTurnId = event.turnId;
+          }
+          if (event.type === "turn.started") {
+            runtime.currentTurnStartedAt = event.at;
+            const receipt = runtime.receipt;
+            const reminder = receipt &&
+              ["reminding", "reminded", "protocol_missing", "written"].includes(receipt.status) &&
+              event.content?.text.startsWith(
+                agentReceiptMarker(runtime.attempt.attemptId, receipt.turnId),
+              );
+            if (reminder) receipt.reminderTurnId = event.turnId;
+            else runtime.receipt = undefined;
+            if (event.turnId)
+              runtime.seenTurnIds = [
+                ...(runtime.seenTurnIds ?? []).filter(turn => turn !== event.turnId),
+                event.turnId,
+              ].slice(-128);
+            if (event.content) runtime.lastPrompt = event.content;
+            delete item.recovery;
+            if (item.watchdog?.reason === "settled" ||
+              item.watchdog?.reason === "protocol_missing")
+              delete item.watchdog;
+          } else if (event.type === "agent.response") {
+            if (event.content) runtime.lastReply = event.content;
+          } else if (event.type === "turn.settled") {
+            if (event.content) runtime.lastReply = event.content;
+            const turn = event.turnId ?? runtime.currentTurnId;
+            if (item.mode === "concierge" && turn && runtime.receipt?.reminderTurnId !== turn &&
+              runtime.receipt?.turnId !== turn) {
+              const settled = Date.parse(event.at);
+              runtime.receipt = {
+                turnId: turn,
+                status: runtime.lastSemanticWriteTurnId === turn ||
+                  (runtime.currentTurnStartedAt && runtime.lastSemanticWriteAt &&
+                    Date.parse(runtime.lastSemanticWriteAt) >= Date.parse(runtime.currentTurnStartedAt))
+                  ? "written" : "waiting",
+                settledAt: event.at,
+                remindAt: new Date(settled + 5_000).toISOString(),
+                inspectAt: new Date(settled + 35_000).toISOString(),
+              };
+            }
+            delete item.recovery;
+          } else if (event.type === "turn.interrupted" ||
+            event.type === "session.ended") {
+            runtime.receipt = undefined;
+            if (item.watchdog?.reason === "settled" ||
+              item.watchdog?.reason === "protocol_missing")
+              delete item.watchdog;
+          } else if (event.type === "agent.blocked") {
+            runtime.receipt = undefined;
+          }
+          item.updatedAt = event.at;
+          return { accepted: true, goal: item, event };
+        }
+        case "agent.runtime.receipt": {
+          const item = goal(command.goalId),
+            runtime = item.agentRuntime,
+            at = iso(command.at);
+          if (!runtime || runtime.attempt.attemptId !== command.attemptId ||
+            !runtime.receipt || runtime.receipt.turnId !== command.turnId ||
+            (runtime.currentTurnId !== command.turnId &&
+              runtime.currentTurnId !== runtime.receipt.reminderTurnId))
+            return { updated: false, reason: "stale_receipt" };
+          if (runtime.receipt.status === "written")
+            return { updated: false, reason: "semantic_write_present" };
+          if (command.stage === "cancelled") {
+            cancelAgentReceipt(item);
+            return { updated: true, goal: item };
+          }
+          if (command.stage === "reminding") {
+            if (runtime.receipt.status !== "waiting")
+              return { updated: false, reason: "reminder_in_progress" };
+            runtime.receipt.status = "reminding";
+            return { updated: true, goal: item };
+          }
+          if (command.stage === "reminded") {
+            if (!["waiting", "reminding"].includes(runtime.receipt.status))
+              return { updated: false, reason: "already_reminded" };
+            runtime.receipt.status = "reminded";
+            runtime.receipt.remindedAt = at;
+            runtime.receipt.inspectAt =
+              new Date(Date.parse(at) + 30_000).toISOString();
+            if (command.detail)
+              runtime.receipt.reminderError = text(
+                command.detail,
+                "回执提醒失败说明",
+                1000,
+              );
+            else
+              delete runtime.receipt.reminderError;
+            activity(item, "session",
+              command.detail
+                ? `负责人回合结束但尚未写回；结构化回执提醒未送达：${command.detail}`
+                : "负责人结束回合后尚未按协议写回，已发送一次结构化回执提醒。",
+              "系统");
+            return { updated: true, goal: item };
+          }
+          if (runtime.receipt.status !== "reminded")
+            return { updated: false, reason: "reminder_not_sent" };
+          runtime.receipt.status = "protocol_missing";
+          runtime.receipt.missingAt = at;
+          runtime.receipt.detail = command.detail
+            ? text(command.detail, "回执缺失说明", 1000)
+            : "负责人结束回合并收到一次提醒后，仍未提交结构化结果。";
+          item.watchdog = {
+            reason: "protocol_missing",
+            basis: [...item.activities]
+              .reverse()
+              .find(activity => activity.kind !== "watchdog")?.at ??
+              item.createdAt,
+            detectedAt: at,
+          };
+          activity(item, "watchdog",
+            "负责人回合已结束但未按 Crewvane 协议写回；现已交给管家核对，不据此推断完成或失败。",
+            "系统");
+          return { updated: true, goal: item };
         }
         case "session.release": {
           const item = goal(command.goalId);

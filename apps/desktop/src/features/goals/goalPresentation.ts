@@ -125,6 +125,10 @@ export function sceneSyncPresentation(goal: Goal) {
 export function goalProgressLabel(goal: Goal) {
   if (goal.watchdog?.contactedAt) return "管家核对中";
   if (goal.recovery) return "待管家核对";
+  const receipt = goal.agentRuntime?.receipt?.status;
+  if (receipt === "protocol_missing") return "待管家核对";
+  if (receipt === "waiting") return "检查回执";
+  if (receipt === "reminding" || receipt === "reminded") return "已提醒写回";
   if (goal.live?.state === "working") return "执行中";
   if (goal.live?.state === "idle" || goal.live?.state === "done") return "待管家核对";
   return goal.herdr ? "待管家跟进" : "待分配";
@@ -260,6 +264,12 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
       : "正在等待外部结果；现在不需要你处理。";
     brief = goal.next;
     nextLabel = "恢复推进的条件";
+  } else if (["waiting", "reminding", "reminded", "protocol_missing"]
+    .includes(goal.agentRuntime?.receipt?.status ?? "")) {
+    label = goalProgressLabel(goal);
+    detail = goal.agentRuntime?.receipt?.status === "waiting"
+      ? "负责人本轮已结束，正在等待结构化回执；现在不需要你处理。"
+      : "已向负责人提醒一次写回；仍缺少结果时由管家核对，现在不需要你处理。";
   } else if (goal.live) {
     label = goalProgressLabel(goal);
     detail = goal.live.state === "working"

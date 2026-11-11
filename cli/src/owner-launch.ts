@@ -1,12 +1,17 @@
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { ownerSceneReplyInstructions } from "./owner-instructions.js";
 import {
+  agentRuntimeCapabilities,
+  agentRuntimeSocketPath,
   parseAgentCommand,
   resumeAgentArgs,
+  newId,
   WorkspaceService,
+  type AgentRuntimeAdapterId,
   type HerdrReference,
   type OwnerResume,
 } from "../../packages/core/src/index.js";
@@ -149,6 +154,14 @@ function expandHome(path: string, home: string): string {
   if (path === "~") return home;
   return path.startsWith("~/") ? join(home, path.slice(2)) : path;
 }
+function runtimeAdapter(kind: string | undefined, executable: string): AgentRuntimeAdapterId | undefined {
+  const value = `${kind ?? ""} ${basename(executable)}`.toLowerCase();
+  if (/\bcodex\b/.test(value)) return "codex";
+  if (/\bclaude(?:-code)?\b/.test(value)) return "claude-code";
+  if (/\bcursor(?:-agent)?\b/.test(value)) return "cursor";
+  if (/\bqoder(?:cli)?\b/.test(value)) return "qoder";
+  if (/\bomp\b|\boh-my-pi\b/.test(value)) return "omp";
+}
 
 async function closeTab(run: HerdrCommandRunner, tabId?: string) {
   if (!tabId) return;
@@ -251,6 +264,23 @@ export async function launchOwner(
     command.executable,
     environment.HOME || "",
   );
+  const adapter = runtimeAdapter(command.kind, executable) ?? "custom";
+  const attemptId = newId("attempt"),
+    hookToken = randomBytes(32).toString("hex"),
+    hookTokenHash = createHash("sha256").update(hookToken).digest("hex");
+  await service.execute({
+    type: "agent.runtime.register",
+    goalId: goal.id,
+    attempt: {
+      goalId: goal.id,
+      attemptId,
+      agent: input.name,
+      adapter,
+      startedAt: new Date().toISOString(),
+    },
+    hookTokenHash,
+    capabilities: agentRuntimeCapabilities(adapter),
+  });
   const executableDirectory = executable.includes("/")
     ? dirname(executable)
     : "";
@@ -298,7 +328,11 @@ export async function launchOwner(
       "unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE",
       `export CREWVANE_ROLE=owner CREWVANE_AGENT_NAME=${quoteShell(input.name)}`,
       `export CREWVANE_GOAL_ID=${quoteShell(goal.id)}`,
+      `export CREWVANE_ATTEMPT_ID=${quoteShell(attemptId)}`,
+      `export CREWVANE_HOOK_TOKEN=${quoteShell(hookToken)}`,
       `export CREWVANE_WORKSPACE=${quoteShell(await realpath(service.root))}`,
+      `export CREWVANE_HOOK_SOCKET=${quoteShell(agentRuntimeSocketPath(await realpath(service.root)))}`,
+      `export CREWVANE_HOOK_SPOOL=${quoteShell(join(await realpath(service.root), ".crewvane", "runtime", "spool"))}`,
       `export CREWVANE_HERDR_BINARY=${quoteShell(
         environment.CREWVANE_HERDR_BINARY?.trim() ||
         environment.HERDR_BIN_PATH?.trim() ||
@@ -330,20 +364,44 @@ export async function launchOwner(
       agent: input.name,
     };
     if (command.kind) {
-      await startAgentWhenPaneReady(
-        run,
-        [
-          "agent",
-          "start",
-          input.name,
-          "--kind",
-          command.kind,
-          "--pane",
-          paneId,
-          ...(command.args.length ? ["--", ...command.args] : []),
-        ],
-        options.wait,
-      );
+      try {
+        await startAgentWhenPaneReady(
+          run,
+          [
+            "agent",
+            "start",
+            input.name,
+            "--kind",
+            command.kind,
+            "--pane",
+            paneId,
+            ...(command.args.length ? ["--", ...command.args] : []),
+          ],
+          options.wait,
+        );
+      } catch (error) {
+        if (!/\bagent_not_ready\b/.test(String(error))) throw error;
+        // Herdr keeps this live Agent at its startup dialog. Preserve the
+        // scene so a person can review Hook/repository trust in the Agent UI.
+        // Never answer that dialog, retry startup or submit the task through it.
+        await service.execute({ type: "session.set", goalId: goal.id, reference });
+        bound = true;
+        await service.execute({
+          type: "goal.progress", goalId: goal.id, actor: "管家",
+          summary: "负责人已启动，正在等待现场交互确认；目标任务尚未发送。",
+          next: "在原负责人现场审核启动或 Hook 信任提示，确认就绪后请管家向同一负责人发送目标。",
+        });
+        await service.execute({
+          type: "live.sync", presences: { [goal.id]: {
+            state: "blocked", reachable: true, checkedAt: new Date().toISOString(),
+          } },
+        });
+        return {
+          goalId: goal.id, runtime: input.resume?.agentSession?.agent || configured,
+          reference,
+          warning: "负责人正在等待启动确认，现场已保留；请在原 Agent 中审核信任提示，禁止自动确认或重复启动。目标任务尚未发送。",
+        };
+      }
     } else {
       await sendShellCommand(run, paneId, [executable, ...command.args].map(quoteShell).join(" "));
       const deadline = Date.now() + 20_000;

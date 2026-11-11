@@ -181,6 +181,33 @@ test("does not replay an agent start error once process startup may have begun",
   assert.equal(attempts, 1);
 });
 
+test("a Hook trust startup dialog preserves the original scene without sending input or closing it", async () => {
+  const { root, service } = await fixture();
+  const goal = await service.execute({
+    type: "goal.create",
+    input: { title: "审核 Hook 信任", projectId: "personal", mode: "concierge" },
+  }) as Goal;
+  const mock = fakeRunner();
+  const result = await launchOwner(service, { goalId: goal.id, name: "owner-trust" }, {
+    environment: { HERDR_ENV: "1", HERDR_SESSION: "test", HOME: root },
+    run: async args => {
+      if (args[0] === "agent" && args[1] === "start" && !args.includes("--help")) {
+        mock.calls.push(args);
+        throw new Error('Herdr agent start: {"code":"agent_not_ready","message":"blocked during startup"}');
+      }
+      return mock.run(args);
+    },
+  });
+  assert.match(result.warning ?? "", /目标任务尚未发送/);
+  assert.equal(mock.calls.filter(args => args[0] === "agent" && args[1] === "start" && !args.includes("--help")).length, 1);
+  assert.equal(mock.calls.some(args => args[0] === "tab" && args[1] === "close"), false);
+  assert.equal(mock.calls.some(args => args[0] === "agent" && ["prompt", "send-keys"].includes(args[1]!)), false);
+  const saved = (await service.read()).goals[0]!;
+  assert.equal(saved.herdr?.paneId, "w7:p3");
+  assert.equal(saved.live?.state, "blocked");
+  assert.match(saved.next, /同一负责人/);
+});
+
 test("reopens the original Agent kind with its native resume arguments", async () => {
   const { root, service } = await fixture();
   const goal = (await service.execute({

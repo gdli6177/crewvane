@@ -834,6 +834,31 @@ h1 em { color: var(--accent); font-style: normal; }
 .recovery-notice strong { display: block; color: var(--text); font-size: var(--fs-body); }
 .recovery-notice p { margin: 4px 0 6px; color: var(--secondary); font-size: var(--fs-meta); line-height: 1.55; }
 .recovery-notice code { display: block; overflow: hidden; color: var(--muted); font-size: var(--fs-caption); text-overflow: ellipsis; white-space: nowrap; }
+.goal-agent-runtime { display: grid; gap: 10px; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); border-radius: var(--r-md); background: color-mix(in srgb, var(--accent-soft) 22%, var(--surface)); }
+.goal-agent-runtime > header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.goal-agent-runtime > header > span:first-child { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent); }
+.goal-agent-runtime > header > div { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.goal-agent-runtime strong { color: var(--text); font-size: var(--fs-meta); font-weight: 650; }
+.goal-agent-runtime small { color: var(--muted); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+.goal-agent-runtime > header .ui-badge { flex: 0 0 auto; margin-left: auto; }
+.goal-agent-runtime > p { display: flex; align-items: flex-start; gap: 8px; max-height: 130px; margin: 0; padding-top: 9px; border-top: 1px solid var(--line); overflow-y: auto; color: var(--secondary); font-size: var(--fs-meta); line-height: 1.65; white-space: pre-wrap; }
+.goal-agent-runtime > p svg { flex: 0 0 auto; margin-top: 3px; color: var(--accent); }
+.goal-agent-runtime > p.muted { font-style: italic; }
+.agent-runtime-list { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--line); }
+.agent-runtime-row { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(220px, 1.4fr) auto; align-items: center; gap: 16px; padding: 13px 14px; background: var(--surface); }
+.agent-runtime-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-runtime-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border-radius: 9px; background: var(--accent-soft); color: var(--accent); }
+.agent-runtime-identity > div, .agent-runtime-detail { display: grid; gap: 3px; min-width: 0; }
+.agent-runtime-identity strong { color: var(--text); font-size: var(--fs-meta); font-weight: 650; }
+.agent-runtime-identity small, .agent-runtime-detail small { color: var(--muted); font-size: var(--fs-caption); }
+.agent-runtime-detail > span { color: var(--secondary); font-size: var(--fs-meta); line-height: 1.5; }
+.agent-runtime-events { overflow-wrap: anywhere; }
+.agent-runtime-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+@media (max-width: 900px) {
+  .agent-runtime-row { grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+  .agent-runtime-detail { grid-column: 1; grid-row: 2; }
+  .agent-runtime-actions { grid-column: 2; grid-row: 1 / span 2; align-self: center; flex-direction: column; }
+}
 
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes modal-in { from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)); } to { opacity: 1; transform: translate(-50%,-50%); } }

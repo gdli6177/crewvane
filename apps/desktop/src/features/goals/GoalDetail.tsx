@@ -6,6 +6,8 @@ import {
   Clock3,
   FileText,
   ImagePlus,
+  MessageSquareText,
+  Radio,
   Sparkles,
   SquareTerminal,
   UserRound,
@@ -21,7 +23,7 @@ import { GoalActionDock } from "./GoalActionDock.js";
 import { GoalAttachments } from "./GoalAttachments.js";
 import { GoalHistory } from "./GoalActivity.js";
 import { GoalDeliveryEvidence } from "./GoalDeliveryEvidence.js";
-import { Button, IconButton, StatusPill } from "../../ui/index.js";
+import { Badge, Button, IconButton, StatusPill } from "../../ui/index.js";
 import type { BadgeTone } from "../../ui/index.js";
 import type { GoalReplyMode } from "./GoalReplyComposer.js";
 import { presentGoal, time } from "./goalPresentation.js";
@@ -37,6 +39,23 @@ const goalToneBadge: Record<GoalTone, BadgeTone> = {
   waiting: "warm",
   blocked: "danger",
   done: "mint",
+};
+const runtimeEventLabels: Record<string, string> = {
+  "session.started": "会话已启动",
+  "turn.started": "Agent 开始处理",
+  "agent.response": "收到 Agent 回复",
+  "turn.settled": "Agent 回合已结束",
+  "turn.interrupted": "Agent 回合已中断",
+  "agent.blocked": "Agent 等待输入",
+  "session.ended": "Agent 会话已结束",
+};
+const runtimeAdapterLabels: Record<string, string> = {
+  codex: "Codex Hook",
+  "claude-code": "Claude Code Hook",
+  cursor: "Cursor Hook",
+  qoder: "Qoder Hook",
+  omp: "OMP Extension",
+  custom: "Herdr 生命周期",
 };
 
 function ContextAttachments({
@@ -116,6 +135,25 @@ export function GoalDetail({
     goal.dispatch?.status === "failed"
       ? goal.dispatch.detail
       : goal.watchdog?.lastError;
+  const runtime = goal.agentRuntime;
+  const observedRuntime = runtime && runtime.lastSequence > 0 ? runtime : undefined;
+  const runtimeSource = observedRuntime
+    ? runtimeAdapterLabels[observedRuntime.attempt.adapter] ?? "Agent 即时事件"
+    : goal.live
+      ? "Herdr 现场监测"
+      : "巡检保护";
+  const runtimeDetail = observedRuntime
+    ? runtimeEventLabels[observedRuntime.lastEventType] ?? observedRuntime.lastEventType
+    : goal.live
+      ? `Herdr 现场状态：${
+          goal.live.state === "working" ? "工作中"
+            : goal.live.state === "blocked" ? "等待输入"
+              : goal.live.state === "unknown" ? "状态未知"
+                : "已空闲"
+        }`
+      : "尚未收到即时的 Agent 生命周期事件";
+  const runtimeAt = observedRuntime?.lastEventAt ??
+    goal.live?.checkedAt;
   const deliveryActivityId = goal.delivery
     ? [...goal.activities]
         .reverse()
@@ -225,6 +263,47 @@ export function GoalDetail({
               </section>
 
               <GoalSceneSync goal={goal} view={view} service={service} busy={busy} />
+              {(
+                <section
+                  className="goal-agent-runtime"
+                  aria-label="Agent 运行状态"
+                >
+                  <header>
+                    <span>
+                      <Radio size={14} aria-hidden="true" />
+                    </span>
+                    <div>
+                      <strong>{runtimeSource}</strong>
+                      <small
+                        role="status"
+                        aria-live="polite"
+                        aria-atomic="true"
+                      >
+                        {runtimeDetail}
+                        {runtimeAt ? ` · ${time(runtimeAt)}` : ""}
+                      </small>
+                    </div>
+                    {runtime?.receipt?.status === "waiting" && <Badge tone="neutral">检查回执</Badge>}
+                    {runtime?.receipt?.status === "reminding" && <Badge tone="accent">发送提醒</Badge>}
+                    {runtime?.receipt?.status === "reminded" && <Badge tone="warm">已提醒写回</Badge>}
+                    {runtime?.receipt?.status === "protocol_missing" && <Badge tone="danger">回执缺失</Badge>}
+                  </header>
+                  {runtime?.lastReply ? (
+                    <p>
+                      <MessageSquareText size={13} aria-hidden="true" />
+                      <span>{runtime.lastReply.text}</span>
+                    </p>
+                  ) : (
+                    <p className="muted">
+                      {runtime
+                        ? "等待负责人提交近期回复或结构化进展。"
+                        : goal.live
+                          ? "Herdr 状态保持可用；目标完成、等待外部和找人决定仍以 Crewvane 结构化为准。"
+                          : "Hook 不可用时由 Herdr 与巡检完整兜底，不会阻止目标继续执行。"}
+                    </p>
+                  )}
+                </section>
+              )}
               {showContext && (
                 <section className="goal-handoff" aria-label="最近一次交接">
                   <header>

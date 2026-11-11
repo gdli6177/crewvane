@@ -39,6 +39,24 @@ async function completedGoal(service: WorkspaceService) {
     },
   });
   await service.execute({
+    type: "agent.runtime.register",
+    goalId: goal.id,
+    attempt: {
+      goalId: goal.id,
+      attemptId: "attempt_restart",
+      agent: "owner-a",
+      adapter: "codex",
+      startedAt: new Date().toISOString(),
+    },
+    hookTokenHash: "a".repeat(64),
+    capabilities: [
+      "session.started",
+      "turn.started",
+      "turn.settled",
+      "agent.response",
+    ],
+  });
+  await service.execute({
     type: "goal.review",
     goalId: goal.id,
     actor: "owner-a",
@@ -98,6 +116,7 @@ test("restart reopens an ended concierge goal and preserves its history", async 
   assert.equal(restarted.delivery, undefined);
   assert.equal(restarted.herdr, undefined);
   assert.equal(restarted.ownerResume?.agentSession?.value, "session-123");
+  assert.equal(restarted.agentRuntime, undefined);
   assert.ok(restarted.activities.some(activity =>
     activity.kind === "message" && activity.text === "请从上次成果继续，补齐失败场景。"));
   assert.ok(restarted.activities.some(activity =>
