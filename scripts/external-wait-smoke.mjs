@@ -10,11 +10,21 @@ const workspace = join(home, "workspace");
 await mkdir(workspace);
 const service = new WorkspaceService(workspace);
 await service.execute({ type: "agents.configure", preferences: { concierge: "/missing/cv-external-wait-agent" } });
+await service.execute({
+  type: "workspace.autonomy.set",
+  acceptance: "human-review",
+  initialize: true,
+  actor: "你",
+});
 const human = await service.execute({ type: "goal.direct", text: "等我确认方案", handling: "concierge" });
 const external = await service.execute({ type: "goal.direct", text: "等待供应商报价" });
 await service.execute({ type: "goal.wait", goalId: external.id, reason: "对方尚未发来报价",
   owner: "供应商", remindAt: "2030-01-01T09:00:00Z" });
 const state = await service.read();
+// The missing CLI deliberately fails background dispatch; this regression is
+// about external waiting, so keep that unrelated failure out of attention.
+const externalState = state.goals.find(goal => goal.id === external.id);
+if (externalState) externalState.dispatch = undefined;
 // Seed a real historical snapshot, not a pre-normalized service response.
 const historical = state.goals.find(goal => goal.id === human.id);
 historical.status = "waiting"; historical.waitingFor = "你"; historical.owner = "你";

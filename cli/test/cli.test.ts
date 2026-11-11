@@ -13,12 +13,45 @@ const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAYAAACbU/80AAAAVUlEQVR4nGPUMIr6z4AEAqKWInMZNiyLZqClPBPDAAOmEe8Axoqe///pGefo8kwMAwyYRrwDGEfLAYaR7gDG0XKAYaQ7gHG0HGAY6Q5gHC0HGEa6AwC58E1KmpVcaAAAAABJRU5ErkJggg==",
   "base64",
 );
+const inheritedProcessKeys = [
+  "CREWVANE_AGENT_NAME",
+  "CREWVANE_COORDINATOR",
+  "CREWVANE_COORDINATOR_SCOPE_FILE",
+  "CREWVANE_GOAL_ID",
+  "CREWVANE_ROLE",
+  "CREWVANE_WORKSPACE",
+  "HERDR_ENV",
+  "HERDR_PANE_ID",
+  "HERDR_PLUGIN_EVENT_JSON",
+  "HERDR_SESSION",
+  "HERDR_TAB_ID",
+  "HERDR_WORKSPACE_ID",
+] as const;
 afterEach(async () => { await Promise.all(fixtures.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture(prefix: string) { const root = await mkdtemp(join(tmpdir(), prefix)); fixtures.push(root); return root; }
 async function call(root: string, argv: string[]) {
   let stdout = "", stderr = "";
   const code = await run([...argv, "--root", root, "--json"], { out: (text) => { stdout += text; }, error: (text) => { stderr += text; } });
   return { code, stdout, stderr, json: stdout ? JSON.parse(stdout) : undefined };
+}
+async function callProcess(
+  root: string,
+  environment: Record<string, string>,
+  argv: string[],
+) {
+  const childEnvironment = { ...process.env };
+  for (const key of inheritedProcessKeys) delete childEnvironment[key];
+  const { stdout, stderr } = await promisify(execFile)(
+    "pnpm",
+    ["--dir", "cli", "exec", "tsx", "src/main.ts",
+      ...argv, "--root", root, "--json"],
+    {
+      cwd: new URL("../../", import.meta.url),
+      env: { ...childEnvironment, ...environment },
+      timeout: 30_000,
+    },
+  );
+  return { stdout, stderr, json: JSON.parse(stdout) };
 }
 async function coordinator<T>(root: string, goalId: string, task: () => Promise<T>) {
   const scope = join(root, ".crewvane", "coordinator-scope.json");
@@ -121,7 +154,7 @@ test("CLI reports an automatically protected legacy workspace", async () => {
   assert.match(stdout, /旧版工作区已自动保护/);
   assert.match(stdout, /\.crewvane\.backup-/);
   const next = JSON.parse(await readFile(join(root, ".crewvane/state.json"), "utf8"));
-  assert.equal(next.version, 2);
+  assert.equal(next.version, 3);
   assert.equal(next.recovery.reason, "unsupported-version");
 });
 test("CLI rejects incomplete or fabricated review records", async () => {
@@ -156,10 +189,287 @@ test("owner names from the managed pane are attributed without manual flags", as
     assert.equal(reviewed.code, 0, reviewed.stderr);
     assert.equal(reviewed.json.delivery.submittedBy, "trial-owner");
     assert.equal(reviewed.json.activities.at(-1).actor, "trial-owner");
+    const accepted = await call(root, ["goal", "accept", created.id, "--note", "用户原话：通过"]);
+    assert.equal(accepted.code, 1);
+    assert.match(accepted.stderr, /只能由人/);
   } finally {
     if (previous === undefined) delete process.env.CREWVANE_AGENT_NAME;
     else process.env.CREWVANE_AGENT_NAME = previous;
   }
+});
+test("real CLI classifies discovery goals, sets a goal acceptance override, and schedules wait-due", async () => {
+  const root = await fixture("crewvane-cli-autonomy-");
+  const created = await call(root, [
+    "goal", "create",
+    "--title", "先探索再决定",
+    "--kind", "discovery",
+  ]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(created.json.kind, "discovery");
+  const switched = await call(root, [
+    "goal", "kind", created.json.id,
+    "--kind", "delivery",
+  ]);
+  assert.equal(switched.code, 0, switched.stderr);
+  assert.equal(switched.json.kind, "delivery");
+
+  const overridden = await call(root, [
+    "goal", "autonomy", "acceptance", created.json.id,
+    "--acceptance", "auto-with-verification",
+  ]);
+  assert.equal(overridden.code, 0, overridden.stderr);
+  assert.equal(overridden.json.autonomy.override, "auto-with-verification");
+
+  const previousActor = process.env.CREWVANE_AGENT_NAME;
+  process.env.CREWVANE_AGENT_NAME = "managed-owner";
+  try {
+    const blocked = await call(root, [
+      "goal", "autonomy", "acceptance", created.json.id,
+      "--acceptance", "human-review",
+    ]);
+    assert.equal(blocked.code, 1);
+    assert.match(blocked.stderr, /只能由人/);
+  } finally {
+    if (previousActor === undefined) delete process.env.CREWVANE_AGENT_NAME;
+    else process.env.CREWVANE_AGENT_NAME = previousActor;
+  }
+
+  const activityId = created.json.activities[0].id,
+    briefPath = join(root, "brief.json");
+  await writeFile(briefPath, JSON.stringify({
+    outcome: "验证自主目标的等待续跑",
+    inScope: ["验证"],
+    outOfScope: [],
+    criteria: [{
+      id: "verified",
+      statement: "等待到期可以唤醒管家",
+      required: true,
+      provenance: { kind: "user-message", activityId },
+    }],
+    constraints: [],
+    externalEffects: [],
+    verificationPlan: {
+      requiredEvidenceKinds: ["inspection"],
+      independentReviewer: true,
+    },
+    attemptBudget: { maxRecoveryAttempts: 2 },
+    source: { activityIds: [activityId], ruleRefs: [] },
+  }));
+  const briefed = await call(root, [
+    "goal", "brief", created.json.id,
+    "--file", briefPath,
+  ]);
+  assert.equal(briefed.code, 0, briefed.stderr);
+  const dueAt = "2030-01-01T00:00:00.000Z",
+    waiting = await call(root, [
+      "goal", "wait", created.json.id,
+      "--reason", "等待外部结果",
+      "--owner", "YR",
+      "--remind-at", dueAt,
+    ]);
+  assert.equal(waiting.code, 0, waiting.stderr);
+  assert.equal(waiting.json.autonomy.continuation.trigger, "wait-due");
+  assert.equal(waiting.json.autonomy.continuation.dueAt, dueAt);
+  const inspected = await call(root, [
+    "autonomy", "inspect",
+    "--at", "2030-01-01T00:01:00.000Z",
+  ]);
+  assert.deepEqual(inspected.json.map((candidate: { trigger: string }) => candidate.trigger), ["wait-due"]);
+});
+test("goal verify records the managed Herdr pane as reviewer evidence", async () => {
+  const root = await fixture("crewvane-cli-reviewer-site-"),
+    service = new WorkspaceService(root),
+    goal = await service.execute({
+      type: "goal.create",
+      input: { title: "复核现场", projectId: "personal", mode: "concierge" },
+    }) as Goal,
+    activityId = goal.activities[0]!.id,
+    briefPath = join(root, "brief.json");
+  await writeFile(briefPath, JSON.stringify({
+    outcome: "完成可复核交付",
+    inScope: ["实现"],
+    outOfScope: [],
+    criteria: [{
+      id: "tests-pass",
+      statement: "真实检查通过",
+      required: true,
+      provenance: { kind: "user-message", activityId },
+    }],
+    constraints: [],
+    externalEffects: [],
+    verificationPlan: {
+      requiredEvidenceKinds: ["command"],
+      independentReviewer: true,
+    },
+    attemptBudget: { maxRecoveryAttempts: 3 },
+    source: { activityIds: [activityId], ruleRefs: [] },
+  }));
+  assert.equal((await call(root, ["goal", "brief", goal.id, "--file", briefPath])).code, 0);
+  const reviewed = await call(root, [
+    "goal", "review", goal.id,
+    "--summary", "等待独立复核",
+    "--check", "测试::true::passed",
+    "--candidate-revision", "rev-1",
+    "--evidence-file", await (async () => {
+      const path = join(root, "evidence.json");
+      await writeFile(path, JSON.stringify([{
+        id: "ev_tests",
+        kind: "command",
+        label: "测试通过",
+        result: "passed",
+        observedAt: new Date().toISOString(),
+        command: "true",
+      }]));
+      return path;
+    })(),
+  ]);
+  assert.equal(reviewed.code, 0, reviewed.stderr);
+  const previous = {
+    HERDR_ENV: process.env.HERDR_ENV,
+    HERDR_SESSION: process.env.HERDR_SESSION,
+    HERDR_WORKSPACE_ID: process.env.HERDR_WORKSPACE_ID,
+    HERDR_TAB_ID: process.env.HERDR_TAB_ID,
+    HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+    CREWVANE_AGENT_NAME: process.env.CREWVANE_AGENT_NAME,
+  };
+  Object.assign(process.env, {
+    HERDR_ENV: "1",
+    HERDR_SESSION: "test-session",
+    HERDR_WORKSPACE_ID: "w2",
+    HERDR_TAB_ID: "w2:t2",
+    HERDR_PANE_ID: "w2:p2",
+    CREWVANE_AGENT_NAME: "reviewer-cli",
+  });
+  try {
+    const verified = await call(root, [
+      "goal", "verify", goal.id,
+      "--delivery", reviewed.json.delivery.id,
+      "--outcome", "passed",
+      "--summary", "独立复核已核对真实命令。",
+      "--reviewer", "reviewer-cli",
+      "--criterion", "tests-pass::passed::ev_tests",
+    ]);
+    assert.equal(verified.code, 0, verified.stderr);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const saved = (await service.read()).goals[0]!;
+  assert.deepEqual(saved.autonomy?.lastVerification?.reviewerHerdr, {
+    session: "test-session",
+    workspaceId: "w2",
+    tabId: "w2:t2",
+    paneId: "w2:p2",
+    agent: "reviewer-cli",
+  });
+});
+test("a spawned verifier can only read its goal and submit its own verification", async () => {
+  const root = await fixture("crewvane-cli-verifier-scope-"),
+    service = new WorkspaceService(root),
+    goal = await service.execute({
+      type: "goal.create",
+      input: { title: "需要独立复核", projectId: "personal", mode: "concierge" },
+    }) as Goal,
+    other = await service.execute({
+      type: "goal.create",
+      input: { title: "不能跨目标读取", projectId: "personal", mode: "concierge" },
+    }) as Goal,
+    activityId = goal.activities[0]!.id;
+  await service.execute({
+    type: "goal.brief",
+    goalId: goal.id,
+    actor: "管家",
+    brief: {
+      outcome: "完成可独立复核的交付",
+      inScope: ["实现"],
+      outOfScope: [],
+      criteria: [{
+        id: "tests-pass",
+        statement: "真实检查通过",
+        required: true,
+        provenance: { kind: "user-message", activityId },
+      }],
+      constraints: [],
+      externalEffects: [],
+      verificationPlan: {
+        requiredEvidenceKinds: ["command"],
+        independentReviewer: true,
+      },
+      attemptBudget: { maxRecoveryAttempts: 3 },
+      source: { activityIds: [activityId], ruleRefs: [] },
+    },
+  });
+  const reviewed = await service.execute({
+    type: "goal.review",
+    goalId: goal.id,
+    actor: "owner-a",
+    delivery: {
+      summary: "实现与检查已完成。",
+      candidate: { revision: "rev-verifier-scope" },
+      checks: [{ name: "测试", command: "true", result: "passed" }],
+      evidence: [{
+        id: "ev_tests",
+        kind: "command",
+        label: "测试通过",
+        result: "passed",
+        observedAt: new Date().toISOString(),
+        command: "true",
+      }],
+    },
+  }) as Goal;
+  const environment = {
+    CREWVANE_AGENT_NAME: "reviewer-proc",
+    CREWVANE_GOAL_ID: goal.id,
+    CREWVANE_ROLE: "verifier",
+    HERDR_ENV: "1",
+    HERDR_PANE_ID: "w9:p2",
+    HERDR_SESSION: "verifier-session",
+    HERDR_TAB_ID: "w9:t2",
+    HERDR_WORKSPACE_ID: "w9",
+  };
+  const status = await callProcess(root, environment, ["status"]);
+  assert.equal(status.json.goal.id, goal.id);
+  assert.equal(status.json.goal.status, "review");
+  assert.equal(status.json.goals, undefined);
+
+  await assert.rejects(
+    () => callProcess(root, environment, ["goal", "show", other.id]),
+    /只能查看当前复核目标/,
+  );
+  await assert.rejects(
+    () => callProcess(root, environment, [
+      "goal", "progress", goal.id,
+      "--summary", "复核者试图修改执行进度",
+    ]),
+    /只能查看当前目标或提交复核结果/,
+  );
+
+  const verificationArguments = [
+    "goal", "verify", goal.id,
+    "--delivery", reviewed.delivery!.id!,
+    "--outcome", "passed",
+    "--summary", "独立复核已核对真实命令。",
+    "--criterion", "tests-pass::passed::ev_tests",
+  ];
+  await assert.rejects(
+    () => callProcess(root, environment, [
+      ...verificationArguments,
+      "--reviewer", "someone-else",
+    ]),
+    /不能用 --reviewer 冒用/,
+  );
+
+  const verified = await callProcess(root, environment, verificationArguments);
+  assert.equal(verified.json.autonomy.lastVerification.reviewer, "reviewer-proc");
+  assert.deepEqual(verified.json.autonomy.lastVerification.reviewerHerdr, {
+    session: "verifier-session",
+    workspaceId: "w9",
+    tabId: "w9:t2",
+    paneId: "w9:p2",
+    agent: "reviewer-proc",
+  });
 });
 test("owner launch is routed through the current concierge case", async () => {
   const root = await fixture("crewvane-cli-owner-launch-");

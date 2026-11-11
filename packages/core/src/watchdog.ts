@@ -1,7 +1,7 @@
 import { newId } from "./model.js";
 import type { Goal, WatchdogReason } from "./types.js";
 
-const STALE_AFTER = 30 * 60_000;
+const DEFAULT_NO_PROGRESS_MINUTES = 30;
 const OWNER_START_GRACE = 60_000;
 const SETTLED_AFTER = 90_000;
 const ESCALATE_AFTER = 10 * 60_000;
@@ -18,13 +18,13 @@ function concise(value: string, limit = 180) {
   const characters = Array.from(value.replace(/\s+/g, " ").trim());
   return characters.length > limit ? `${characters.slice(0, limit).join("")}…` : characters.join("");
 }
-function reasonLabel(reason: WatchdogReason) {
+function reasonLabel(reason: WatchdogReason, noProgressMinutes: number) {
   return reason === "unassigned" ? "尚未登记独立负责人现场"
     : reason === "blocked" ? "负责人正在等待输入或批准"
       : reason === "missing" ? "负责人现场不可达"
         : reason === "protocol_missing" ? "负责人已停止但未按协议写回结果"
         : reason === "settled" ? "负责人已停止输出但尚未写回结果"
-          : "目标 30 分钟没有写回实质进展";
+          : `目标 ${noProgressMinutes} 分钟没有写回实质进展`;
 }
 function inspectable(goal: Goal) {
   return goal.mode === "concierge" && goal.status === "active";
@@ -33,7 +33,11 @@ function record(goal: Goal, at: string, text: string) {
   goal.activities.push({ id: newId("act"), at, actor: "巡检", kind: "watchdog", text });
   goal.updatedAt = at;
 }
-function reasonFor(goal: Goal, now: number): WatchdogReason | undefined {
+function reasonFor(
+  goal: Goal,
+  now: number,
+  staleAfter: number,
+): WatchdogReason | undefined {
   const age = now - Date.parse(progressAt(goal));
   if (goal.agentRuntime?.receipt?.status === "protocol_missing")
     return "protocol_missing";
@@ -46,7 +50,7 @@ function reasonFor(goal: Goal, now: number): WatchdogReason | undefined {
   if (goal.live?.state === "blocked") return "blocked";
   if (goal.live?.reachable === false && age >= OWNER_START_GRACE) return "missing";
   const receipt = goal.agentRuntime?.receipt;
-  if (age >= STALE_AFTER) return "stale";
+  if (age >= staleAfter) return "stale";
   if (receipt && ["waiting", "reminding", "reminded"].includes(receipt.status) &&
     now <= Date.parse(receipt.inspectAt) + 15_000)
     return;
@@ -58,12 +62,19 @@ function reasonFor(goal: Goal, now: number): WatchdogReason | undefined {
     receipt?.status !== "written")
     return "settled";
 }
-export function inspectWatchdog(goals: Goal[], at: string): WatchdogRequest[] {
-  const now = Date.parse(at), requests: WatchdogRequest[] = [];
+export function inspectWatchdog(
+  goals: Goal[],
+  at: string,
+  noProgressMinutes = DEFAULT_NO_PROGRESS_MINUTES,
+): WatchdogRequest[] {
+  const staleAfter =
+      Math.max(1, Math.trunc(noProgressMinutes)) * 60_000,
+    now = Date.parse(at),
+    requests: WatchdogRequest[] = [];
   for (const goal of goals) {
     if (!inspectable(goal) ||
       (goal.attention && goal.attention.source !== "watchdog" && goal.attention.source !== "live")) continue;
-    const reason = reasonFor(goal, now), basis = progressAt(goal);
+    const reason = reasonFor(goal, now, staleAfter), basis = progressAt(goal);
     if (!reason) {
       if (goal.attention?.source === "watchdog" || goal.attention?.source === "live") goal.attention = null;
       delete goal.watchdog;
@@ -87,9 +98,9 @@ export function inspectWatchdog(goals: Goal[], at: string): WatchdogRequest[] {
       if (!goal.attention) goal.attention = {
         id: newId("attention"),
         kind: "intervention", source: "watchdog", since: at,
-        summary: `目标「${goal.title}」${reasonLabel(reason)}。最后进展：${lastProgress}。已请管家处理 10 分钟仍未恢复，请查看现场。`,
+        summary: `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}。最后进展：${lastProgress}。已请管家处理 10 分钟仍未恢复，请查看现场。`,
       };
-      record(goal, at, `目标「${goal.title}」${reasonLabel(reason)}；已联系管家，但 10 分钟仍无恢复进展，现请你查看现场。`);
+      record(goal, at, `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}；已联系管家，但 10 分钟仍无恢复进展，现请你查看现场。`);
     }
     if (watch.escalatedAt) continue;
     const interval = watch.lastError ? RETRY_AFTER : NUDGE_AFTER;

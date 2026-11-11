@@ -54,6 +54,12 @@ await service.execute({
     owner: "codex --no-daemon --dangerously-bypass-hook-trust --no-alt-screen -a never -s danger-full-access",
   },
 });
+await service.execute({
+  type: "workspace.autonomy.set",
+  acceptance: "human-review",
+  initialize: true,
+  actor: "你",
+});
 const environment = {
   ...process.env, HOME: home, CODEX_HOME: codexHome,
   XDG_CONFIG_HOME: join(home, ".config"), XDG_STATE_HOME: join(home, ".local/state"),

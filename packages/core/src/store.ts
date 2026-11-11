@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { nextSequence, withLock } from "./storage.js";
 import type { WorkspaceRecoveryReason, WorkspaceState } from "./types.js";
-import { defaultProjectPolicy, initialState, newId } from "./model.js";
+import {
+  defaultProjectAutonomy,
+  defaultProjectPolicy,
+  defaultWorkspaceAutonomy,
+  initialState,
+  newId,
+} from "./model.js";
+import { reconcileAutonomyDefaults } from "./autonomy.js";
 import { decisionMarkdown } from "./governance.js";
 import { normalizeExternalWaits } from "./waiting.js";
 export { initialState, newId } from "./model.js";
@@ -92,13 +99,13 @@ export async function compactEventLogIfNeeded(
   await rename(temporary, path);
   return { compacted: true, before, after: Buffer.byteLength(body) };
 }
-export function validateState(value: unknown): WorkspaceState {
+function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
   if (!record(value))
     throw new IncompatibleWorkspaceStateError(
       "invalid-state",
       "工作区快照不是有效对象。",
     );
-  if (value.version !== 2)
+  if (value.version !== version)
     throw new IncompatibleWorkspaceStateError(
       "unsupported-version",
       `工作区状态版本 ${String(value.version ?? "未知")} 与当前版本不兼容。`,
@@ -139,6 +146,49 @@ export function validateState(value: unknown): WorkspaceState {
   normalizeExternalWaits(state);
   return state;
 }
+function migrateStateV2(value: unknown): WorkspaceState {
+  const state = validateShape(value, 2);
+  state.version = 3;
+  state.autonomy = defaultWorkspaceAutonomy();
+  state.bots = [];
+  state.botRequests = [];
+  for (const project of state.projects) {
+    project.autonomy = defaultProjectAutonomy();
+    project.releaseOnMerge = "unknown";
+  }
+  for (const goal of state.goals) {
+    goal.kind = "delivery";
+    goal.revision = 1;
+    delete goal.autonomy;
+    delete goal.brief;
+    delete goal.release;
+  }
+  return state;
+}
+export function validateState(value: unknown): WorkspaceState {
+  if (!record(value))
+    throw new IncompatibleWorkspaceStateError(
+      "invalid-state",
+      "工作区快照不是有效对象。",
+    );
+  if (value.version === 2) return migrateStateV2(value);
+  const state = validateShape(value, 3);
+  if (state.autonomy !== undefined &&
+    (!record(state.autonomy) ||
+      !["human-review", "auto-with-verification"].includes(String(state.autonomy.acceptance)) ||
+      typeof state.autonomy.paused !== "boolean" ||
+      !Number.isSafeInteger(state.autonomy.maxRecoveryAttempts) ||
+      !Number.isSafeInteger(state.autonomy.noProgressMinutes) ||
+      !Number.isSafeInteger(state.autonomy.revision) ||
+      !nonEmptyString(state.autonomy.updatedAt)))
+    invalidState("工作区自主目标设置无效。");
+  if (state.bots !== undefined && !Array.isArray(state.bots))
+    invalidState("工作区 Bot 绑定列表无效。");
+  if (state.botRequests !== undefined && !Array.isArray(state.botRequests))
+    invalidState("工作区 Bot 请求回执列表无效。");
+  reconcileAutonomyDefaults(state);
+  return state;
+}
 async function writeAtomic(path: string, body: string) {
   const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`;
   await writeFile(temporary, body, { mode: 0o600 });
@@ -177,13 +227,32 @@ export class WorkspaceStore {
       return undefined;
     }
   }
+  private async readStateFile(directory: string): Promise<WorkspaceState> {
+    const path = join(directory, "state.json"),
+      raw = await readFile(path, "utf8"),
+      parsed: unknown = JSON.parse(raw);
+    if (!record(parsed) || parsed.version !== 2) return validateState(parsed);
+    const migrated = migrateStateV2(parsed),
+      backup = join(directory, "state.v2.backup.json");
+    try {
+      await lstat(backup);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await writeFile(backup, raw, { mode: 0o600 });
+    }
+    const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`,
+      serialized = `${JSON.stringify(migrated, null, 2)}\n`;
+    await writeFile(temporary, serialized, { mode: 0o600 });
+    await rename(temporary, path);
+    return migrated;
+  }
   private async recover(incompatible: IncompatibleWorkspaceStateError): Promise<WorkspaceState> {
     const owner = await realpath(this.root);
     const directory = join(owner, ".crewvane"),
       current = await this.recoveryReason(directory);
     if (!current) {
       try {
-        return validateState(JSON.parse(await readFile(join(directory, "state.json"), "utf8")));
+        return await this.readStateFile(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return initialState();
         throw error;
@@ -245,7 +314,7 @@ export class WorkspaceStore {
   private async readUnlocked(): Promise<WorkspaceState> {
     const directory = await this.directory();
     try {
-      return validateState(JSON.parse(await readFile(join(directory, "state.json"), "utf8")));
+      return await this.readStateFile(directory);
     } catch (error) {
       if (error instanceof IncompatibleWorkspaceStateError || error instanceof SyntaxError) {
         const incompatible = error instanceof SyntaxError

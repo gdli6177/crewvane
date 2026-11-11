@@ -19,6 +19,12 @@ const service = new WorkspaceService(workspace);
 const agent = process.env.CREWVANE_TRIAL_AGENT ||
   `omp --tools=read,bash,edit,write --approval-mode=yolo --no-skills --no-rules --no-extensions --session-dir ${join(trial, "agent-sessions")}`;
 await service.execute({ type:"agents.configure", preferences:{ concierge:agent, owner:agent } });
+await service.execute({
+  type: "workspace.autonomy.set",
+  acceptance: "human-review",
+  initialize: true,
+  actor: "你",
+});
 const app = await electron.launch({
   executablePath:resolve(process.env.CREWVANE_APP_PATH || "apps/desktop/release/Crewvane-darwin-arm64/Crewvane.app/Contents/MacOS/Crewvane"),
   env:{ ...process.env, CREWVANE_TEST_HOME:home, CREWVANE_TEST_USER_DATA:join(trial,"userData"),

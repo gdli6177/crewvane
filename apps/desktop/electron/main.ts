@@ -45,6 +45,11 @@ import {
 } from "./agent-hook-manager.js";
 import { AgentRuntimeBroker } from "./agent-runtime-broker.js";
 import { HerdrHostBridge } from "./herdr-host-bridge.js";
+import {
+  AutonomyScheduler,
+  type AutonomyCandidate,
+  type AutonomyDispatchResult,
+} from "./autonomy-scheduler.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -65,6 +70,7 @@ const rendererURL = pathToFileURL(join(here, "renderer/index.html")).href;
 let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller, agentHookManager: AgentHookManager, agentRuntimeBroker: AgentRuntimeBroker;
 let coordinatorInbox: CoordinatorInbox | undefined, coordinatorDispatcher: CoordinatorDispatcher | undefined;
 let herdrHostBridge: HerdrHostBridge | undefined;
+let autonomyScheduler: AutonomyScheduler | undefined;
 function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ?? `crewvane-${createHash("sha256").update(path ?? "").digest("hex").slice(0, 10)}`; }
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
@@ -375,10 +381,56 @@ function dispatchKind(goal: Goal): CoordinatorInboxItem["kind"] {
     case "follow_up": return "follow_up";
     case "scene_reply": return "scene_reply";
     case "restart": return "restart";
+    case "verification":
+    case "continuation":
     case "feedback":
     case "resume": return "feedback";
     default: return "goal";
   }
+}
+async function dispatchAutonomyCandidate(
+  candidate: AutonomyCandidate,
+): Promise<AutonomyDispatchResult> {
+  const target = activeService();
+  if (root !== target.root)
+    return { status: "failed", detail: "工作区已切换，未发送自主续跑。" };
+  let item = (await target.read()).goals.find(goal => goal.id === candidate.goalId);
+  if (!item || ["completed", "dropped"].includes(item.status))
+    return { status: "failed", detail: "自主目标已结束或不存在。" };
+  if (item.autonomy?.paused)
+    return { status: "failed", detail: "自主目标已暂停，未发送续跑。" };
+  const kind = candidate.trigger === "verification"
+    ? "verification" as const
+    : "continuation" as const;
+  const note = candidate.trigger === "verification"
+    ? "独立复核到期。请安排未提交该交付、且不复用负责人现场的独立复核者，逐项核对完成条件、候选版本和真实证据；复核通过后调用 crewvane goal verify。不得由负责人自检代替复核。"
+    : candidate.trigger === "checkpoint"
+      ? "负责人已给出下一动作。请确认原负责人继续一个短回合，并在结束前写回 checkpoint、wait、boundary 或 delivery。"
+      : candidate.trigger === "decision-resolved"
+        ? "人的决定或边界变更已经解决。请让原负责人基于既有成果继续一个短回合。"
+        : candidate.trigger === "wait-due"
+          ? "外部等待或提醒已到期。请核对真实状态，再决定继续、重新等待或交回人。"
+          : candidate.trigger === "dependency"
+            ? "可信集成报告外部依赖已完成。请让原负责人核对结果并继续。"
+            : "恢复预算内仍有新证据。请让原负责人针对新的失败证据继续一个短回合，不要重复相同尝试。";
+  if (item.dispatch?.status !== "pending") {
+    item = await target.execute({
+      type: "goal.dispatch",
+      goalId: item.id,
+      status: "pending",
+      kind,
+      note,
+    }) as Goal;
+  }
+  await dispatchGoal(target, item.id);
+  const dispatched = (await target.read()).goals.find(goal => goal.id === candidate.goalId);
+  if (!dispatched) return { status: "failed", detail: "自主目标在发送后消失。" };
+  if (dispatched.dispatch?.status === "failed")
+    return {
+      status: "failed",
+      detail: dispatched.dispatch.detail || "自主续跑未送达负责人。",
+    };
+  return { status: "accepted", detail: note };
 }
 async function ensureCoordinatorInbox() {
   if (!coordinatorInbox || !coordinatorDispatcher) throw new Error("管家收件箱尚未准备好");
@@ -839,6 +891,7 @@ function watchWorkspaceState(target: WorkspaceService) {
       try {
         const state = await target.read();
         await agentRuntimeBroker?.refresh();
+        void autonomyScheduler?.tick();
         deliverGoalStatusChanges(target, state, target.root);
         broadcastSnapshot(state, target.root);
       } catch (error) {
@@ -973,6 +1026,7 @@ async function openWorkspace(path: string) {
       message: `管家收件箱恢复暂未完成：${error instanceof Error ? error.message : String(error)}`,
     });
   });
+  void autonomyScheduler?.tick();
 }
 async function synchronize() {
   if (syncing || !service || !root) return;
@@ -980,6 +1034,8 @@ async function synchronize() {
   const target = service, workspace = root;
   try {
     let state = await target.read();
+    await autonomyScheduler?.tick();
+    state = await target.read();
     deliverGoalStatusChanges(target, state, workspace);
     await deliverAttentionNotifications(target, state, workspace);
     let status = await herdrStatus();
@@ -1094,6 +1150,16 @@ app.whenReady().then(async () => {
       void agentRuntimeStatus().then(broadcastAgentRuntimeStatus);
     },
   });
+  autonomyScheduler = new AutonomyScheduler({
+    service: () => service,
+    dispatch: dispatchAutonomyCandidate,
+    onError: error => {
+      if (window && !window.isDestroyed()) window.webContents.send("crewvane:event", {
+        type: "diagnostic",
+        message: `自主续跑调度暂未完成：${error instanceof Error ? error.message : String(error)}`,
+      });
+    },
+  });
   herdrInstallation = new HerdrInstallation(
     tools,
     join(managedBin, "herdr"),
@@ -1204,7 +1270,10 @@ app.whenReady().then(async () => {
     }
     if (["goal.rework", "goal.resolve", "goal.update"].includes(command.type)) {
       const item = result as Goal;
-      if (!["completed", "dropped"].includes(item.status) && item.mode === "concierge") {
+      const shouldDispatch = command.type === "goal.update"
+        ? item.status === "active"
+        : !["completed", "dropped"].includes(item.status);
+      if (shouldDispatch && item.mode === "concierge") {
         const current = (await target.read()).goals.find(goal => goal.id === item.id);
         if (current?.dispatch?.status !== "pending") {
           await target.execute({

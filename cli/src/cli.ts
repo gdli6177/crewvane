@@ -5,6 +5,7 @@ import {
   importAttachmentFiles,
   type CrewvaneCommand,
   type GoalAttachment,
+  type HerdrReference,
   type IntakeHandling,
   type HighRiskCategory,
 } from "../../packages/core/src/index.js";
@@ -41,7 +42,8 @@ Agent 状态协议（仅在明确事实发生后使用）：
     （由受管 Agent Hook 调用；普通 Agent 会话无目标环境时 no-op）
   crewvane event herdr [--json]
   crewvane goal create --title TEXT [--project ID] [--description TEXT]
-    [--mode concierge|manual]
+    [--kind delivery|discovery] [--mode concierge|manual]
+  crewvane goal kind ID --kind delivery|discovery
   crewvane goal update ID [--title TEXT] [--description TEXT] [--next TEXT]
     [--owner TEXT] [--status active|waiting] [--waiting-for 外部第三方] [--remind-at ISO]
   crewvane goal progress ID --summary TEXT [--next TEXT] [--owner NAME]
@@ -49,8 +51,15 @@ Agent 状态协议（仅在明确事实发生后使用）：
   crewvane goal decide ID --question TEXT [--next TEXT] [--key KEY]
   crewvane goal risk ID --category CATEGORY --summary TEXT [--key KEY]
   crewvane goal ship ID --operation merge|deploy --checks passed|failed
+  crewvane goal brief ID --file PATH [--expected-revision N]
+  crewvane goal checkpoint ID --summary TEXT --next TEXT [--due-at ISO]
+  crewvane goal verify ID --delivery ID --outcome passed|failed
+    --summary TEXT --criterion ID::passed|failed::EVIDENCE_ID
+    [--criterion ... | --criteria-file PATH] [--reviewer NAME]
+  crewvane goal boundary ID --file PATH
   crewvane goal review ID --summary TEXT [--location TEXT] [--url URL]
     --check "名称::命令或操作::passed::说明"（可重复）
+    [--candidate-revision REV] [--candidate-digest SHA256] [--evidence-file PATH]
   crewvane goal accept ID [--note TEXT]
   crewvane goal complete ID --note "用户明确确认完成的原话"
   crewvane goal rework ID --note TEXT
@@ -62,6 +71,38 @@ Agent 状态协议（仅在明确事实发生后使用）：
     [--transport pane --process-id PID]（自定义 CLI）
   crewvane owner launch ID --name NAME [--task TEXT | --task-file FILE]
     创建隔离的负责人现场；省略任务内容时读取目标详情与下一步
+  crewvane verifier launch ID --name NAME [--task TEXT]
+    为待复核交付创建不复用负责人现场的独立复核者
+
+人用自主目标与发布协议：
+  crewvane autonomy set [--acceptance human-review|auto-with-verification]
+    [--paused yes|no] [--max-recovery-attempts N] [--no-progress-minutes N]
+    [--initialize]
+  crewvane project autonomy PROJECT_ID [--acceptance inherit|human-review|auto-with-verification]
+    [--release-on-merge never|production|unknown]
+  crewvane goal autonomy pause|resume ID
+  crewvane goal autonomy acceptance ID
+    --acceptance inherit|human-review|auto-with-verification
+  crewvane goal boundary-resolve ID --boundary ID --outcome approved|rejected --note TEXT
+  crewvane goal reopen ID --note TEXT
+  crewvane release create --from GOAL_ID [--from GOAL_ID ...] --environment production
+    --revision REV [--digest SHA256] [--version VERSION]
+  crewvane release approve ID --note TEXT
+  crewvane release reject ID --note TEXT
+  crewvane release result ID --outcome succeeded|failed
+    --evidence "真实结果"（可重复）| --evidence-file PATH
+
+本地 Bot 发起方协议：
+  crewvane bot call --file ENVELOPE.json
+  crewvane bot bind --id ID --name NAME --role initiator
+    --project ID（可重复）--operation OPERATION（可重复）--expires-at ISO
+  crewvane bot revoke ID
+
+内部续跑调度（应用主进程使用）：
+  crewvane autonomy inspect [--at ISO]
+  crewvane autonomy claim ID --continuation ID [--at ISO]
+  crewvane autonomy report ID --continuation ID --outcome sent|failed|settled
+    [--lease LEASE_ID] [--detail TEXT] [--at ISO]
 
 使用 --root DIR 或 CREWVANE_WORKSPACE 指定工作区。所有读写与桌面共用状态。
 goal message 与 direct 不按正文推断状态。交给管家处理的外部等待会恢复 active，待管家重新核定；next 保留。
@@ -77,10 +118,10 @@ function parse(argv: string[]) {
     if (!token.startsWith("--")) { positional.push(token); continue; }
     const [name, inline] = token.slice(2).split(/=(.*)/s);
     if (!name) throw new Error("无效参数");
-    if (["json", "all", "help", "new", "once", "current", "self"].includes(name)) { values.set(name, ["true"]); continue; }
+    if (["json", "all", "help", "new", "once", "current", "self", "initialize"].includes(name)) { values.set(name, ["true"]); continue; }
     const value = inline ?? argv[++index];
     if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`--${name} 需要一个值`);
-    if (values.has(name) && !["check", "attachment"].includes(name)) throw new Error(`--${name} 不能重复`);
+    if (values.has(name) && !["check", "attachment", "criterion", "from", "project", "operation", "evidence"].includes(name)) throw new Error(`--${name} 不能重复`);
     values.set(name, [...(values.get(name) ?? []), value]);
   }
   return { positional, one: (name: string) => values.get(name)?.[0], all: (name: string) => values.get(name) ?? [], has: (name: string) => values.has(name) };
@@ -96,6 +137,55 @@ function checks(values: string[]) {
 function textArg(value: string | undefined, label: string) {
   if (!value?.trim()) throw new Error(`${label} 不能为空`);
   return value.trim();
+}
+function currentHerdrReference(agent?: string): HerdrReference | undefined {
+  if (process.env.HERDR_ENV !== "1") return undefined;
+  const session = process.env.HERDR_SESSION?.trim();
+  if (!session || !/^[a-zA-Z0-9_-]{1,80}$/.test(session)) return undefined;
+  const reference: HerdrReference = {
+    session,
+    ...(process.env.HERDR_WORKSPACE_ID?.trim()
+      ? { workspaceId: process.env.HERDR_WORKSPACE_ID.trim() }
+      : {}),
+    ...(process.env.HERDR_TAB_ID?.trim()
+      ? { tabId: process.env.HERDR_TAB_ID.trim() }
+      : {}),
+    ...(process.env.HERDR_PANE_ID?.trim()
+      ? { paneId: process.env.HERDR_PANE_ID.trim() }
+      : {}),
+    ...(agent ? { agent } : {}),
+  };
+  return reference.paneId || reference.tabId ? reference : undefined;
+}
+async function jsonFile(path: string | undefined, label: string): Promise<unknown> {
+  if (!path?.trim()) throw new Error(`需要 ${label} 文件路径`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new Error(`${label} 不是有效 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+  return parsed;
+}
+async function verificationCriteria(values: string[], file?: string) {
+  if (values.length && file) throw new Error("--criterion 与 --criteria-file 不能同时使用");
+  if (file) {
+    const parsed = await jsonFile(file, "复核条件");
+    if (!Array.isArray(parsed)) throw new Error("复核条件文件必须是数组");
+    return parsed;
+  }
+  if (!values.length) throw new Error("至少提供一个 --criterion");
+  return values.map(value => {
+    const [criterionId, result, evidenceIds, ...note] = value.split("::");
+    if (!criterionId || !["passed", "failed"].includes(result ?? "") || !evidenceIds)
+      throw new Error("--criterion 格式：完成条件ID::passed|failed::证据ID[,证据ID]::说明");
+    return {
+      criterionId: criterionId.trim(),
+      result,
+      evidenceIds: evidenceIds.split(",").map(id => id.trim()).filter(Boolean),
+      ...(note.length ? { note: note.join("::") } : {}),
+    };
+  });
 }
 async function coordinatorCaseId(allowMissing = false) {
   if (process.env.CREWVANE_COORDINATOR !== "1") return;
@@ -281,17 +371,66 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       // must never prevent the Agent from starting, running or stopping.
       return 0;
     }
-    const service = new WorkspaceService(args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd())),
+    const managedAgentName = process.env.CREWVANE_AGENT_NAME?.trim(),
+      verifierMode = process.env.CREWVANE_ROLE?.trim() === "verifier",
+      verifierGoalId = process.env.CREWVANE_GOAL_ID?.trim(),
+      service = new WorkspaceService(args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd())),
       coordinatorMode = process.env.CREWVANE_COORDINATOR === "1",
       coordinatorContext = await coordinatorCaseId(group === "direct" && args.has("new")),
       coordinatorCase = coordinatorContext?.goalId,
-      actor = args.one("actor") ?? (process.env.CREWVANE_AGENT_NAME?.trim() || undefined);
+      actor = args.one("actor") ?? (managedAgentName || undefined);
+    const managedAgent = coordinatorMode || Boolean(managedAgentName);
+    const requireHumanCli = () => {
+      if (managedAgent)
+        throw new Error("该命令只能由人通过桌面或普通终端执行，受管 Agent 不能调用");
+    };
+    if (verifierMode) {
+      if (!managedAgentName)
+        throw new Error("独立复核者必须由 Crewvane 启动并登记身份");
+      if (!verifierGoalId)
+        throw new Error("独立复核者缺少当前复核目标");
+      const allowed = group === "status" ||
+        (group === "goal" && ["show", "verify"].includes(action ?? ""));
+      if (!allowed)
+        throw new Error("独立复核者只能查看当前目标或提交复核结果");
+      if (group === "goal" && action === "show" &&
+        (target ?? args.one("id")) !== verifierGoalId)
+        throw new Error("独立复核者只能查看当前复核目标");
+      if (group === "goal" && action === "verify" && target !== verifierGoalId)
+        throw new Error("独立复核者只能提交当前复核目标的复核结果");
+    }
+    let command: CrewvaneCommand | undefined, result: unknown, coordinatorRead = false,
+      verifierRead = false,
+      ownerLaunch: {
+        name: string;
+        task?: string;
+        taskFile?: string;
+        role?: "owner" | "verifier";
+      } | undefined;
+    if (verifierMode && group === "status") {
+      const state = await service.read(),
+        goal = state.goals.find(item => item.id === verifierGoalId);
+      if (!goal) throw new Error("当前复核目标不存在");
+      result = {
+        name: state.name,
+        agents: state.agents ?? { concierge: "codex" },
+        project: state.projects.find(project => project.id === goal.projectId),
+        goal: {
+          id: goal.id,
+          title: goal.title,
+          kind: goal.kind,
+          mode: goal.mode,
+          status: goal.status,
+          next: goal.next,
+          attention: goal.attention ?? null,
+        },
+      };
+      verifierRead = true;
+    }
     if (group === "board" && !coordinatorCase) {
       await runBoard(service, io, { once: args.has("once"), startWithNewGoal: args.has("new") });
       return 0;
     }
-    let command: CrewvaneCommand | undefined, result: unknown, coordinatorRead = false,
-      ownerLaunch: { name: string; task?: string; taskFile?: string } | undefined;
     if (coordinatorMode && !coordinatorCase) {
       if (group !== "direct" || !args.has("new"))
         throw new Error("管家当前没有案卷范围；只有 crewvane direct --new 可以直接建立新目标");
@@ -310,13 +449,15 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         coordinatorRead = true;
       } else if (group === "goal" && [
         "update", "progress", "wait", "decide", "risk", "ship",
-        "accept", "complete", "rework", "drop", "resolve", "remind",
-        "scene-reply",
+        "brief", "checkpoint", "boundary", "kind",
+        "complete", "rework", "drop", "resolve", "remind", "scene-reply",
       ].includes(action ?? "")) {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "session" && action === "set") {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "owner" && action === "launch") {
+        assertCoordinatorCase(coordinatorCase, target);
+      } else if (group === "verifier" && action === "launch") {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "direct") {
         if (args.has("new") && args.one("goal"))
@@ -327,7 +468,7 @@ export async function run(argv: string[], io = { out: console.log, error: consol
           assertCoordinatorCase(coordinatorCase, args.one("goal") ?? coordinatorCase);
       } else throw new Error("管家当前只能查看或更新自己的案卷，不能执行该命令");
     }
-    if (!coordinatorRead) {
+    if (!coordinatorRead && !verifierRead) {
       if (group === "status") result = await service.read();
       else if (group === "attention") result = attentionGoals((await service.read()).goals);
       else if (group === "ask") {
@@ -391,7 +532,85 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       else if (group === "goal" && action === "restore") command = { type: "goal.restore", goalId: target! };
       else if (group === "goal" && action === "create") {
         if (args.has("workflow")) throw new Error("工序已移除；请在目标说明中直接写清工作要求");
-        command = { type: "goal.create", input: { title: args.one("title")!, projectId: args.one("project") ?? "personal", description: args.one("description"), mode: (args.one("mode") ?? "concierge") as "concierge" | "manual", next: args.one("next"), waitingFor: args.one("owner"), remindAt: args.one("remind-at") } };
+        command = {
+          type: "goal.create",
+          input: {
+            title: args.one("title")!,
+            projectId: args.one("project") ?? "personal",
+            description: args.one("description"),
+            kind: args.one("kind") as "delivery" | "discovery" | undefined,
+            mode: (args.one("mode") ?? "concierge") as "concierge" | "manual",
+            next: args.one("next"),
+            waitingFor: args.one("owner"),
+            remindAt: args.one("remind-at"),
+          },
+        };
+      }
+      else if (group === "goal" && action === "kind")
+        command = {
+          type: "goal.kind.set",
+          goalId: target!,
+          kind: textArg(args.one("kind"), "--kind") as "delivery" | "discovery",
+          actor,
+        };
+      else if (group === "goal" && action === "brief") {
+        const brief = await jsonFile(args.one("file"), "委托摘要");
+        if (!brief || typeof brief !== "object" || Array.isArray(brief))
+          throw new Error("委托摘要文件必须是 JSON 对象");
+        command = {
+          type: "goal.brief",
+          goalId: target!,
+          brief: brief as import("../../packages/core/src/index.js").GoalBriefInput,
+          expectedRevision: args.one("expected-revision")
+            ? Number(args.one("expected-revision"))
+            : undefined,
+          actor,
+        };
+      }
+      else if (group === "goal" && action === "checkpoint")
+        command = {
+          type: "goal.checkpoint",
+          goalId: target!,
+          summary: args.one("summary")!,
+          next: args.one("next")!,
+          dueAt: args.one("due-at"),
+          actor,
+        };
+      else if (group === "goal" && action === "verify") {
+        const explicitReviewer = args.one("reviewer");
+        if (managedAgentName && explicitReviewer &&
+          explicitReviewer !== managedAgentName)
+          throw new Error("受管 Agent 不能用 --reviewer 冒用其他复核人身份");
+        const criteria = await verificationCriteria(
+          args.all("criterion"),
+          args.one("criteria-file"),
+        ) as import("../../packages/core/src/index.js").VerificationCriterion[];
+        const reviewer = managedAgentName ?? explicitReviewer ?? actor,
+          reviewerHerdr = currentHerdrReference(reviewer);
+        command = {
+          type: "goal.verify",
+          goalId: target!,
+          deliveryId: args.one("delivery")!,
+          outcome: args.one("outcome") as "passed" | "failed",
+          summary: args.one("summary")!,
+          criteria,
+          reviewer,
+          ...(reviewerHerdr ? { reviewerHerdr } : {}),
+        };
+      }
+      else if (group === "goal" && action === "boundary") {
+        const change = await jsonFile(args.one("file"), "边界变更");
+        if (!change || typeof change !== "object" || Array.isArray(change))
+          throw new Error("边界变更文件必须是 JSON 对象");
+        command = {
+          type: "goal.boundary",
+          goalId: target!,
+          change: change as Extract<
+            CrewvaneCommand,
+            { type: "goal.boundary" }
+          >["change"],
+          actor,
+        };
       }
       else if (group === "goal" && action === "update") command = { type: "goal.update", goalId: target!, patch: {
         ...(args.has("stage") ? (() => { throw new Error("工序已移除；请直接更新目标下一步"); })() : {}),
@@ -435,7 +654,35 @@ export async function run(argv: string[], io = { out: console.log, error: consol
           checksPassed: checksPassed === "passed", actor,
         };
       }
-      else if (group === "goal" && action === "review") command = { type: "goal.review", goalId: target!, delivery: { summary: args.one("summary")!, location: args.one("location"), url: args.one("url"), checks: checks(args.all("check")) }, actor };
+      else if (group === "goal" && action === "review") {
+        const evidence = args.one("evidence-file")
+          ? await jsonFile(args.one("evidence-file"), "交付证据")
+          : undefined;
+        if (evidence !== undefined && !Array.isArray(evidence))
+          throw new Error("交付证据文件必须是数组");
+        const revision = args.one("candidate-revision");
+        command = {
+          type: "goal.review",
+          goalId: target!,
+          delivery: {
+            summary: args.one("summary")!,
+            location: args.one("location"),
+            url: args.one("url"),
+            checks: checks(args.all("check")),
+            ...(revision
+              ? {
+                  candidate: {
+                    revision,
+                    digest: args.one("candidate-digest"),
+                    version: args.one("candidate-version"),
+                  },
+                }
+              : {}),
+            ...(evidence ? { evidence: evidence as import("../../packages/core/src/index.js").Evidence[] } : {}),
+          },
+          actor,
+        };
+      }
       else if (group === "goal" && action === "rework")
         command = {
           type: "goal.rework",
@@ -443,13 +690,204 @@ export async function run(argv: string[], io = { out: console.log, error: consol
           note: textArg(args.one("note"), "--note"),
           actor,
         };
-      else if (group === "goal" && ["accept", "complete", "drop"].includes(action ?? ""))
+      else if (group === "goal" && ["accept", "complete", "drop"].includes(action ?? "")) {
+        if (action === "accept") requireHumanCli();
         command = {
           type: `goal.${action}` as "goal.accept" | "goal.complete" | "goal.drop",
           goalId: target!,
           note: args.one("note") ?? args.one("reason") ?? undefined,
+          actor: action === "accept" ? "你" : actor,
+        };
+      }
+      else if (group === "goal" && action === "autonomy") {
+        requireHumanCli();
+        const goalId = args.positional[3];
+        if (!goalId) throw new Error("需要目标 ID");
+        if (target === "acceptance") {
+          command = {
+            type: "goal.autonomy.acceptance",
+            goalId,
+            acceptance: textArg(
+              args.one("acceptance"),
+              "--acceptance",
+            ) as "inherit" | "human-review" | "auto-with-verification",
+            actor: "你",
+          };
+        } else if (target === "pause" || target === "resume") {
+          command = {
+            type: target === "pause"
+              ? "goal.autonomy.pause"
+              : "goal.autonomy.resume",
+            goalId,
+            actor: "你",
+          };
+        } else {
+          throw new Error("goal autonomy 只支持 pause、resume 或 acceptance");
+        }
+      }
+      else if (group === "goal" && action === "boundary-resolve") {
+        requireHumanCli();
+        command = {
+          type: "goal.boundary.resolve",
+          goalId: target!,
+          boundaryId: args.one("boundary")!,
+          outcome: args.one("outcome") as "approved" | "rejected",
+          note: args.one("note")!,
+          actor: "你",
+        };
+      }
+      else if (group === "goal" && action === "reopen") {
+        requireHumanCli();
+        command = {
+          type: "goal.reopen",
+          goalId: target!,
+          note: args.one("note")!,
+          actor: "你",
+        };
+      }
+      else if (group === "autonomy" && action === "set") {
+        requireHumanCli();
+        const pausedValue = args.one("paused");
+        if (pausedValue !== undefined && !["yes", "no", "true", "false"].includes(pausedValue))
+          throw new Error("--paused 必须是 yes 或 no");
+        command = {
+          type: "workspace.autonomy.set",
+          acceptance: args.one("acceptance") as
+            | "human-review"
+            | "auto-with-verification"
+            | undefined,
+          paused: pausedValue === undefined
+            ? undefined
+            : ["yes", "true"].includes(pausedValue),
+          maxRecoveryAttempts: args.one("max-recovery-attempts")
+            ? Number(args.one("max-recovery-attempts"))
+            : undefined,
+          noProgressMinutes: args.one("no-progress-minutes")
+            ? Number(args.one("no-progress-minutes"))
+            : undefined,
+          initialize: args.has("initialize"),
+          actor: "你",
+        };
+      }
+      else if (group === "autonomy" && action === "inspect") {
+        command = {
+          type: "autonomy.inspect",
+          at: args.one("at") ?? new Date().toISOString(),
+        };
+      }
+      else if (group === "autonomy" && action === "claim") {
+        if (!target) throw new Error("需要目标 ID");
+        command = {
+          type: "autonomy.claim",
+          goalId: target,
+          continuationId: args.one("continuation")!,
+          at: args.one("at") ?? new Date().toISOString(),
+        };
+      }
+      else if (group === "autonomy" && action === "report") {
+        if (!target) throw new Error("需要目标 ID");
+        command = {
+          type: "autonomy.report",
+          goalId: target,
+          continuationId: args.one("continuation")!,
+          outcome: args.one("outcome") as "sent" | "failed" | "settled",
+          detail: args.one("detail"),
+          leaseId: args.one("lease"),
+          at: args.one("at") ?? new Date().toISOString(),
+        };
+      }
+      else if (group === "project" && action === "autonomy") {
+        requireHumanCli();
+        if (!target) throw new Error("需要项目 ID");
+        const project = (await service.read()).projects.find(item => item.id === target);
+        if (!project) throw new Error("找不到项目");
+        command = {
+          type: "project.autonomy.set",
+          projectId: target,
+          acceptance: (args.one("acceptance") ??
+            project.autonomy?.acceptance ??
+            "inherit") as "inherit" | "human-review" | "auto-with-verification",
+          releaseOnMerge: (args.one("release-on-merge") ??
+            project.releaseOnMerge ??
+            "unknown") as "never" | "production" | "unknown",
+          actor: "你",
+        };
+      }
+      else if (group === "release" && action === "create") {
+        requireHumanCli();
+        const sourceGoalIds = args.all("from");
+        if (!sourceGoalIds.length) throw new Error("发布目标至少需要一个 --from");
+        command = {
+          type: "release.create",
+          sourceGoalIds,
+          environment: args.one("environment") ?? "production",
+          candidate: {
+            revision: args.one("revision")!,
+            digest: args.one("digest"),
+            version: args.one("version"),
+          },
+          actor: "你",
+        };
+      }
+      else if (group === "release" && ["approve", "reject"].includes(action ?? "")) {
+        requireHumanCli();
+        if (!target) throw new Error("需要发布目标 ID");
+        command = {
+          type: `release.${action}` as "release.approve" | "release.reject",
+          goalId: target,
+          note: args.one("note")!,
+          actor: "你",
+        };
+      }
+      else if (group === "release" && action === "result") {
+        if (!target) throw new Error("需要发布目标 ID");
+        const evidence = args.one("evidence-file")
+          ? await jsonFile(args.one("evidence-file"), "发布证据")
+          : args.all("evidence");
+        if (!Array.isArray(evidence) || !evidence.every(item => typeof item === "string"))
+          throw new Error("发布证据必须是字符串数组");
+        command = {
+          type: "release.result",
+          goalId: target,
+          outcome: args.one("outcome") as "succeeded" | "failed",
+          evidence,
           actor,
         };
+      }
+      else if (group === "bot" && action === "bind") {
+        requireHumanCli();
+        command = {
+          type: "bot.binding.set",
+          binding: {
+            id: args.one("id")!,
+            name: args.one("name")!,
+            role: args.one("role") as "initiator" | "executor",
+            projectIds: args.all("project"),
+            operations: args.all("operation") as import("../../packages/core/src/index.js").BotOperation[],
+            expiresAt: args.one("expires-at")!,
+          },
+          actor: "你",
+        };
+      }
+      else if (group === "bot" && action === "revoke") {
+        requireHumanCli();
+        if (!target) throw new Error("需要 Bot 绑定 ID");
+        command = { type: "bot.binding.revoke", botId: target, actor: "你" };
+      }
+      else if (group === "bot" && action === "call") {
+        const envelope = await jsonFile(args.one("file"), "Bot 请求");
+        if (!envelope || typeof envelope !== "object" || Array.isArray(envelope))
+          throw new Error("Bot 请求必须是 JSON 对象");
+        const value = envelope as Record<string, unknown>;
+        command = {
+          type: "bot.request",
+          schema: value.schema as "crewvane.bot.v1",
+          requestId: value.requestId as string,
+          operation: value.operation as import("../../packages/core/src/index.js").BotOperation,
+          botId: value.botId as string,
+          payload: value.payload,
+        };
+      }
       else if (group === "goal" && action === "resolve") command = {
         type: "goal.resolve", goalId: target!, note: args.one("note") ?? args.one("reason"), actor,
         outcome: (args.one("outcome") ?? "approved") as "approved" | "rejected",
@@ -465,11 +903,20 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       else if (group === "owner" && action === "launch")
         ownerLaunch = {
           name: textArg(args.one("name"), "--name"),
+          role: "owner",
           ...(args.one("task")
             ? { task: textArg(args.one("task"), "--task") }
             : {}),
           ...(args.one("task-file")
             ? { taskFile: textArg(args.one("task-file"), "--task-file") }
+            : {}),
+        };
+      else if (group === "verifier" && action === "launch")
+        ownerLaunch = {
+          name: textArg(args.one("name"), "--name"),
+          role: "verifier",
+          ...(args.one("task")
+            ? { task: textArg(args.one("task"), "--task") }
             : {}),
         };
       else throw new Error(`不支持的命令：${args.positional.join(" ")}\n\n${usage}`);
@@ -494,6 +941,14 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       result = { ...goal, attentionRequest: attentionRequest(goal) };
     }
     if (args.has("json")) io.out(JSON.stringify(result, null, 2));
+    else if (group === "status" && verifierRead) {
+      const current = result as {
+        name: string;
+        project?: { name?: string };
+        goal: { status: string; next: string };
+      };
+      io.out(`${current.name} · ${current.project?.name ?? "个人事项"} · 当前复核目标 · ${current.goal.status}\n${current.goal.next}`);
+    }
     else if (group === "status" && coordinatorRead) {
       const current = result as { name: string; project?: { name?: string } };
       io.out(`${current.name} · ${current.project?.name ?? "个人事项"} · 当前案卷`);

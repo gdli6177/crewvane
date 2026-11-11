@@ -55,6 +55,16 @@ test("no-progress check contacts concierge first, deduplicates, and escalates on
   inspectWatchdog([item], after(42));
   assert.equal(item.activities.length, count);
 });
+test("workspace no-progress minutes replace the default stale threshold", () => {
+  const item = goal();
+  assert.deepEqual(inspectWatchdog([item], after(5), 10), []);
+  const [request] = inspectWatchdog([item], after(11), 10);
+  assert.equal(request?.reason, "stale");
+  reportWatchdog(item, after(11), request!.basis, "contacted");
+  assert.deepEqual(inspectWatchdog([item], after(20), 10), []);
+  assert.equal(inspectWatchdog([item], after(21), 10).length, 0);
+  assert.match(structuredClone(item).attention?.summary ?? "", /10 分钟没有写回实质进展/);
+});
 test("blocked or missing owner is checked without treating idle or waiting as failure", () => {
   const item = goal();
   item.live = { state: "idle", checkedAt: start };

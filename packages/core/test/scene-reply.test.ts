@@ -109,7 +109,7 @@ test("review acceptance and due follow-up replies close only their matching atte
     }
     await service.execute(kind === "review" ? {
       type: "goal.accept", goalId: goal.id, attentionId: reply.sceneReply!.attentionId,
-      sceneReplyId: reply.sceneReply!.id, note: reply.sceneReply!.quote, actor: "concierge",
+      sceneReplyId: reply.sceneReply!.id, note: reply.sceneReply!.quote, actor: "你",
     } : {
       type: "goal.progress", goalId: goal.id, attentionId: reply.sceneReply!.attentionId,
       sceneReplyId: reply.sceneReply!.id, summary: "审批结果已收到，继续实施。", actor: "concierge",

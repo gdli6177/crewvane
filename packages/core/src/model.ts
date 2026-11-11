@@ -1,4 +1,14 @@
-import type { Attention, AttentionKind, Goal, ProjectPolicy, WorkspaceRecovery, WorkspaceState } from "./types.js";
+import type {
+  Attention,
+  AttentionKind,
+  Goal,
+  GoalKind,
+  ProjectAutonomy,
+  ProjectPolicy,
+  WorkspaceAutonomy,
+  WorkspaceRecovery,
+  WorkspaceState,
+} from "./types.js";
 import { hasDueReminder } from "./task-pool.js";
 export const newId = (prefix: string) => `${prefix}_${globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 export const defaultProjectPolicy = (): ProjectPolicy => ({
@@ -7,16 +17,41 @@ export const defaultProjectPolicy = (): ProjectPolicy => ({
   revision: 1,
   updatedAt: new Date().toISOString(),
 });
+export const defaultProjectAutonomy = (): ProjectAutonomy => ({
+  acceptance: "inherit",
+  revision: 1,
+  updatedAt: new Date().toISOString(),
+});
+export const defaultWorkspaceAutonomy = (): WorkspaceAutonomy => ({
+  acceptance: "human-review",
+  paused: false,
+  maxRecoveryAttempts: 3,
+  noProgressMinutes: 30,
+  revision: 1,
+  updatedAt: new Date().toISOString(),
+});
 export const initialState = (recovery?: WorkspaceRecovery): WorkspaceState => ({
-  version: 2,
+  version: 3,
   name: "我的工作台",
-  projects: [{ id: "personal", name: "个人事项", policy: defaultProjectPolicy(), createdAt: new Date().toISOString() }],
+  projects: [{
+    id: "personal",
+    name: "个人事项",
+    policy: defaultProjectPolicy(),
+    autonomy: defaultProjectAutonomy(),
+    releaseOnMerge: "unknown",
+    createdAt: new Date().toISOString(),
+  }],
   workflows: [],
   goals: [],
   decisions: [],
+  autonomy: defaultWorkspaceAutonomy(),
   ...(recovery ? { recovery } : {}),
   concierge: { session: "crewvane", status: "not_ready" },
 });
+export const goalKind = (goal: Goal): GoalKind => goal.kind ?? "delivery";
+export const goalRevision = (goal: Goal) => goal.revision ?? 1;
+export const goalIsAutonomous = (goal: Goal) =>
+  Boolean(goal.brief || goal.autonomy || goal.kind === "discovery" || goal.kind === "release");
 export function attentionGoals(goals: Goal[], now = Date.now()): Goal[] {
   return goals.filter((goal) => attentionKind(goal, now)).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }

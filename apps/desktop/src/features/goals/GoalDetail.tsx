@@ -7,6 +7,8 @@ import {
   FileText,
   ImagePlus,
   MessageSquareText,
+  PauseCircle,
+  PlayCircle,
   Radio,
   Sparkles,
   SquareTerminal,
@@ -23,7 +25,15 @@ import { GoalActionDock } from "./GoalActionDock.js";
 import { GoalAttachments } from "./GoalAttachments.js";
 import { GoalHistory } from "./GoalActivity.js";
 import { GoalDeliveryEvidence } from "./GoalDeliveryEvidence.js";
-import { Badge, Button, IconButton, StatusPill } from "../../ui/index.js";
+import { GoalAutonomySummary } from "./GoalAutonomySummary.js";
+import {
+  Badge,
+  Button,
+  Field,
+  IconButton,
+  StatusPill,
+  TextInput,
+} from "../../ui/index.js";
 import type { BadgeTone } from "../../ui/index.js";
 import type { GoalReplyMode } from "./GoalReplyComposer.js";
 import { presentGoal, time } from "./goalPresentation.js";
@@ -113,6 +123,7 @@ export function GoalDetail({
 }) {
   const [replyMode, setReplyMode] = useState<GoalReplyMode | null>(null);
   const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [reopenNote, setReopenNote] = useState("");
   const view = presentGoal(goal, state);
   const descriptionCanCollapse = goal.description.trim().length > 240;
   const focusTitle = view.needsDecision
@@ -243,6 +254,7 @@ export function GoalDetail({
                   {goal.status === "review" && (
                     <span>第 {goal.reviewRounds ?? 1} 轮审查</span>
                   )}
+                  {goal.autonomy?.paused && <span>自主续跑已暂停</span>}
                   <time>{time(goal.updatedAt)} 更新</time>
                 </div>
               </header>
@@ -263,6 +275,13 @@ export function GoalDetail({
               </section>
 
               <GoalSceneSync goal={goal} view={view} service={service} busy={busy} />
+              <GoalAutonomySummary
+                goal={goal}
+                state={state}
+                service={service}
+                busy={busy}
+                notify={notify}
+              />
               {(
                 <section
                   className="goal-agent-runtime"
@@ -402,6 +421,34 @@ export function GoalDetail({
                       我来处理
                     </Button>
                   )}
+                  {!view.ended && goal.mode === "concierge" &&
+                    Boolean(goal.brief || goal.autonomy) && (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      icon={goal.autonomy?.paused
+                        ? <PlayCircle size={15} />
+                        : <PauseCircle size={15} />}
+                      onClick={async () => {
+                        try {
+                          await service.command({
+                            type: goal.autonomy?.paused
+                              ? "goal.autonomy.resume"
+                              : "goal.autonomy.pause",
+                            goalId: goal.id,
+                            actor: "你",
+                          });
+                          notify(goal.autonomy?.paused
+                            ? "已恢复自主续跑"
+                            : "已暂停新的自主续跑；当前回合不会被强制终止");
+                        } catch {
+                          // The application-level command surface reports the real error.
+                        }
+                      }}
+                    >
+                      {goal.autonomy?.paused ? "恢复自主推进" : "暂停自主推进"}
+                    </Button>
+                  )}
                   {!view.ended && goal.mode === "manual" && (
                     <Button
                       variant="secondary"
@@ -431,6 +478,41 @@ export function GoalDetail({
                     </Button>
                   )}
                 </div>
+                {view.ended && (
+                  <form
+                    className="goal-reopen-form"
+                    onSubmit={async event => {
+                      event.preventDefault();
+                      try {
+                        await service.command({
+                          type: "goal.reopen",
+                          goalId: goal.id,
+                          note: reopenNote,
+                          actor: "你",
+                        });
+                        setReopenNote("");
+                        notify("目标已重新打开，保留原记录与证据");
+                      } catch {
+                        // The application-level command surface reports the real error.
+                      }
+                    }}
+                  >
+                    <Field label="重新打开原因">
+                      <TextInput
+                        value={reopenNote}
+                        onChange={event => setReopenNote(event.target.value)}
+                        placeholder="例如：复核遗漏了真实环境，需要继续修复。"
+                      />
+                    </Field>
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      disabled={busy || !reopenNote.trim()}
+                    >
+                      重新打开
+                    </Button>
+                  </form>
+                )}
               </details>
             </article>
 
