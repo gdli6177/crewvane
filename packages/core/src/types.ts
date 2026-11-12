@@ -13,6 +13,87 @@ export type AgentRuntimeAdapterId =
   | "qoder"
   | "omp"
   | "custom";
+export type SkillRole = "concierge" | "owner" | "verifier";
+export type LocalSkillRole = Exclude<SkillRole, "concierge">;
+export type SkillPackSource = "builtin" | "local";
+export interface SkillPackScript {
+  id: string;
+  path: string;
+  sha256: string;
+  description: string;
+}
+export interface SkillPackManifest {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  minimumCrewvane: string;
+  kind: "process";
+  roles: LocalSkillRole[];
+  entry: string;
+  references?: string[];
+  scripts?: SkillPackScript[];
+}
+export interface SkillPackView {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  kind: "role" | "process" | "setup";
+  roles: SkillRole[];
+  source: SkillPackSource;
+  digest: string;
+  status:
+    | "builtin"
+    | "ready"
+    | "disabled"
+    | "missing"
+    | "needs-approval";
+  entry: string;
+  referenceCount: number;
+  scripts: Array<SkillPackScript & {
+    approved: boolean;
+    approvalInvalidated?: boolean;
+  }>;
+  installedAt?: string;
+  disabledAt?: string;
+  detail?: string;
+}
+export interface GoalSkillBinding {
+  packId: string;
+  version: string;
+  digest: string;
+  roles: LocalSkillRole[];
+  attachedAt: string;
+  attachedBy: "human" | "concierge";
+}
+export interface SkillResolutionPack {
+  id: string;
+  version: string;
+  digest: string;
+  source: SkillPackSource;
+  roles: SkillRole[];
+}
+export interface GoalSkillResolution {
+  id: string;
+  role: SkillRole;
+  attemptId?: string;
+  resolvedAt: string;
+  digest: string;
+  packs: SkillResolutionPack[];
+}
+export interface OwnerLaunchRecovery {
+  id: string;
+  attemptId: string;
+  session: string;
+  createdAt: string;
+  status: "pending" | "attached" | "superseded";
+  tabId?: string;
+  paneId?: string;
+  attachedAt?: string;
+  detail?: string;
+}
 export type AgentRuntimeEventType =
   | "session.started"
   | "turn.started"
@@ -385,7 +466,8 @@ export interface Activity {
     | "boundary"
     | "verification"
     | "release"
-    | "reopened";
+    | "reopened"
+    | "skill";
   text: string;
   attachmentIds?: string[];
 }
@@ -409,6 +491,9 @@ export interface Goal {
   sceneVisit?: SceneVisit;
   watchdog?: WatchdogState;
   agentRuntime?: AgentRuntimeState;
+  skills?: GoalSkillBinding[];
+  skillResolutions?: GoalSkillResolution[];
+  ownerLaunchRecovery?: OwnerLaunchRecovery;
   attachments?: GoalAttachment[];
   activities: Activity[]; createdAt: string; updatedAt: string;
 }
@@ -505,6 +590,37 @@ type WorkspaceCommand =
   | { type: "goal.delete"; goalId: string; actor?: string }
   | { type: "goal.update"; goalId: string; patch: { title?: string; description?: string; next?: string; owner?: string; stageId?: string; waitingFor?: string; remindAt?: string | null; status?: "active" | "waiting" } }
   | { type: "goal.message"; goalId: string; text: string; attachments?: GoalAttachment[]; actor?: string; routeToConcierge?: boolean }
+  | {
+      type: "goal.skill.attach";
+      goalId: string;
+      packId: string;
+      actor: "human" | "concierge";
+    }
+  | {
+      type: "goal.skill.detach";
+      goalId: string;
+      packId: string;
+      actor: "human" | "concierge";
+    }
+  | {
+      type: "goal.skill.audit";
+      goalId: string;
+      packId: string;
+      scriptId: string;
+      outcome: "succeeded" | "failed";
+      summary: string;
+      actor?: string;
+    }
+  | {
+      type: "goal.skill.resolve";
+      goalId: string;
+      resolution: Omit<GoalSkillResolution, "id" | "resolvedAt">;
+    }
+  | {
+      type: "goal.owner-launch.recovery";
+      goalId: string;
+      recovery: OwnerLaunchRecovery;
+    }
   | { type: "goal.scene-reply"; goalId: string; attentionId: string; quote: string; summary: string; actor: string }
   | { type: "scene.visit"; goalId: string; retry?: boolean }
   | { type: "scene.check"; goalId: string; visitId: string; status: "checking" | "checked" | "failed"; detail?: string }

@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { packager } from "@electron/packager";
 import {
   cp,
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -48,7 +49,14 @@ try {
   const addonPackage = dirname(createRequire(join(nativePackage, "package.json")).resolve("node-addon-api/package.json"));
   await cp(addonPackage, join(stage, "node_modules/node-addon-api"), { recursive: true });
   await cp(join(here, "assets/brand/crewvane-icon.png"), join(stage, "dist/assets/crewvane-icon.png"));
-  await cp(join(here, "../../skills/crewvane"), join(stage, "crewvane-skill"), { recursive: true });
+  const bundledSkills = join(stage, "crewvane-skills");
+  await mkdir(bundledSkills, { recursive: true });
+  await cp(join(here, "../../skills/crewvane"), join(bundledSkills, "crewvane"), { recursive: true });
+  await cp(
+    join(here, "../../skills/crewvane-local-pack-author"),
+    join(bundledSkills, "crewvane-local-pack-author"),
+    { recursive: true },
+  );
   const cliNode = join(stage, "cli-node");
   await cp(process.execPath, cliNode);
   const herdrBinary = await prepareHerdr();
@@ -74,7 +82,7 @@ try {
     arch: "arm64",
     icon: join(here, "assets/brand/crewvane-icon.icns"),
     asar: { unpack: "{**/dist/cli/**,**/node_modules/node-pty/**}" },
-    extraResource: [cliNode, join(here, "herdr-plugin"), join(stage, "crewvane-skill"), herdrBinary],
+    extraResource: [cliNode, join(here, "herdr-plugin"), bundledSkills, herdrBinary],
     ignore: [/^\/cli-node$/, /^\/dist\/.*\.map$/],
     overwrite: true,
     prune: true,

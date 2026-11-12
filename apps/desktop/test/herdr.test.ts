@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HerdrClient, terminalPrompt, type HerdrRunner } from "../electron/herdr.ts";
-import { agentReceiptMarker } from "../../../packages/core/src/index.ts";
+import {
+  agentReceiptMarker,
+  SkillRegistry,
+} from "../../../packages/core/src/index.ts";
 
 function fake(responses: Record<string, string>) {
   const calls: string[][] = [];
@@ -289,6 +295,57 @@ test("new goals notify the same concierge without creating an owner or another s
   assert.match(prompts[2]![3]!, /\/workspace\/\.crewvane\/attachments\/att_0123456789abcdef\.png/);
   assert.match(prompts[2]![3]!, /实际查看图片/);
   assert.ok(prompts.every(args => args.includes("--wait") && !args.includes("--timeout")));
+});
+
+test("concierge notifications carry method constraints and a local method catalog", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crewvane-concierge-methods-")),
+    source = join(root, "method-source");
+  try {
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, "SKILL.md"), "# 方法正文\n\n只在匹配目标时使用。\n");
+    await writeFile(join(source, "manifest.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "acme.release-review",
+      name: "发布复核",
+      description: "发布前核对真实下载物。",
+      version: "1.0.0",
+      minimumCrewvane: "0.10.0",
+      kind: "process",
+      roles: ["owner", "verifier"],
+      entry: "SKILL.md",
+    }));
+    await new SkillRegistry(root, "0.10.0").install(source);
+    const mock = fake({ "agent prompt": "{}" });
+    await new HerdrClient(mock.runner, "crewvane-test", root).notifyGoal(
+      { session: "crewvane-test", agent: "concierge" },
+      "goal_methods",
+      "方法目录",
+      {
+        id: "goal_methods",
+        title: "方法目录",
+        description: "确认本地方法可被发现。",
+        projectId: "personal",
+        kind: "delivery",
+        mode: "concierge",
+        status: "active",
+        next: "分配合适负责人",
+        attention: null,
+        attachments: [],
+        activities: [],
+      } as any,
+      root,
+    );
+    const prompt = mock.calls.find(args =>
+      args[0] === "agent" && args[1] === "prompt")![3]!;
+    assert.match(prompt, /\[CREWVANE_METHOD_CONTEXT\]/);
+    assert.match(prompt, /Agent 接入流程/);
+    assert.match(prompt, /Herdr 现场恢复/);
+    assert.match(prompt, /发布复核 \(acme\.release-review@1\.0\.0\)：可用/);
+    assert.match(prompt, /发布前核对真实下载物/);
+    assert.doesNotMatch(prompt, /方法正文/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("watchdog keeps recovery with owners instead of asking the concierge to execute", async () => {

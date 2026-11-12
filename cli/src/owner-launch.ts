@@ -1,6 +1,15 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { runHostHerdr } from "./host-bridge.js";
@@ -12,6 +21,7 @@ import {
   renderAgentCommand,
   renderLoginShellAgentCommand,
   resumeAgentArgs,
+  SkillRegistry,
   newId,
   WorkspaceService,
   type AgentRuntimeAdapterId,
@@ -72,6 +82,34 @@ export function quoteShell(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+export function ownerLaunchReceiptPath(root: string, recoveryId: string) {
+  const workspaceKey = createHash("sha256")
+    .update(root)
+    .digest("hex")
+    .slice(0, 16);
+  return join(
+    tmpdir(),
+    `crewvane-owner-launch-${workspaceKey}`,
+    `${recoveryId}.ready`,
+  );
+}
+
+export async function ensureOwnerLaunchReceiptDirectory(directory: string) {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink())
+    throw new Error("负责人启动收据目录不是安全的本机目录");
+  const uid = process.getuid?.();
+  if (uid !== undefined && info.uid !== uid)
+    throw new Error("负责人启动收据目录不属于当前用户");
+  if ((info.mode & 0o077) !== 0) await chmod(directory, 0o700);
+  return directory;
+}
+
 // pane run sends text, not an argv array. On macOS a shell without bracketed
 // paste accepts at most 1024 bytes per canonical input line. Keep environment
 // setup and custom-CLI messages below that boundary without splitting a code
@@ -125,7 +163,25 @@ async function sendShellCommand(run: HerdrCommandRunner, paneId: string, command
   }
 }
 
-function createRunner(environment: NodeJS.ProcessEnv): HerdrCommandRunner {
+async function waitForLaunchReceipt(
+  path: string,
+  nonce: string,
+  timeoutMs: number,
+  wait: (ms: number) => Promise<void>,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if ((await readFile(path, "utf8")).trim() === nonce) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await wait(100);
+  }
+}
+
+export function createRunner(environment: NodeJS.ProcessEnv): HerdrCommandRunner {
   const session = environment.HERDR_SESSION?.trim();
   if (!session)
     throw new Error("负责人启动需要当前 Herdr Session");
@@ -226,6 +282,7 @@ async function resolveTask(
     next: string;
   },
   input: OwnerLaunchInput,
+  skillContext: string,
 ) {
   if (input.task?.trim() && input.taskFile)
     throw new Error("--task 与 --task-file 不能同时使用");
@@ -249,7 +306,7 @@ async function resolveTask(
   task ||= automaticTask(goal);
   if (task.length > 100_000)
     throw new Error("负责人任务不能超过 100000 字符");
-  return task;
+  return `${skillContext}\n\n## 本次目标任务\n${task}`;
 }
 
 export async function launchOwner(
@@ -259,6 +316,7 @@ export async function launchOwner(
     environment?: NodeJS.ProcessEnv;
     run?: HerdrCommandRunner;
     wait?: (ms: number) => Promise<void>;
+    receiptTimeoutMs?: number;
   } = {},
 ): Promise<OwnerLaunchResult> {
   const environment = options.environment ?? process.env;
@@ -282,6 +340,19 @@ export async function launchOwner(
     throw new Error("这件事由人安排，请先明确交给管家再启动负责人");
   if (!verifier && goal.herdr)
     throw new Error("该目标已经有负责人现场；请直接联系原负责人");
+  const attemptStartedAt = new Date().toISOString(),
+    attemptId = verifier ? undefined : newId("attempt"),
+    hookToken = verifier ? undefined : randomBytes(32).toString("hex"),
+    hookTokenHash = hookToken
+      ? createHash("sha256").update(hookToken).digest("hex")
+      : undefined,
+    skillRegistry = new SkillRegistry(service.root),
+    skillContext = await skillRegistry.resolve(goal, verifier ? "verifier" : "owner", attemptId);
+  await service.execute({
+    type: "goal.skill.resolve",
+    goalId: goal.id,
+    resolution: skillContext.resolution,
+  });
   const project = state.projects.find((item) => item.id === goal.projectId);
   const cwd = await realpath(input.resume?.cwd || project?.path?.trim() || service.root);
   if (!(await stat(cwd)).isDirectory())
@@ -289,8 +360,8 @@ export async function launchOwner(
 
   const run = options.run ?? createRunner(environment);
   const task = verifier
-    ? input.task?.trim() || automaticVerificationTask(goal)
-    : `${await resolveTask(service, goal, input)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
+    ? `${skillContext.text}\n\n## 本次复核任务\n${input.task?.trim() || automaticVerificationTask(goal)}`
+    : `${await resolveTask(service, goal, input, skillContext.text)}\n\n${ownerSceneReplyInstructions(goal.id)}`;
   const restoredArgs = resumeAgentArgs(input.resume?.agentSession);
   const configured = state.agents?.owner?.trim() || state.agents?.concierge?.trim() || "codex";
   const command = restoredArgs
@@ -305,11 +376,6 @@ export async function launchOwner(
     environment.HOME || "",
   );
   const adapter = runtimeAdapter(command.kind, executable) ?? "custom";
-  const attemptId = verifier ? undefined : newId("attempt"),
-    hookToken = verifier ? undefined : randomBytes(32).toString("hex"),
-    hookTokenHash = hookToken
-      ? createHash("sha256").update(hookToken).digest("hex")
-      : undefined;
   if (!verifier) {
     await service.execute({
       type: "agent.runtime.register",
@@ -319,7 +385,7 @@ export async function launchOwner(
         attemptId: attemptId!,
         agent: input.name,
         adapter,
-        startedAt: new Date().toISOString(),
+        startedAt: attemptStartedAt,
       },
       hookTokenHash: hookTokenHash!,
       capabilities: agentRuntimeCapabilities(adapter),
@@ -333,6 +399,12 @@ export async function launchOwner(
   let tabId: string | undefined;
   let verifierReference: HerdrReference | undefined;
   let bound = false;
+  const workspaceRoot = await realpath(service.root),
+    recoveryId = newId("recovery"),
+    launchReceiptNonce = randomBytes(16).toString("hex"),
+    launchReceiptPath = ownerLaunchReceiptPath(workspaceRoot, recoveryId),
+    wait = options.wait ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))),
+    receiptTimeoutMs = options.receiptTimeoutMs ?? 3_000;
   try {
     const created = payload(await run([
       "tab",
@@ -368,6 +440,21 @@ export async function launchOwner(
       created.root_pane_id;
     if (!workspaceId || !tabId || !paneId)
       throw new Error("Herdr 没有返回负责人所需的真实 Workspace、Tab 和 Pane ID");
+    if (!verifier) {
+      await service.execute({
+        type: "goal.owner-launch.recovery",
+        goalId: goal.id,
+        recovery: {
+          id: recoveryId,
+          attemptId: attemptId!,
+          session,
+          createdAt: attemptStartedAt,
+          status: "pending",
+          tabId,
+          paneId,
+        },
+      });
+    }
 
     const ownerEnvironment = [
       "unset CREWVANE_COORDINATOR CREWVANE_COORDINATOR_SCOPE_FILE",
@@ -377,10 +464,10 @@ export async function launchOwner(
         `export CREWVANE_ATTEMPT_ID=${quoteShell(attemptId!)}`,
         `export CREWVANE_HOOK_TOKEN=${quoteShell(hookToken!)}`,
       ] : []),
-      `export CREWVANE_WORKSPACE=${quoteShell(await realpath(service.root))}`,
+      `export CREWVANE_WORKSPACE=${quoteShell(workspaceRoot)}`,
       ...(!verifier ? [
-        `export CREWVANE_HOOK_SOCKET=${quoteShell(agentRuntimeSocketPath(await realpath(service.root)))}`,
-        `export CREWVANE_HOOK_SPOOL=${quoteShell(join(await realpath(service.root), ".crewvane", "runtime", "spool"))}`,
+        `export CREWVANE_HOOK_SOCKET=${quoteShell(agentRuntimeSocketPath(workspaceRoot))}`,
+        `export CREWVANE_HOOK_SPOOL=${quoteShell(join(workspaceRoot, ".crewvane", "runtime", "spool"))}`,
       ] : []),
       `export CREWVANE_HERDR_BINARY=${quoteShell(
         environment.CREWVANE_HERDR_BINARY?.trim() ||
@@ -398,18 +485,41 @@ export async function launchOwner(
       `export HERDR_TAB_ID=${quoteShell(tabId)}`,
       `export HERDR_PANE_ID=${quoteShell(paneId)}`,
       ...pathExports(executableDirectory, environment.PATH || ""),
-      "printf '\\n__CREWVANE_OWNER_ENV_READY__\\n'",
+      `printf %s ${quoteShell(launchReceiptNonce)} > ${quoteShell(launchReceiptPath)}`,
     ].join("\n");
+    await ensureOwnerLaunchReceiptDirectory(dirname(launchReceiptPath));
+    await rm(launchReceiptPath, { force: true });
     await sendShellCommand(run, paneId, ownerEnvironment);
-    await run([
-      "pane",
-      "wait-output",
-      paneId,
-      "--match",
-      "__CREWVANE_OWNER_ENV_READY__",
-      "--timeout",
-      "10000",
-    ]);
+    let ready = await waitForLaunchReceipt(
+      launchReceiptPath,
+      launchReceiptNonce,
+      receiptTimeoutMs,
+      wait,
+    );
+    if (!ready) {
+      const callerTabId = environment.HERDR_TAB_ID?.trim();
+      await run(["tab", "focus", tabId]).catch(() => {});
+      try {
+        await wait(250);
+        // Re-running the idempotent environment setup is safe. Never replay
+        // the Agent command or the business task from this recovery path.
+        await sendShellCommand(run, paneId, ownerEnvironment);
+        ready = await waitForLaunchReceipt(
+          launchReceiptPath,
+          launchReceiptNonce,
+          receiptTimeoutMs,
+          wait,
+        );
+      } finally {
+        if (callerTabId && callerTabId !== tabId)
+          await run(["tab", "focus", callerTabId]).catch(() => {});
+      }
+    }
+    if (!ready)
+      throw new Error(
+        `负责人环境注入未确认；可在核对现场后使用 crewvane owner attach 绑定，恢复 ID：${recoveryId}`,
+      );
+    await rm(launchReceiptPath, { force: true }).catch(() => {});
 
     let reference: HerdrReference = {
       session,
@@ -560,6 +670,20 @@ export async function launchOwner(
         goalId: goal.id,
         reference,
       });
+      await service.execute({
+        type: "goal.owner-launch.recovery",
+        goalId: goal.id,
+        recovery: {
+          id: recoveryId,
+          attemptId: attemptId!,
+          session,
+          createdAt: attemptStartedAt,
+          status: "attached",
+          tabId,
+          paneId,
+          attachedAt: new Date().toISOString(),
+        },
+      });
       bound = true;
     }
 
@@ -615,6 +739,7 @@ export async function launchOwner(
       reference,
     };
   } catch (error) {
+    await rm(launchReceiptPath, { force: true }).catch(() => {});
     if (verifier && verifierReference) {
       await service.execute({
         type: "goal.verification.site",

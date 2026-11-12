@@ -11,4 +11,5 @@ export * from "./agent-resume.js";
 export * from "./task-pool.js";
 export * from "./agent-runtime.js";
 export * from "./autonomy.js";
+export * from "./skill-registry.js";
 export { readEvents, withLock } from "./storage.js";

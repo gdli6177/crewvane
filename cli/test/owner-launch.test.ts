@@ -1,6 +1,14 @@
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -10,6 +18,7 @@ import {
   type Goal,
 } from "../../packages/core/src/index.js";
 import {
+  ensureOwnerLaunchReceiptDirectory,
   startAgentWhenPaneReady,
   launchOwner,
   type HerdrCommandRunner,
@@ -40,6 +49,14 @@ function fakeRunner(options: {
   const run: HerdrCommandRunner = async (args) => {
     calls.push(args);
     const key = args.slice(0, 2).join(" ");
+    if (
+      key === "pane run" &&
+      /^printf %s /.test(args[3] ?? "") &&
+      args[3]?.includes(".ready")
+    ) {
+      await promisify(execFile)("/bin/sh", ["-c", args[3]!]);
+      return "{}";
+    }
     if (key === "agent start" && args.includes("--help"))
       return "[possible values: omp, codex]";
     if (key === "agent list" && options.detectedAgent)
@@ -74,6 +91,24 @@ function fakeRunner(options: {
   };
   return { calls, run };
 }
+
+test("launch receipt directories stay private and reject symlinks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crewvane-launch-receipt-"));
+  fixtures.push(root);
+  const receiptDirectory = join(root, "receipts"),
+    outside = join(root, "outside");
+  await mkdir(receiptDirectory, { mode: 0o755 });
+  await ensureOwnerLaunchReceiptDirectory(receiptDirectory);
+  assert.equal((await stat(receiptDirectory)).mode & 0o777, 0o700);
+
+  await mkdir(outside);
+  const linked = join(root, "linked-receipts");
+  await symlink(outside, linked);
+  await assert.rejects(
+    ensureOwnerLaunchReceiptDirectory(linked),
+    /不是安全的本机目录/,
+  );
+});
 
 test("launches the configured agent with an isolated owner environment", async () => {
   const { root, service } = await fixture();
@@ -150,6 +185,74 @@ test("launches the configured agent with an isolated owner environment", async (
   const state = await service.read();
   assert.equal(state.goals[0]?.owner, "case-owner");
   assert.equal(state.goals[0]?.herdr?.paneId, "w7:p3");
+  assert.equal(state.goals[0]?.ownerLaunchRecovery?.status, "attached");
+  assert.equal(mock.calls.some(args => args[0] === "pane" && args[1] === "wait-output"), false);
+});
+
+test("uses a file receipt instead of pane output and retries only environment setup once", async () => {
+  const { root, service } = await fixture();
+  const goal = await service.execute({
+    type: "goal.create",
+    input: {
+      title: "文件回执启动",
+      projectId: "personal",
+      mode: "concierge",
+    },
+  }) as Goal;
+  const mock = fakeRunner(),
+    calls: string[][] = [],
+    receiptCommands: string[] = [];
+  let receiptWrites = 0;
+  const result = await launchOwner(service, {
+    goalId: goal.id,
+    name: "receipt-owner",
+    task: "验证文件回执",
+  }, {
+    environment: {
+      HERDR_ENV: "1",
+      HERDR_SESSION: "crewvane-test",
+      HERDR_TAB_ID: "w1:t1",
+      HOME: root,
+      PATH: "/usr/bin:/bin",
+    },
+    run: async args => {
+      calls.push(args);
+      if (
+        args[0] === "pane" &&
+        args[1] === "run" &&
+        /^printf %s /.test(args[3] ?? "") &&
+        args[3]?.includes(".ready")
+      ) {
+        receiptCommands.push(args[3]!);
+        receiptWrites += 1;
+        if (receiptWrites === 2)
+          await promisify(execFile)("/bin/sh", ["-c", args[3]!]);
+        return "{}";
+      }
+      return mock.run(args);
+    },
+    wait: async ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 5))),
+    receiptTimeoutMs: 15,
+  });
+
+  assert.equal(result.reference.agent, "receipt-owner");
+  assert.equal(receiptWrites, 2);
+  assert.equal(receiptCommands.every(command => command.includes("crewvane-owner-launch-")), true);
+  assert.equal(
+    calls.filter(args => args[0] === "tab" && args[1] === "focus").map(args => args[2]).join(","),
+    "w7:t3,w1:t1",
+  );
+  assert.equal(calls.some(args => args[0] === "pane" && args[1] === "wait-output"), false);
+  assert.equal(
+    calls.filter(args => args[0] === "agent" && args[1] === "prompt").length,
+    1,
+  );
+  const saved = (await service.read()).goals[0]!;
+  assert.equal(saved.herdr?.paneId, "w7:p3");
+  assert.equal(saved.ownerLaunchRecovery?.status, "attached");
+  const receiptPath = / > '([^']+\.ready)'$/.exec(receiptCommands[1]!)?.[1];
+  assert.ok(receiptPath);
+  await assert.rejects(readFile(receiptPath!, "utf8"), /ENOENT/);
 });
 
 test("retries a busy initialization pane without creating a replacement", async () => {
@@ -391,7 +494,8 @@ test("launches a custom interactive CLI and records its real foreground process"
   assert.ok(launches.length > 3);
   assert.ok(launches.some(args => /My Agent/.test(args[3]!)));
   assert.equal(launches.at(-1)![2], "w7:p3");
-  assert.match(launches.at(-1)![3]!, /^执行自定义任务\n/);
+  assert.match(launches.at(-1)![3]!, /## 目标负责人/);
+  assert.match(launches.at(-1)![3]!, /## 本次目标任务\n执行自定义任务/);
   assert.match(launches.at(-1)![3]!, /goal scene-reply/);
   const state = await service.read();
   assert.equal(state.goals[0]?.herdr?.transport, "pane");

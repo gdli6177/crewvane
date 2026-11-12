@@ -12,11 +12,17 @@ Autonomy scheduler   状态变化即触发 + 10 秒补偿；领取持久续跑�
 packages/core        目标、委托、续跑、复核、验收、发布、Bot、锁与原子存储
 cli                  人用消息入口与受信任 Agent 状态协议，调用同一个 core 服务
 Agent Adapter        Codex、Claude Code、Cursor、Qoder 与 OMP 生命周期接入
+Skill Registry       内置角色/工序与工作区本地方法、摘要、授权和启动时解析
 Herdr                Session、Tab、Pane、Agent 生命周期与消息
 Herdr 插件           注意力 Pane、新目标与回到管家动作；不是安全边界或状态副本
 ```
 
 Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解析 Agent 结果。它通过官方 Hook / Extension 观测受支持 Agent 的生命周期，并把事件归一化为 Crewvane 自己的 attempt 与 turn 记录；会话、Agent 管理与通信仍由 Herdr 负责。任意已经能在 Herdr 中运行的 CLI Agent 都可以使用，未支持 Hook 的 CLI 自动回退到 Herdr 与巡检。
+
+Herdr 在 0.10.0 已位于可替换的 Session Adapter 边界之后：Core、CLI 语义协议、
+Agent Hook 和 Skill 解析不依赖 Herdr 私有命令。当前仍只有一个完整的 Session
+后端实现，因此 0.10.0 是“可替换”，尚不是“无 Herdr 可运行”。未来 Native PTY
+或其他后端必须覆盖创建、发送、观测、恢复、关闭和人工介入同步后才能替换。
 
 ## 状态
 
@@ -34,6 +40,30 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 - 活动记录按 `goalId` 隔离，原始 Agent 内容保持不透明；UI 不要求固定摘要模板。
 
 读取有效 v2 快照时纠正旧版等待语义：等待对象缺失、指向用户或内部 Agent，或仍有未解决的决定、验收、介入事项时恢复活动状态（已有交付的验收保留 `review`），保留历史与注意力。旧版等用户且缺少注意力时补回介入项。真正的外部等待及其到期跟进保留，不归档整个工作区；后续修改时保存纠正结果。
+
+### 工作方法与本地能力包
+
+`SkillRegistry` 将 Agent 上下文限制为可审计的文本和元数据。内置
+`crewvane.concierge`、`crewvane.owner`、`crewvane.verifier` 提供不可被本地包覆盖
+的角色边界；按 `delivery`、`discovery`、`release` 目标类型选择内置工序；
+`crewvane.agent-setup` 与 `crewvane.herdr-recovery` 只进入管家控制面。
+
+本地能力包安装在工作区 `.crewvane/skills/<pack-id>/`。安装器拒绝保留前缀、路径
+穿越、符号链接、非 UTF-8 引用、超限文件、重复路径和不匹配的脚本 SHA-256。每个
+目标最多绑定 8 个本地方法，绑定保存包 ID、版本和内容摘要。负责人或复核者启动前
+重新解析当前安装内容；包缺失、停用或摘要变化时失败关闭，不静默沿用旧说明。
+
+上下文优先级固定为 Core 约束、角色 Skill、工序 Skill、目标本地方法、当前任务。
+本地入口最多 12,000 字符，单份参考最多 12,000 字符、每包参考合计最多 24,000
+字符。管家通知只注入控制面 Skill 与本地方法目录；匹配的本地方法全文只在目标
+明确绑定后进入负责人或复核者上下文。每次解析在目标 `skillResolutions` 中保存
+角色、attempt 和包摘要，最多保留 40 条。
+
+需要脚本时，安装本身不会授权。用户逐项批准某个脚本的当前 SHA-256；`skill run`
+只允许当前目标已挂载、摘要匹配且已批准的脚本。脚本环境只包含必要变量，stdout /
+stderr 有界，120 秒后终止，结果写入审计活动。脚本、Hook 和 Skill 都不能修改目标
+生命周期，Crewvane 语义 CLI 仍是唯一业务状态写入口。产品边界与验收见
+[工作方法与本地能力包](product/local-capability-packs.md)。
 
 ### 自主目标闭环
 
@@ -113,7 +143,25 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、kind、brief、checkpoint、boundary、complete、rework、drop、resolve、remind、scene-reply 和 session，并可启动负责人或独立复核者；`goal list`、attention、ask、message、验收、自主设置、发布批准和跨目标读写会被拒绝。自主目标进入 `review` 后不能由管家调用 `complete` 绕过验收。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
-首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程原子地创建独立 Herdr Tab、在 Pane 内清除管家的 `CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、attempt ID、Hook token、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整 Agent argv、记录真实现场并发送任务。若 Pane 刚创建、Herdr 尚报 `agent_pane_busy`，CLI 只在同一个 Pane 上按 100 ms 起的指数退避重试，最长 15 秒；其他可能在进程创建后发生的启动错误不重放，避免重复启动。即使执行目录是另一个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。它避免模型手工串联多个 Herdr 命令时漏掉环境隔离；任一阶段失败会关闭尚未绑定的 Tab 或用结构化错误保留已绑定现场供核对。自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
+首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程先解析角色、
+目标类型和本地方法，再原子地创建独立 Herdr Tab、在 Pane 内清除管家的
+`CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、attempt ID、Hook
+token、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整
+Agent argv、记录真实现场并发送任务。若 Pane 刚创建、Herdr 尚报
+`agent_pane_busy`，CLI 只在同一个 Pane 上按 100 ms 起的指数退避重试，最长 15
+秒；其他可能在进程创建后发生的启动错误不重放，避免重复启动。即使执行目录是另一
+个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的
+目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和
+自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而
+不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。
+
+环境注入使用 Work 区内私有文件收据替代会永远等待的 terminal marker。首次收据
+超时只允许在同一 Pane 幂等重试一次环境初始化；Agent 命令和业务任务不会重发。
+仍无法确认时，目标保存 `ownerLaunchRecovery` 的 recovery ID、attempt 和现场
+身份。`crewvane owner attach` 只在当前 Herdr Session 内运行，并核验 Workspace、
+Tab、Pane、Agent 或前台 PID 后绑定真实现场；恢复 ID 已被取代、Session 漂移或
+Pane 被其他目标占用时拒绝覆盖。它避免模型手工串联多个 Herdr 命令时漏掉环境
+隔离；自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
 
 `crewvane hook ingest --adapter <id>` 是内部稳定入口。Adapter 把官方原生事件送入 CLI，CLI 负责能力校验、turn 归一化、12,000 字符限制与原文 SHA-256，然后通过 `/tmp/crewvane-<uid>/<workspace-hash>.sock` 发给 Electron Broker。Socket 请求失败或 500 ms 内不可用时，事件写入工作区 `.crewvane/runtime/spool/`；目录与文件分别使用 `0700` / `0600`，最多 200 条、保留 7 天。应用重启先 drain 离线队列，再按持久 receipt 时间恢复计时器。工具参数、工具输出和终端全文不会进入 stored event。
 

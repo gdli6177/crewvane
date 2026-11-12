@@ -1,5 +1,6 @@
 import {
   WorkspaceService,
+  SkillRegistry,
   attentionGoals,
   attentionRequest,
   importAttachmentFiles,
@@ -9,12 +10,13 @@ import {
   type IntakeHandling,
   type HighRiskCategory,
 } from "../../packages/core/src/index.js";
-import { readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { execFile } from "node:child_process";
+import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { runBoard } from "./board.js";
 import { launchOwner } from "./owner-launch.js";
+import { attachOwner } from "./owner-attach.js";
 import { ingestAgentHook } from "./hook-ingest.js";
 const exec = promisify(execFile);
 const usage = `Crewvane — 把所有事整理成清晰的下一步
@@ -71,8 +73,24 @@ Agent 状态协议（仅在明确事实发生后使用）：
     [--transport pane --process-id PID]（自定义 CLI）
   crewvane owner launch ID --name NAME [--task TEXT | --task-file FILE]
     创建隔离的负责人现场；省略任务内容时读取目标详情与下一步
+  crewvane owner attach ID --name NAME --session SESSION
+    --workspace ID --tab ID --pane ID [--agent NAME] [--recovery-id ID]
+    在核对 Herdr 真实现场后，恢复并绑定 owner launch 未确认的负责人
   crewvane verifier launch ID --name NAME [--task TEXT]
     为待复核交付创建不复用负责人现场的独立复核者
+
+本地工作方法（能力包）：
+  crewvane skill list|show [PACK_ID] [--json]
+  crewvane skill draft DIRECTORY --id ID --name NAME
+    [--description TEXT] [--role owner|verifier ...]
+  crewvane skill validate DIRECTORY [--json]
+  crewvane skill install DIRECTORY [--approve-script ID ...] [--json]
+  crewvane skill approve PACK_ID --approve-script ID [...]
+  crewvane skill disable|enable|remove PACK_ID
+  crewvane skill attach GOAL_ID PACK_ID [--json]
+  crewvane skill detach GOAL_ID PACK_ID [--json]
+  crewvane skill resolve GOAL_ID --role concierge|owner|verifier [--json]
+  crewvane skill run PACK_ID SCRIPT_ID --goal GOAL_ID [--arg VALUE ...]
 
 人用自主目标与发布协议：
   crewvane autonomy set [--acceptance human-review|auto-with-verification]
@@ -121,7 +139,7 @@ function parse(argv: string[]) {
     if (["json", "all", "help", "new", "once", "current", "self", "initialize"].includes(name)) { values.set(name, ["true"]); continue; }
     const value = inline ?? argv[++index];
     if (value === undefined || (inline === undefined && value.startsWith("--"))) throw new Error(`--${name} 需要一个值`);
-    if (values.has(name) && !["check", "attachment", "criterion", "from", "project", "operation", "evidence"].includes(name)) throw new Error(`--${name} 不能重复`);
+    if (values.has(name) && !["check", "attachment", "criterion", "from", "project", "operation", "evidence", "role", "arg", "approve-script"].includes(name)) throw new Error(`--${name} 不能重复`);
     values.set(name, [...(values.get(name) ?? []), value]);
   }
   return { positional, one: (name: string) => values.get(name)?.[0], all: (name: string) => values.get(name) ?? [], has: (name: string) => values.has(name) };
@@ -133,6 +151,69 @@ function checks(values: string[]) {
     if (!name || !command || !["passed", "failed"].includes(result ?? "")) throw new Error("--check 格式：名称::命令或操作::passed|failed::说明");
     return { name, command, result: result as "passed" | "failed", ...(note.length ? { note: note.join("::") } : {}) };
   });
+}
+async function createSkillDraft(
+  directory: string,
+  options: { id: string; name: string; description?: string; roles: string[] },
+) {
+  const root = resolve(directory),
+    id = options.id.trim(),
+    name = options.name.trim();
+  if (!/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/.test(id) || id.startsWith("crewvane."))
+    throw new Error("能力包 ID 必须带命名空间，例如 acme.design-review；crewvane. 前缀保留");
+  if (!name || name.length > 120) throw new Error("请输入有效的能力包名称");
+  const roles = [...new Set(options.roles.length ? options.roles : ["owner"])];
+  if (roles.some(role => role !== "owner" && role !== "verifier"))
+    throw new Error("能力包角色只能是 owner 或 verifier");
+  const description = options.description?.trim() || "说明这个工作方法何时使用、希望 Agent 如何做。";
+  await mkdir(root, { recursive: true });
+  for (const file of ["manifest.json", "SKILL.md"]) {
+    try {
+      await access(join(root, file));
+      throw new Error(`草稿目录已包含 ${file}，拒绝覆盖`);
+    } catch (error) {
+      if (error instanceof Error && /拒绝覆盖/.test(error.message)) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const manifest = {
+    schemaVersion: 1,
+    id,
+    name,
+    description,
+    version: "1.0.0",
+    minimumCrewvane: "0.10.0",
+    kind: "process",
+    roles,
+    entry: "SKILL.md",
+    references: [],
+    scripts: [],
+  };
+  const skill = `---
+name: ${id}
+description: ${JSON.stringify(description.replaceAll("\n", " "))}
+---
+
+# ${name}
+
+## 何时使用
+
+${description}
+
+## 执行方法
+
+1. 根据当前目标和用户最新消息补充这里的步骤。
+2. 明确要求 Agent 先检查什么、如何执行、如何验证。
+3. 只保留可复用的方法，不写入某个目标的隐私信息。
+
+## 完成前检查
+
+- 实际结果已经验证。
+- 证据和下一步已经通过 Crewvane CLI 写回。
+`;
+  await writeFile(join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(root, "SKILL.md"), skill, { mode: 0o600 });
+  return { directory: root, manifest };
 }
 function textArg(value: string | undefined, label: string) {
   if (!value?.trim()) throw new Error(`${label} 不能为空`);
@@ -457,7 +538,14 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "owner" && action === "launch") {
         assertCoordinatorCase(coordinatorCase, target);
+      } else if (group === "owner" && action === "attach") {
+        assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "verifier" && action === "launch") {
+        assertCoordinatorCase(coordinatorCase, target);
+      } else if (group === "skill" && ["list", "show"].includes(action ?? "")) {
+        // Available method metadata is read-only and scoped to the current
+        // workspace. It does not expose other goals.
+      } else if (group === "skill" && ["attach", "detach", "resolve", "run"].includes(action ?? "")) {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "direct") {
         if (args.has("new") && args.one("goal"))
@@ -899,6 +987,186 @@ export async function run(argv: string[], io = { out: console.log, error: consol
           throw new Error("session set 必须指定目标 ID；全局管家现场由桌面应用管理。");
         command = { type: "session.set", goalId: target, reference: { session: args.one("session") ?? process.env.HERDR_SESSION ?? "crewvane", workspaceId: args.one("workspace"), tabId: args.one("tab"), paneId: args.one("pane"), agent: args.one("agent"),
           ...(args.has("transport") ? { transport: args.one("transport") as "pane", processId: Number(args.one("process-id")) } : {}) } };
+      }
+      else if (group === "skill" && action === "list") {
+        result = await new SkillRegistry(service.root).list();
+      }
+      else if (group === "skill" && action === "show") {
+        if (!target) throw new Error("需要能力包 ID");
+        result = await new SkillRegistry(service.root).show(target);
+      }
+      else if (group === "skill" && action === "draft") {
+        requireHumanCli();
+        if (!target) throw new Error("需要草稿目录");
+        result = await createSkillDraft(target, {
+          id: textArg(args.one("id"), "--id"),
+          name: textArg(args.one("name"), "--name"),
+          description: args.one("description"),
+          roles: args.all("role"),
+        });
+      }
+      else if (group === "skill" && action === "validate") {
+        if (!target) throw new Error("需要能力包目录");
+        result = await new SkillRegistry(service.root).validate(target);
+      }
+      else if (group === "skill" && action === "install") {
+        requireHumanCli();
+        if (!target) throw new Error("需要能力包目录");
+        result = await new SkillRegistry(service.root).install(target, {
+          approveScripts: args.all("approve-script"),
+        });
+      }
+      else if (group === "skill" && action === "approve") {
+        requireHumanCli();
+        if (!target) throw new Error("需要能力包 ID");
+        const scripts = args.all("approve-script");
+        if (!scripts.length) throw new Error("至少提供一个 --approve-script ID");
+        result = await new SkillRegistry(service.root).approveScripts(target, scripts);
+      }
+      else if (group === "skill" && action === "disable") {
+        requireHumanCli();
+        if (!target) throw new Error("需要能力包 ID");
+        result = await new SkillRegistry(service.root).disable(target, true);
+      }
+      else if (group === "skill" && action === "enable") {
+        requireHumanCli();
+        if (!target) throw new Error("需要能力包 ID");
+        result = await new SkillRegistry(service.root).disable(target, false);
+      }
+      else if (group === "skill" && action === "remove") {
+        requireHumanCli();
+        if (!target) throw new Error("需要能力包 ID");
+        await new SkillRegistry(service.root).remove(target);
+        result = { removed: target };
+      }
+      else if (group === "skill" && action === "attach") {
+        if (!target) throw new Error("需要目标 ID");
+        const packId = args.positional[3];
+        if (!packId) throw new Error("需要能力包 ID");
+        command = {
+          type: "goal.skill.attach",
+          goalId: target,
+          packId,
+          actor: coordinatorMode ? "concierge" : "human",
+        };
+      }
+      else if (group === "skill" && action === "detach") {
+        if (!target) throw new Error("需要目标 ID");
+        const packId = args.positional[3];
+        if (!packId) throw new Error("需要能力包 ID");
+        command = {
+          type: "goal.skill.detach",
+          goalId: target,
+          packId,
+          actor: coordinatorMode ? "concierge" : "human",
+        };
+      }
+      else if (group === "skill" && action === "resolve") {
+        if (!target) throw new Error("需要目标 ID");
+        const role = args.one("role") ?? "owner";
+        if (!["concierge", "owner", "verifier"].includes(role))
+          throw new Error("--role 只能是 concierge、owner 或 verifier");
+        const state = await service.read(),
+          item = state.goals.find(goal => goal.id === target);
+        if (!item) throw new Error("找不到目标");
+        result = await new SkillRegistry(service.root).resolve(
+          item,
+          role as "concierge" | "owner" | "verifier",
+        );
+      }
+      else if (group === "skill" && action === "run") {
+        if (!target) throw new Error("需要能力包 ID");
+        const scriptId = args.positional[3],
+          goalId = args.one("goal");
+        if (!scriptId || !goalId) throw new Error("skill run 需要 SCRIPT_ID 与 --goal GOAL_ID");
+        if (managedAgent) {
+          const currentGoal = process.env.CREWVANE_GOAL_ID?.trim();
+          if (!currentGoal || currentGoal !== goalId)
+            throw new Error("受管 Agent 只能运行当前目标挂载的能力包脚本");
+        }
+        const state = await service.read(),
+          item = state.goals.find(goal => goal.id === goalId);
+        if (!item) throw new Error("找不到目标");
+        const registry = new SkillRegistry(service.root),
+          script = await registry.scriptForGoal(item, target, scriptId);
+        if (!((await stat(script.path)).mode & 0o111))
+          throw new Error(`脚本 ${scriptId} 没有可执行权限`);
+        const environment: NodeJS.ProcessEnv = {
+          HOME: process.env.HOME,
+          PATH: process.env.PATH,
+          TMPDIR: process.env.TMPDIR,
+          LANG: process.env.LANG,
+          CREWVANE_GOAL_ID: item.id,
+          CREWVANE_SKILL_PACK: target,
+          CREWVANE_SKILL_SCRIPT: scriptId,
+        };
+        const execution = await new Promise<{
+          code: number | null;
+          stdout: string;
+          stderr: string;
+        }>((resolvePromise, reject) => {
+          const child = spawn(script.path, args.all("arg"), {
+            cwd: script.cwd,
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stdout = "", stderr = "", settled = false;
+          const finish = (code: number | null, error?: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (error) reject(error);
+            else resolvePromise({
+              code,
+              stdout: stdout.slice(0, 60_000),
+              stderr: stderr.slice(0, 60_000),
+            });
+          };
+          child.stdout.on("data", chunk => {
+            if (stdout.length < 120_000) stdout += String(chunk);
+          });
+          child.stderr.on("data", chunk => {
+            if (stderr.length < 120_000) stderr += String(chunk);
+          });
+          child.once("error", error => finish(null, error));
+          child.once("close", code => finish(code));
+          const timer = setTimeout(() => {
+            child.kill("SIGTERM");
+            setTimeout(() => child.kill("SIGKILL"), 1_000).unref();
+            finish(null, new Error("能力包脚本超过 120 秒，已终止"));
+          }, 120_000);
+        });
+        const succeeded = execution.code === 0,
+          summary = [
+            `退出码：${execution.code ?? "无"}`,
+            execution.stdout.trim() ? `stdout：${execution.stdout.trim()}` : "",
+            execution.stderr.trim() ? `stderr：${execution.stderr.trim()}` : "",
+          ].filter(Boolean).join("\n").slice(0, 8_000);
+        await service.execute({
+          type: "goal.skill.audit",
+          goalId,
+          packId: target,
+          scriptId,
+          outcome: succeeded ? "succeeded" : "failed",
+          summary: summary || (succeeded ? "脚本执行成功且没有输出。" : "脚本执行失败且没有输出。"),
+          actor: managedAgentName || "你",
+        });
+        if (!succeeded)
+          throw new Error(`能力包脚本失败（退出码 ${execution.code ?? "无"}）：${execution.stderr.trim() || execution.stdout.trim()}`);
+        result = { packId: target, scriptId, goalId, ...execution };
+      }
+      else if (group === "owner" && action === "attach") {
+        if (!target) throw new Error("需要目标 ID");
+        result = await attachOwner(service, {
+          goalId: target,
+          name: textArg(args.one("name"), "--name"),
+          session: textArg(args.one("session"), "--session"),
+          workspaceId: textArg(args.one("workspace"), "--workspace"),
+          tabId: textArg(args.one("tab"), "--tab"),
+          paneId: textArg(args.one("pane"), "--pane"),
+          ...(args.one("agent") ? { agent: textArg(args.one("agent"), "--agent") } : {}),
+          ...(args.one("recovery-id") ? { recoveryId: textArg(args.one("recovery-id"), "--recovery-id") } : {}),
+        });
       }
       else if (group === "owner" && action === "launch")
         ownerLaunch = {

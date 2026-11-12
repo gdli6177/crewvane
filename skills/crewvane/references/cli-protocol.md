@@ -51,6 +51,31 @@ crewvane goal ship "$GOAL_ID" --operation merge --checks passed --root "$WORKSPA
 
 `goal review` needs at least one real check. A check result is `passed` or `failed`; include what was actually executed or inspected. `goal ship` asks the policy engine whether an external merge or deployment is allowed. It does not perform the merge or deployment.
 
+## Work methods
+
+```sh
+crewvane skill list --root "$WORKSPACE" --json
+crewvane skill show "$PACK_ID" --root "$WORKSPACE" --json
+crewvane skill resolve "$GOAL_ID" --role owner --root "$WORKSPACE" --json
+crewvane skill attach "$GOAL_ID" "$PACK_ID" --root "$WORKSPACE"
+crewvane skill run "$PACK_ID" "$SCRIPT_ID" --goal "$GOAL_ID" --root "$WORKSPACE"
+```
+
+The current-case concierge may attach or detach a matching local method for its own
+goal. Owners and verifiers may read the catalog and resolve their current goal; only
+the managed current goal may run an installed, attached and approved script.
+
+Built-in role and process methods are selected automatically from the goal type. Local
+methods are additional, user-installed instructions for `owner` and/or `verifier`;
+they cannot claim the concierge role. At most eight local methods may be attached.
+Missing, disabled or changed packs fail closed before a new owner attempt starts.
+
+Script execution requires the script's current SHA-256 to have been approved by the
+human. It runs with a minimal environment, bounded output and a 120-second timeout.
+The CLI records an audit activity with the exit code and bounded stdout / stderr.
+Success never changes goal lifecycle and is not delivery, acceptance or release
+authorization.
+
 ## Herdr owner session
 
 Register a real owner scene only after Herdr returned its identifiers:
@@ -68,6 +93,21 @@ For an unrecognized interactive CLI, verify its foreground PID and add:
 ```
 
 After the goal is completed or dropped, Crewvane releases the owner scene. Do not register the global concierge or another active goal's pane as the owner.
+
+If `owner launch` preserved a real scene but could not confirm environment injection,
+bind that exact scene only:
+
+```sh
+crewvane owner attach "$GOAL_ID" --name "$OWNER_NAME" \
+  --session "$HERDR_SESSION" --workspace "$HERDR_WORKSPACE_ID" \
+  --tab "$HERDR_TAB_ID" --pane "$HERDR_PANE_ID" \
+  ${LIVE_AGENT:+--agent "$LIVE_AGENT"} \
+  --recovery-id "$RECOVERY_ID" --root "$WORKSPACE"
+```
+
+Run it from the matching managed Herdr Session. Verify the Tab, Pane, Agent or
+foreground PID first. A stale or superseded recovery ID and a scene owned by another
+goal are rejected. Never replay the original task during recovery.
 
 ## Boundaries
 

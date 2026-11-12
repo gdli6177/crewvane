@@ -32,7 +32,7 @@ It works with interactive CLI agents that can already run in a terminal, keeps
 the terminal sessions in Herdr, and adds the durable workflow around them:
 state, ownership, waiting, evidence, approvals, and recovery.
 
-> **Status:** early preview (`0.9.x`). The desktop UI is currently in Simplified
+> **Status:** early preview (`0.10.x`). The desktop UI is currently in Simplified
 > Chinese and the packaged app supports macOS on Apple Silicon.
 
 ## Why Crewvane
@@ -123,6 +123,28 @@ Herdr provides the persistent terminal sessions and agent communication layer.
 The desktop app includes its own verified Herdr binary, and the optional Herdr
 plugin adds attention, one-line goal intake, and concierge shortcuts inside
 Herdr.
+
+### Reusable work methods
+
+Crewvane ships role and process Skills for the concierge, owners, independent
+verifiers, delivery, discovery, release review, Agent setup, and scene recovery.
+Teams can also install a local method pack from a folder, preview its roles and
+references, and attach it only to matching goals.
+
+Instruction-only packs need no scripting. If a pack declares deterministic
+scripts, installation is approval-neutral and each script must be approved
+against its current SHA-256. A changed script or pack invalidates the old
+approval. `crewvane skill run` records bounded audit output but never completes,
+accepts, or releases a goal.
+
+Create packs conversationally through the bundled
+`crewvane-local-pack-author` Skill or use `crewvane skill draft`, `validate`, and
+`install`. Built-ins cannot be replaced, local packs cannot claim the concierge
+role, and a goal can attach at most eight local methods.
+
+Skill resolution is explicit and bounded: Core constraints, role Skill, process
+Skill, goal-bound local methods, then the current task. Missing, disabled, or
+changed bindings fail closed before a new Agent turn starts.
 
 ### Work in the terminal you already know
 
@@ -251,8 +273,8 @@ is damaged, redownload the latest release instead of bypassing Gatekeeper.
 
 1. Choose a dedicated workspace directory.
 2. Open **Settings**, install the Crewvane CLI and optional Crewvane Skills,
-   review **Agent access**, then configure the agent launch command for the
-   concierge, owner, or worker.
+   review **Agent access** and **Work methods**, then configure the agent launch
+   command for the concierge, owner, or worker.
 3. Prepare the concierge.
 4. Click **New goal**, describe the work in natural language, and attach
    screenshots if useful.
@@ -279,6 +301,11 @@ crewvane attention --json
 crewvane goal list
 crewvane goal show <goal-id> --json
 crewvane board
+
+crewvane skill list
+crewvane skill validate ./my-method --json
+crewvane skill install ./my-method
+crewvane skill attach <goal-id> my-method
 ```
 
 Agent-facing state commands are deliberately explicit. For example:
@@ -301,7 +328,7 @@ Run `crewvane --help` after installation to see the complete protocol.
 apps/desktop/       Electron shell, React UI, in-app Herdr terminal, plugin
 packages/core/      Goals, attention, policy, storage, attachments, recovery
 cli/                Human commands and explicit agent state protocol
-skills/             Packaged crewvane skill; ship-* skills are legacy
+skills/             Packaged Crewvane and local-pack-author Skills
 scripts/            Desktop, Herdr, onboarding, and installer acceptance tests
 docs/               Product specification, architecture, QA, and release notes
 ```
@@ -348,6 +375,8 @@ packaged app with an interactive custom CLI. It does not require a model login.
   agents. Agent file access and network permissions remain governed by that CLI.
 - Herdr is required for agent execution. Planning, records, reminders, and manual
   review remain readable if Herdr is temporarily unavailable.
+- Herdr is behind a replaceable session-adapter boundary in 0.10.x, but it is
+  still the only complete execution backend in the shipped app.
 
 ## Contributing
 
