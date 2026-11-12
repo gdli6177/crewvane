@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { quoteShell } from "./herdr.js";
 
@@ -41,6 +42,7 @@ export interface ExternalSceneLease {
   session: string;
   workspaceHash: string;
   tty?: string;
+  processId?: number;
   openedAt: string;
 }
 
@@ -340,20 +342,39 @@ export class ExternalTerminalManager {
     );
   }
 
+  private pidPath(input: ExternalSceneInput) {
+    return join(
+      this.leaseRoot,
+      `${workspaceHash(input.workspaceRoot)}-${workspaceHash(input.session)}.pid`,
+    );
+  }
+
   private async readLease(
     input: ExternalSceneInput,
   ): Promise<ExternalSceneLease | undefined> {
     try {
       const value = JSON.parse(await readFile(this.leasePath(input), "utf8")) as ExternalSceneLease;
-      const tty = (await readFile(this.ttyPath(input), "utf8")).trim();
+      const tty = await readFile(this.ttyPath(input), "utf8")
+        .then(content => content.trim())
+        .catch(() => "");
+      const pid = await readFile(this.pidPath(input), "utf8")
+        .then(content => Number(content.trim()))
+        .catch(() => value.processId);
       if (
         typeof value.id !== "string" ||
         value.session !== input.session ||
         value.workspaceHash !== workspaceHash(input.workspaceRoot) ||
         !resolvedTerminals.has(value.terminal) ||
-        !tty.startsWith("/dev/")
+        (!tty.startsWith("/dev/") &&
+          (!Number.isSafeInteger(pid) || Number(pid) <= 1))
       ) return undefined;
-      return { ...value, tty };
+      return {
+        ...value,
+        ...(tty.startsWith("/dev/") ? { tty } : {}),
+        ...(Number.isSafeInteger(pid) && Number(pid) > 1
+          ? { processId: Number(pid) }
+          : {}),
+      };
     } catch {
       return undefined;
     }
@@ -370,6 +391,7 @@ export class ExternalTerminalManager {
     await chmod(this.leaseRoot, 0o700);
     const launcher = this.launcherPath(input),
       ttyPath = this.ttyPath(input),
+      pidPath = this.pidPath(input),
       temporaryLease = `${leasePath}.tmp`;
     await writeFile(temporaryLease, `${JSON.stringify(lease, null, 2)}\n`, { mode: 0o600 });
     await rename(temporaryLease, leasePath);
@@ -384,6 +406,9 @@ export class ExternalTerminalManager {
       `  chmod 600 ${quoteShell(`${ttyPath}.tmp`)}`,
       `  mv ${quoteShell(`${ttyPath}.tmp`)} ${quoteShell(ttyPath)}`,
       "fi",
+      `printf '%s\\n' "$$" > ${quoteShell(`${pidPath}.tmp`)}`,
+      `chmod 600 ${quoteShell(`${pidPath}.tmp`)}`,
+      `mv ${quoteShell(`${pidPath}.tmp`)} ${quoteShell(pidPath)}`,
       `cd ${quoteShell(input.workspaceRoot)}`,
       `exec ${quoteShell(input.herdrExecutable)} session attach ${quoteShell(input.session)}`,
       "",
@@ -400,37 +425,79 @@ export class ExternalTerminalManager {
     await rm(path, { force: true }).catch(() => {});
     await rm(this.ttyPath(input), { force: true }).catch(() => {});
     await rm(`${this.ttyPath(input)}.tmp`, { force: true }).catch(() => {});
+    await rm(this.pidPath(input), { force: true }).catch(() => {});
+    await rm(`${this.pidPath(input)}.tmp`, { force: true }).catch(() => {});
+  }
+
+  private async processAlive(processId?: number) {
+    if (!processId) return false;
+    try {
+      await this.run("/bin/kill", ["-0", String(processId)]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async ttyAlive(tty?: string) {
+    if (!tty?.startsWith("/dev/")) return false;
+    const name = tty.slice("/dev/".length);
+    if (!/^[A-Za-z0-9]+$/.test(name)) return false;
+    try {
+      const result = await this.run("/bin/ps", ["-t", name, "-o", "pid="]);
+      return Boolean(result.stdout.trim());
+    } catch {
+      return false;
+    }
+  }
+
+  private async activate(
+    terminal: ResolvedExternalTerminalId,
+  ): Promise<boolean> {
+    const application = terminal === "iterm2"
+      ? "iTerm"
+      : terminal === "terminal"
+        ? "Terminal"
+        : "Ghostty";
+    return this.run("/usr/bin/open", ["-a", application])
+      .then(() => true)
+      .catch(() => false);
   }
 
   private async focusExisting(
     terminal: ResolvedExternalTerminalId,
     lease: ExternalSceneLease,
   ): Promise<boolean> {
-    if (!lease.tty) return false;
+    // Herdr has already selected the requested Session tab. A live attach
+    // process therefore only needs its existing terminal window activated;
+    // TTY matching is a compatibility fallback for older leases.
+    if (lease.processId) {
+      return await this.processAlive(lease.processId)
+        ? this.activate(terminal)
+        : false;
+    }
+    // PS is intentionally cheap. It distinguishes a legacy lease whose
+    // terminal window was closed from one whose TTY still exists, avoiding an
+    // 8-second AppleScript probe that makes the desktop feel unresponsive.
+    const tty = lease.tty;
+    if (!tty || !await this.ttyAlive(tty)) return false;
     if (terminal === "ghostty") {
-      await this.run("open", ["-a", "Ghostty"]).catch(() => undefined);
-      return true;
+      return this.activate(terminal);
     }
     if (this.focusAutomationUnavailable.has(terminal)) {
-      const application = terminal === "iterm2" ? "iTerm" : "Terminal";
-      return this.run("/usr/bin/open", ["-a", application])
-        .then(() => true)
-        .catch(() => false);
+      return this.activate(terminal);
     }
     const script = focusScripts[terminal];
     if (!script) return false;
     try {
-      const result = await this.run("/usr/bin/osascript", ["-e", script, "--", lease.tty]);
+      const result = await this.run("/usr/bin/osascript", ["-e", script, "--", tty]);
       return result.stdout.trim() === "true";
     } catch {
       // Automation permission can be denied even though LaunchServices may
       // still bring the terminal forward. Avoid a second prompt/8s stall and
       // never create a duplicate Herdr window just because focus failed.
       this.focusAutomationUnavailable.add(terminal);
-      const application = terminal === "iterm2" ? "iTerm" : "Terminal";
-      return this.run("/usr/bin/open", ["-a", application])
-        .then(() => true)
-        .catch(() => false);
+      return this.activate(terminal);
     }
   }
 
@@ -443,7 +510,8 @@ export class ExternalTerminalManager {
         "-na",
         "Ghostty",
         "--args",
-        `--command=${launcher}`,
+        "-e",
+        launcher,
       ]);
       return;
     }
@@ -452,6 +520,20 @@ export class ExternalTerminalManager {
       return;
     }
     await this.run("/usr/bin/osascript", ["-e", openScripts[terminal], "--", launcher]);
+  }
+
+  private async waitForProcessId(
+    input: ExternalSceneInput,
+    timeout = 2_000,
+  ): Promise<number | undefined> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const pid = await readFile(this.pidPath(input), "utf8")
+        .then(content => Number(content.trim()))
+        .catch(() => undefined);
+      if (Number.isSafeInteger(pid) && Number(pid) > 1) return Number(pid);
+      await delay(50);
+    }
   }
 
   async open(input: ExternalSceneInput): Promise<ExternalSceneLease> {
@@ -502,6 +584,7 @@ export class ExternalTerminalManager {
       ...preferences,
       lastSuccessfulTerminal: terminal,
     });
-    return lease;
+    const processId = await this.waitForProcessId(input);
+    return processId ? { ...lease, processId } : lease;
   }
 }

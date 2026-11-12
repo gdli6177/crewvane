@@ -398,6 +398,48 @@ test("launches a custom interactive CLI and records its real foreground process"
   assert.equal(state.goals[0]?.herdr?.processId, 42);
 });
 
+test("an owner command is resolved by the new pane shell, including aliases and functions", async () => {
+  const { root, service } = await fixture();
+  const goal = (await service.execute({
+    type: "goal.create",
+    input: {
+      title: "登录 shell 命令",
+      projectId: "personal",
+      mode: "concierge",
+    },
+  })) as Goal;
+  await service.execute({
+    type: "agents.configure",
+    preferences: {
+      concierge: "codex",
+      owner: 'cursor-2 --model latest',
+    },
+  });
+  const mock = fakeRunner({ custom: true });
+  await launchOwner(
+    service,
+    { goalId: goal.id, name: "shell-owner", task: "执行登录 shell 任务" },
+    {
+      environment: {
+        HERDR_ENV: "1",
+        HERDR_SESSION: "crewvane-test",
+        HOME: root,
+        PATH: "/usr/bin:/bin",
+      },
+      run: mock.run,
+      wait: async () => {},
+    },
+  );
+  const launches = mock.calls.filter(args =>
+    args[0] === "pane" && args[1] === "run"
+  );
+  assert.ok(launches.some(args =>
+    args[3]?.includes("/zsh") &&
+    args[3].includes("-ilc") &&
+    args[3].includes("cursor-2")
+  ), "the login shell sees the bare configured name so it can resolve a .zshrc alias or function");
+});
+
 test("names a custom CLI that Herdr detects and uses lifecycle-aware prompts", async () => {
   const { root, service } = await fixture();
   const goal = (await service.execute({

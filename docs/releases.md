@@ -14,6 +14,40 @@ GitHub 自动生成的 **Source code** 是源码，不是可安装应用。安�
 
 安装替换应用后，打开设置重新安装 Crewvane CLI，确保 `~/.local/bin/crewvane` 指向当前应用。工作区位于用户选择的目录，不会被覆盖。
 
+## 0.9.2 安装与验收
+
+0.9.2 修复自定义 Agent 启动命令与外部工作现场。设置中填写 `.zshrc` 的
+alias、shell 函数或只在 interactive shell 中存在的 CLI 名称时，管家和负责人
+现在都由真实 Herdr pane shell 解析并执行；Crewvane 不再用 Finder 的目录扫描
+提前误判“未找到 CLI”。绝对路径与原生参数继续作为一个安全 argv 保留。
+
+外部现场现在把 launcher 写入的 attach PID 作为窗口身份。再次进入现场时，只要原
+Herdr attach 进程仍存活，就激活原 Terminal、iTerm2 或 Ghostty 窗口；Herdr 已在
+打开窗口前切换到目标 Tab，因此不会为每个目标反复开新窗口。旧版只有 TTY 的
+lease 仍兼容。真正关闭的窗口会先在本地检查 attach PID 和 TTY，快速跳过可能阻塞
+8 秒的 AppleScript 探测，再重新创建窗口；关闭外部终端后继续点击 Crewvane 时不再
+被旧窗口定位拖住。
+
+Ghostty 启动参数改为官方单命令形式 `-e <launcher>`。launcher 位于
+`Application Support` 等含空格路径时也被完整保留，不再只执行到
+`/Users/.../Application:`。
+
+1. 安装 DMG 或 ZIP 后确认设置显示 0.9.2，重新安装 Crewvane CLI，并确认内置
+   Herdr 插件版本同步为 0.9.2。
+2. 在 `.zshrc` 放置一个 alias 或 shell 函数，将其裸命令名写入“管家启动命令”，
+   保存后点击“准备管家”，确认真实 pane 内启动成功，参数与工作目录正确。
+3. 把同一类命令写入“负责人启动命令”，创建并派发目标，确认真实负责人会话正常
+   启动并收到完整任务。
+4. 选择 Terminal、iTerm2 或 Ghostty 的外部现场，连续从不同目标点击“回到现场”；
+   确认只存在一个工作区终端窗口，内容切换到对应 Herdr Tab。
+5. 选择 Ghostty，确认带空格的 launcher 路径能正常 attach；关闭测试窗口后再次
+   打开，确认能创建新窗口而不是错误复用已退出进程。
+6. 保留并验证 v3 工作区、注意力、协调收件箱、Agent Hooks、Webhook、自主目标与
+   内嵌轻现场原有行为。
+
+当前安装包仍使用完整 ad-hoc 签名，未进行 Apple 公证。首次打开可能提示“无法
+验证开发者”；只有核验 GitHub 来源与 SHA-256 后，才应按系统提示打开。
+
 ## 0.9.1 安装与验收
 
 0.9.1 是对 0.9.0 的前向纠偏，不回滚数据，也不删除已有自主目标。首次进入

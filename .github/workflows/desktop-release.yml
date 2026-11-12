@@ -76,17 +76,15 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Crewvane｜协航 0.9.1 · macOS Apple Silicon
+          Crewvane｜协航 0.9.2 · macOS Apple Silicon
 
           ## 本版更新
 
-          - 0.9.0 提前发布的自主目标继续保留，但首次进入目标界面不再弹出自主推进设置；实验设置默认折叠，普通主线恢复为注意力、管家和工作现场。
-          - “回到现场”默认打开 Terminal、iTerm2 或 Ghostty 中的同一 Herdr Session，并优先复用已有窗口；Terminal 使用免自动化权限的 LaunchServices 路径，原生组合键、图片粘贴和输入法使用真实终端能力。
-          - 设置中可明确选择外部终端或内嵌轻现场，所选模式会真正用于“回到现场”，内嵌标题栏仍可强制在外部打开。
-          - 内嵌轻现场补齐仅图片剪贴板桥：检测到图片后向当前 Agent 发送一次 Ctrl+V，由 Agent 自己读取系统剪贴板。
-          - 外部终端未安装、自动化权限被拒绝或打开失败时给出可操作提示，可退回内嵌轻现场，不改变目标或 Herdr Session。
-          - 负责人暂时空闲不再被误报成异常待办：已有下一步时显示“按计划跟进”，缺少下一步时显示“待管家更新”；真正的决定、验收、排障和到期跟进仍进入注意力。
-          - 保留 v3 数据与在途自主目标，不做破坏性回滚；Agent Hooks、协调收件箱、一次回执提醒、Webhook 和注意力规则继续可用。
+          - 修复 `.zshrc` 中 alias、shell 函数和 interactive PATH 命令被误报“未找到 CLI”：管家与负责人均交给真实 Herdr pane shell 解析，绝对路径和原生参数继续安全保留。
+          - 外部 Terminal、iTerm2、Ghostty 改为按 attach 进程复用同一工作区窗口；切换目标时只切换 Herdr Tab，不再每次新开终端窗口。
+          - 修复 Ghostty 对含空格 launcher 路径的拆分错误，改用官方 `-e <launcher>` 单命令参数。
+          - 旧 TTY lease 保持兼容；终端关闭后先检查 attach PID，跳过会卡住界面的 AppleScript 探测，再安全创建新窗口。
+          - 保留 v3 数据、注意力、协调收件箱、Agent Hooks、Webhook、自主目标和内嵌轻现场原有行为。
 
           ## 安装
 

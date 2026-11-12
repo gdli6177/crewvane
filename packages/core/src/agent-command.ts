@@ -7,6 +7,32 @@ export interface AgentCommand {
   args: string[];
 }
 
+export function quoteAgentShellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function renderAgentCommand(
+  executable: string,
+  args: string[] = [],
+): string {
+  // Keep bare command names unquoted so the interactive pane shell can resolve
+  // aliases and functions. Paths and whitespace still become one strict argv.
+  const command = /^[A-Za-z0-9_+@.-]+$/.test(executable)
+    ? executable
+    : quoteAgentShellArgument(executable);
+  return [command, ...args.map(quoteAgentShellArgument)].join(" ");
+}
+
+export function renderLoginShellAgentCommand(
+  shell: string,
+  executable: string,
+  args: string[] = [],
+): string {
+  return `${quoteAgentShellArgument(shell)} -ilc ${
+    quoteAgentShellArgument(renderAgentCommand(executable, args))
+  }`;
+}
+
 export function parseAgentCommand(
   command: string,
   kinds: string[],

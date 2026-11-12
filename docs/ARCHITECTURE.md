@@ -77,7 +77,7 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 
 ### 桌面工作现场
 
-0.9.1 起，“回到现场”默认由 `ExternalTerminalManager` 在 iTerm2、Terminal 或 Ghostty 中 attach 当前工作区 Herdr Session。设置保存在 userData 的 `scene-settings.json`（`0600`）；每个工作区、Session 的 TTY lease 与固定 launcher 分别使用私有目录。再次打开时先按真实 TTY 聚焦已有窗口，窗口已关闭才创建新窗口。AppleScript 只接收固定脚本参数，用户文本不拼接进脚本；Session 名称、工作区路径和执行路径都先校验。自动终端失败、权限被拒绝或终端未安装时，目标与 Session 不变，界面明确提示可改用内嵌轻现场。
+0.9.2 起，“回到现场”默认由 `ExternalTerminalManager` 在 iTerm2、Terminal 或 Ghostty 中 attach 当前工作区 Herdr Session。设置保存在 userData 的 `scene-settings.json`（`0600`）；每个工作区、Session 的 attach 进程、TTY lease 与固定 launcher 分别使用私有目录。再次打开时先验证原 attach 进程仍存活并激活原窗口；旧 lease 才通过 TTY 定位，窗口已关闭才创建新窗口。Ghostty 将 launcher 作为 `-e` 的单个命令参数，路径含空格也不会被拆开。AppleScript 只接收固定脚本参数，用户文本不拼接进脚本；Session 名称、工作区路径和执行路径都先校验。自动终端失败、权限被拒绝或终端未安装时，目标与 Session 不变，界面明确提示可改用内嵌轻现场。
 
 内嵌轻现场使用同一 Session 与同一核心快照，不维护第二套 Agent 状态。纯文本继续走 xterm PTY；仅图片剪贴板时，渲染进程通过受约束 IPC 确认系统剪贴板类型，再向当前 Agent 写一次 `Ctrl+V`，让 CLI 自己读取剪贴板，避免把图片字节复制进 Crewvane 状态。轻现场标题栏提供强制外部打开入口，用户所选默认模式只影响普通“回到现场”动作。
 
@@ -85,7 +85,7 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 
 `Executables` 将 Finder 的精简 PATH 与用户登录 shell 的 PATH、常见安装目录合并，保留可执行入口的符号链接名称。安装包在构建时从 Herdr 官方 GitHub Release 获取当前平台二进制，校验 SHA-256 后再连同应用签名；用户首次启动不依赖 Homebrew、网络或系统 PATH。`HerdrInstallation` 启动时先探测应用内置、userData/runtime 或本机已有版本，有效二进制立即可用；随后通过轻量 GitHub Releases API 在后台检查最新版，发现更新时把官方资产下载到 userData/runtime/herdr，再次校验 SHA-256 与实际版本后原子替换。安装请求去重，不修改用户已有安装。更新检查失败时继续使用内置或本机 CLI，并显示可重试提示；安装失败不丢目标。
 
-已识别的 CLI 使用 Herdr Agent 通信；任意自定义交互式 CLI 通过真实 Pane 启动，原样保留可执行文件与参数，用 `transport=pane` 与前台 `processId` 记录并复用。每次发送文本前核对该进程仍在前台，退出或换进程时拒绝发送；没有 Agent 生命周期信息时只报告 unknown。不把任意程序“成功启动”当作理解任务或完成任务。用户复杂 shell 表达式通过自己的启动脚本承载。
+已识别的 CLI 使用 Herdr Agent 通信；任意自定义交互式 CLI 通过真实 Pane 启动，原样保留可执行文件与参数，用 `transport=pane` 与前台 `processId` 记录并复用。Finder 目录预检找不到命令时，不再提前判定 CLI 不存在：裸命令名交给真实 interactive Pane shell，由其 PATH、alias 与函数解析；绝对路径仍作为一个安全参数执行。每次发送文本前核对该进程仍在前台，退出或换进程时拒绝发送；没有 Agent 生命周期信息时只报告 unknown。不把任意程序“成功启动”当作理解任务或完成任务。用户复杂 shell 表达式通过自己的启动脚本承载。
 
 Crewvane 不向 Codex 或其他 Agent CLI 注入运行时专属的 `workspace-write`、网络开关、审批参数或额外目录。设置中的启动命令是可执行文件与原生 argv；支持哪些模型、沙箱和权限选项由该 CLI 自己决定。Electron renderer 的 `sandbox: true` 是应用安全边界，与 Agent 执行权限无关。
 
