@@ -79,6 +79,10 @@ try {
     overwrite: true,
     prune: true,
     appCategoryType: "public.app-category.developer-tools",
+    extendInfo: {
+      NSAppleEventsUsageDescription:
+        "Crewvane uses the selected terminal to open and focus your current Herdr work scene.",
+    },
     ...(electronZipDir ? { electronZipDir } : {}),
     // Electron patches its binaries while packaging. Re-sign every nested
     // executable and seal the app afterwards so Gatekeeper does not report the

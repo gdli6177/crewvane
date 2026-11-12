@@ -20,7 +20,6 @@ import {
   Plus,
   RefreshCw,
   Settings2,
-  ShieldCheck,
   Sparkles,
   SquareTerminal,
   Sun,
@@ -61,6 +60,7 @@ import type { GoalDetailService } from "./features/goals/goalService.js";
 import {
   Button,
   Checkbox,
+  ChoiceGroup,
   EmptyState,
   Field,
   IconButton,
@@ -140,7 +140,6 @@ const time = (value?: string) =>
     : "";
 function App() {
   const [state, setState] = useState<WorkspaceState>(initialState),
-    [stateLoaded, setStateLoaded] = useState(false),
     [workspace, setWorkspace] = useState<string>(),
     [version, setVersion] = useState(""),
     [page, setPage] = useState<keyof typeof pages>("home");
@@ -153,7 +152,7 @@ function App() {
     [filter, setFilter] = useState("all");
   const [modal, setModal] = useState<
       "new" | "project" | "attention" | "goal" | "task" | "edit" | "delivery"
-      | "workspace" | "webhook" | "autonomy" | ""
+      | "workspace" | "webhook" | ""
     >(""),
     [goalId, setGoalId] = useState("");
   const [intakeHandling, setIntakeHandling] = useState<IntakeHandling>("concierge");
@@ -181,7 +180,6 @@ function App() {
   const pendingState = useRef<{ state: WorkspaceState; signature: string } | undefined>(undefined);
   const stateFrame = useRef<number | undefined>(undefined);
   const lastStateSignature = useRef("");
-  const autonomyPromptedWorkspace = useRef("");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   function applyState(next: WorkspaceState) {
     const signature = JSON.stringify(next);
@@ -194,7 +192,6 @@ function App() {
       if (!pending || pending.signature === lastStateSignature.current) return;
       lastStateSignature.current = pending.signature;
       setState(pending.state);
-      setStateLoaded(true);
     });
   }
   const goal = state.goals.find((item) => item.id === goalId),
@@ -296,12 +293,6 @@ function App() {
     }
   }, [page]);
   useEffect(() => {
-    if (!workspace || !stateLoaded || state.autonomy.initializedAt || modal) return;
-    if (autonomyPromptedWorkspace.current === workspace) return;
-    autonomyPromptedWorkspace.current = workspace;
-    setModal("autonomy");
-  }, [workspace, stateLoaded, state.autonomy.initializedAt, modal]);
-  useEffect(() => {
     if (!error || modal) return;
     const timer = window.setTimeout(() => setError(""), 8_000);
     return () => window.clearTimeout(timer);
@@ -310,11 +301,27 @@ function App() {
     setError(String(reason).replace(/^Error: /, "")
       .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
   }
-  async function openScene(id?: string, terminalOnly = false) {
+  async function openScene(id?: string, forceEmbedded = false) {
     if (busy) return;
     setModal("");
     setBusy(true); setError("");
-    try { if (terminalOnly) await api.openTerminal(); else await api.openHerdr(id); }
+    try {
+      if (forceEmbedded) {
+        await api.openHerdr(id);
+        notify(`已打开内嵌轻现场${id ? "。" : "，关闭面板不会终止 Agent。"}`);
+      }
+      else {
+        const result = await api.openScene(id);
+        if (result.mode === "embedded") {
+          notify(`已打开内嵌轻现场${id ? "。" : "，关闭面板不会终止 Agent。"}`);
+        } else {
+          const label = result.lease.terminal === "iterm2"
+            ? "iTerm2"
+            : result.lease.terminal === "terminal" ? "Terminal" : "Ghostty";
+          notify(`已在 ${label} 打开${id ? "目标现场" : "全局管家"}。`);
+        }
+      }
+    }
     catch (reason) { showError(reason); }
     finally { setBusy(false); }
   }
@@ -1140,33 +1147,6 @@ function App() {
           </Button>
         </div>
       </Modal>}
-      {modal === "autonomy" && (
-        <AutonomySetupModal
-          busy={busy}
-          error={error}
-          onChoose={async acceptance => {
-            setBusy(true);
-            setError("");
-            try {
-              await api.command({
-                type: "workspace.autonomy.set",
-                acceptance,
-                initialize: true,
-                actor: "你",
-              });
-              applyState(await api.command({ type: "snapshot" }));
-              setModal("");
-              notify(acceptance === "auto-with-verification"
-                ? "已启用独立复核后自动验收；生产发布仍由你逐次批准。"
-                : "已设为人工验收；Agent 不会自行代替你验收。");
-            } catch (reason) {
-              showError(reason);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        />
-      )}
       {modal === "webhook" && (
         <Modal
           title="Webhook 通知"
@@ -1696,7 +1676,7 @@ function Settings({
         <div>
           <span className="eyebrow">YOUR MIND, CLEARER</span>
           <h1>只设置必要的。</h1>
-          <p>接管 Agent 的生命周期观测，同时保留你已有的 CLI、模型与工作方式。</p>
+          <p>选择真实工作现场，保留你已有的终端、CLI、模型与工作方式。</p>
         </div>
       </section>
       <div className="settings-groups">
@@ -1709,6 +1689,7 @@ function Settings({
             </div>
           </header>
           <div className="ui-settings-grid">
+            <SceneSettingsEditor busy={busy} notify={notify} />
             <AgentPreferencesEditor
               key={workspace}
               preferences={state.agents ?? { concierge: "codex" }}
@@ -1722,7 +1703,7 @@ function Settings({
               busy={busy}
               onSave={savePolicy}
             />
-            <AutonomySettings
+            <ExperimentalAutonomySettings
               state={state}
               busy={busy}
               onSaveWorkspace={saveAutonomy}
@@ -1798,7 +1779,7 @@ function Settings({
               {busy ? "正在准备…" : "准备管家"}
             </Button>
             <Button variant="ghost" size="sm" disabled={busy} onClick={openHerdr}>
-              打开 Herdr
+              内嵌轻现场
             </Button>
           </div>
         </SettingsSection>
@@ -1954,48 +1935,156 @@ function Settings({
     </div>
   );
 }
-function AutonomySetupModal({
+function SceneSettingsEditor({
   busy,
-  error,
-  onChoose,
+  notify,
 }: {
   busy: boolean;
-  error: string;
-  onChoose: (acceptance: AcceptanceMode) => Promise<void>;
+  notify: (message: string) => void;
 }) {
+  const [status, setStatus] = useState<
+    Awaited<ReturnType<typeof api.sceneSettings>>
+  >();
+  const [openWith, setOpenWith] = useState<"external" | "embedded">("external");
+  const [terminal, setTerminal] = useState<"auto" | "iterm2" | "terminal" | "ghostty">("auto");
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState("");
+  useEffect(() => {
+    void api.sceneSettings()
+      .then(value => {
+        setStatus(value);
+        setOpenWith(value.settings.openWith);
+        setTerminal(value.settings.terminal);
+      })
+      .catch(error => setFailure(String(error).replace(
+        /^Error invoking remote method '[^']+': (?:Error: )?/,
+        "",
+      )));
+  }, []);
+  async function save(next?: {
+    openWith: "external" | "embedded";
+    terminal: "auto" | "iterm2" | "terminal" | "ghostty";
+  }) {
+    setSaving(true);
+    setFailure("");
+    try {
+      const value = await api.saveSceneSettings(next ?? { openWith, terminal });
+      setStatus(value);
+      setOpenWith(value.settings.openWith);
+      setTerminal(value.settings.terminal);
+      notify("工作现场设置已保存。");
+    } catch (error) {
+      setFailure(String(error).replace(
+        /^Error invoking remote method '[^']+': (?:Error: )?/,
+        "",
+      ));
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function test() {
+    setSaving(true);
+    setFailure("");
+    try {
+      const lease = await api.testSceneSettings();
+      const label = lease.terminal === "iterm2"
+        ? "iTerm2"
+        : lease.terminal === "terminal" ? "Terminal" : "Ghostty";
+      notify(`已在 ${label} 打开当前工作现场。`);
+    } catch (error) {
+      setFailure(String(error).replace(
+        /^Error invoking remote method '[^']+': (?:Error: )?/,
+        "",
+      ));
+    } finally {
+      setSaving(false);
+    }
+  }
+  const terminalOptions = [
+    { value: "auto" as const, label: "自动选择" },
+    ...(status?.terminals ?? []).map(item => ({
+      value: item.id,
+      label: `${item.label}${item.installed ? "" : "（未安装）"}`,
+      disabled: !item.installed,
+    })),
+  ];
   return (
-    <Modal
-      title="交付完成后，谁来验收？"
-      description="这是工作区默认设置，可随时在设置中调整。生产发布始终需要你逐次批准，执行完成后也由你最终确认。"
-      error={error}
-      onClose={() => void onChoose("human-review")}
+    <SettingsSection
+      wide
+      icon={<SquareTerminal />}
+      title="工作现场"
+      description="真实终端保留图片粘贴、组合键、输入法和完整 Herdr 交互。内嵌轻现场适合快速查看和简单文字输入。"
     >
-      <div className="autonomy-setup-options">
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void onChoose("human-review")}
-        >
-          <span><ShieldCheck size={18} /></span>
-          <strong>每次都由我验收</strong>
-          <small>最保守的默认方式。Agent 可准备证据和复核，但不会自行把目标标为完成。</small>
-          <em>跳过时也使用此方式</em>
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void onChoose("auto-with-verification")}
-        >
-          <span><Sparkles size={18} /></span>
-          <strong>独立复核后自动验收</strong>
-          <small>只有候选、完成条件、真实证据和未参与交付的复核者都满足门禁时才会自动完成；你仍可随时暂停或重新打开。</small>
-          <em>减少日常验收，不放弃最终裁决权</em>
-        </button>
+      <div className="scene-settings-panel">
+        <div>
+          <strong>“回到现场”默认打开方式</strong>
+          <ChoiceGroup
+            label="默认打开方式"
+            value={openWith}
+            disabled={busy || saving}
+            options={[
+              { value: "external", label: "外部终端（推荐）" },
+              { value: "embedded", label: "内嵌轻现场" },
+            ]}
+            onChange={value => void save({ openWith: value, terminal })}
+          />
+          <p>
+            {openWith === "external"
+              ? "使用你熟悉的真实终端，Crewvane 只负责定位同一 Herdr Session 和目标 Tab。"
+              : "不离开 Crewvane，复杂快捷键或图片输入可随时切到外部终端。"}
+          </p>
+        </div>
+        <div>
+          <strong>优先使用的终端</strong>
+          <div className="scene-terminal-options" role="group" aria-label="优先使用的终端">
+            {terminalOptions.map(option => (
+              <button
+                key={option.value}
+                type="button"
+                disabled={busy || saving || ("disabled" in option && option.disabled)}
+                aria-pressed={terminal === option.value}
+                onClick={() => {
+                  setTerminal(option.value);
+                  void save({ openWith, terminal: option.value });
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <p>
+            当前选择：
+            {status?.resolved
+              ? status.terminals.find(item => item.id === status.resolved)?.label
+              : terminal === "auto" ? "等待检测可用终端" : "所选终端不可用"}
+          </p>
+        </div>
       </div>
-      <p className="autonomy-setup-note">
-        自动验收只适用于目标边界内的交付，不等于合并或上线。
-      </p>
-    </Modal>
+      <div className="settings-facts">
+        <p>
+          Terminal 可不用自动化权限直接启动。iTerm2 首次打开或精确定位已有窗口时，macOS 可能请求“自动化”权限；拒绝后不会丢失目标或 Herdr Session，可继续使用内嵌轻现场。
+        </p>
+      </div>
+      {failure && <p className="ui-field__error" role="alert">{failure}</p>}
+      <div className="ui-settings-card__actions">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || saving}
+          onClick={() => void test()}
+        >
+          {saving ? "正在打开…" : "测试打开现场"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy || saving}
+          onClick={() => void api.openHerdr().catch(error => setFailure(String(error)))}
+        >
+          打开内嵌轻现场
+        </Button>
+      </div>
+    </SettingsSection>
   );
 }
 function formatBytes(bytes: number) {
@@ -2270,6 +2359,45 @@ function AutonomySettings({
         })}
       </div>
     </SettingsSection>
+  );
+}
+function ExperimentalAutonomySettings(props: {
+  state: WorkspaceState;
+  busy: boolean;
+  onSaveWorkspace: (value: {
+    acceptance: AcceptanceMode;
+    paused: boolean;
+    maxRecoveryAttempts: number;
+    noProgressMinutes: number;
+  }) => Promise<void>;
+  onSaveProject: (
+    projectId: string,
+    value: {
+      acceptance: "inherit" | AcceptanceMode;
+      releaseOnMerge: ReleaseOnMerge;
+    },
+  ) => Promise<void>;
+}) {
+  const hasExperimentalGoal = props.state.goals.some(goal =>
+    Boolean(goal.brief || goal.autonomy ||
+      goal.kind === "discovery" || goal.kind === "release"),
+  );
+  const [open, setOpen] = useState(hasExperimentalGoal);
+  return (
+    <details
+      className="experimental-settings"
+      open={open}
+      onToggle={event => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span>
+          <Sparkles size={15} />
+          实验功能 · 自主推进与自动验收
+        </span>
+        <small>默认关闭；普通目标仍由你和管家按现有流程推进。</small>
+      </summary>
+      <AutonomySettings {...props} />
+    </details>
   );
 }
 function GovernanceEditor({

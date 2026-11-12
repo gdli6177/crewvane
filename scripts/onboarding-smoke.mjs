@@ -378,7 +378,7 @@ try {
   assert.equal(externalGoal.waitingFor, undefined);
   assert.equal(externalGoal.remindAt, undefined);
   await page.getByRole("button", { name:"设置", exact:true }).click();
-  await page.getByRole("button", { name: "打开 Herdr", exact: true }).click();
+  await page.getByRole("button", { name: "打开内嵌轻现场", exact: true }).click();
   await page.getByRole("region", { name: "Herdr 工作现场" }).waitFor();
   const panel = page.getByRole("region", { name: "Herdr 工作现场" });
   const beforeResize = await panel.boundingBox();

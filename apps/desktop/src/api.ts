@@ -6,6 +6,14 @@ import type { SkillsInstallResult, SkillsStatus } from "../electron/skill-instal
 import type { CacheCleanupResult, CacheStatus } from "../electron/cache-maintenance.js";
 import type { AgentHookAdapterStatus, ManagedAdapterId } from "../electron/agent-hook-manager.js";
 import type { CoordinatorInboxStatus } from "../electron/coordinator-inbox.js";
+import type {
+  ExternalSceneLease,
+  SceneSettings,
+  SceneSettingsStatus,
+} from "../electron/external-terminal.js";
+export type SceneOpenResult =
+  | { mode: "external"; lease: ExternalSceneLease }
+  | { mode: "embedded" };
 export interface DesktopApi {
   command(command: CrewvaneCommand): Promise<any>;
   importAttachments(inputs: { name: string; bytes: ArrayBuffer }[]): Promise<GoalAttachment[]>;
@@ -27,7 +35,14 @@ export interface DesktopApi {
     id: ManagedAdapterId,
     action: "install" | "disable" | "uninstall" | "refresh",
   ): Promise<AgentHookAdapterStatus>;
-  readClipboardText(): Promise<string>; writeClipboardText(value: string): Promise<void>;
+  readClipboardText(): Promise<string>;
+  readClipboardContent(): Promise<
+    { kind: "text"; text: string } | { kind: "image" } | { kind: "empty" }
+  >;
+  writeClipboardText(value: string): Promise<void>;
+  sceneSettings(): Promise<SceneSettingsStatus>;
+  saveSceneSettings(input: SceneSettings): Promise<SceneSettingsStatus>;
+  testSceneSettings(): Promise<ExternalSceneLease>;
   installCli(): Promise<{ output: string }>; prepareConcierge(): Promise<unknown>;
   coordinatorStatus(): Promise<CoordinatorInboxStatus>;
   dispatchGoal(goalId: string): Promise<unknown>;
@@ -35,6 +50,8 @@ export interface DesktopApi {
   terminalSnapshot(): Promise<{ session: string; data: string; running: boolean; sequence: number; cols: number; rows: number; error?: string } | undefined>;
   writeTerminal(session: string, data: string): Promise<void>;
   resizeTerminal(session: string, cols: number, rows: number): Promise<void>;
+  openScene(goalId?: string): Promise<SceneOpenResult>;
+  openExternalScene(goalId?: string): Promise<ExternalSceneLease>;
   openHerdr(goalId?: string): Promise<void>; openUrl(url: string): Promise<void>; showCli(): Promise<void>;
   openRecoveryBackup(): Promise<void>;
   openTerminal(): Promise<void>;

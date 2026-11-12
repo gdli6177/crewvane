@@ -23,7 +23,13 @@ import {
   type WatchdogRequest,
   type WorkspaceState,
 } from "../../../packages/core/src/index.js";
-import { ConciergeBlockedError, HerdrClient, herdrRunner, quoteShell } from "./herdr.js";
+import {
+  ConciergeBlockedError,
+  HerdrClient,
+  herdrRunner,
+  quoteShell,
+  startDetachedHerdrServer,
+} from "./herdr.js";
 import { refreshConciergeIfSafe } from "./concierge-lifecycle.js";
 import { TerminalHost } from "./terminal-host.js";
 import { parseAgentCommand } from "./agent-command.js";
@@ -46,6 +52,11 @@ import {
 import { AgentRuntimeBroker } from "./agent-runtime-broker.js";
 import { HerdrHostBridge } from "./herdr-host-bridge.js";
 import {
+  ExternalTerminalManager,
+  type ExternalSceneLease,
+  type SceneSettings,
+} from "./external-terminal.js";
+import {
   AutonomyScheduler,
   type AutonomyCandidate,
   type AutonomyDispatchResult,
@@ -67,10 +78,13 @@ const terminals = new TerminalHost((event) => {
   if (window && !window.isDestroyed()) window.webContents.send("crewvane:event", event);
 }, process.env);
 const rendererURL = pathToFileURL(join(here, "renderer/index.html")).href;
-let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller, agentHookManager: AgentHookManager, agentRuntimeBroker: AgentRuntimeBroker;
+let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: HerdrPlugin, webhookNotifier: WebhookNotifier, skillInstaller: CrewvaneSkillInstaller, agentHookManager: AgentHookManager, agentRuntimeBroker: AgentRuntimeBroker, externalTerminals: ExternalTerminalManager;
 let coordinatorInbox: CoordinatorInbox | undefined, coordinatorDispatcher: CoordinatorDispatcher | undefined;
 let herdrHostBridge: HerdrHostBridge | undefined;
 let autonomyScheduler: AutonomyScheduler | undefined;
+type SceneOpenResult =
+  | { mode: "external"; lease: ExternalSceneLease }
+  | { mode: "embedded" };
 function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ?? `crewvane-${createHash("sha256").update(path ?? "").digest("hex").slice(0, 10)}`; }
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
@@ -212,12 +226,23 @@ async function agentChoices() {
     kind, installed: Boolean(await executable(kind)),
   })));
 }
-let companionPreparation: Promise<Awaited<ReturnType<typeof prepareHerdrCompanionsNow>>> | undefined;
+let companionPreparation: {
+  workspace: string;
+  promise: Promise<Awaited<ReturnType<typeof prepareHerdrCompanionsNow>>>;
+} | undefined;
 function prepareHerdrCompanions(workspace = root) {
-  companionPreparation ??= prepareHerdrCompanionsNow(workspace).finally(() => {
-    companionPreparation = undefined;
-  });
-  return companionPreparation;
+  const requestedWorkspace = workspace ?? "";
+  if (companionPreparation?.workspace === requestedWorkspace)
+    return companionPreparation.promise;
+  const previous = companionPreparation?.promise.catch(() => undefined),
+    promise = (previous ?? Promise.resolve()).then(() =>
+      prepareHerdrCompanionsNow(requestedWorkspace),
+    ).finally(() => {
+      if (companionPreparation?.promise === promise)
+        companionPreparation = undefined;
+    });
+  companionPreparation = { workspace: requestedWorkspace, promise };
+  return promise;
 }
 async function prepareHerdrCompanionsNow(workspace = root) {
   try {
@@ -290,12 +315,18 @@ async function installCliNow(workspace = root) {
     if (error.code !== "ENOENT") throw error;
   });
   await symlink(launcher, status.path);
-  const checked = await exec(status.path, ["status", ...(workspace ? ["--root", workspace] : [])], { timeout: 15_000 });
+  // On first launch there may be no workspace yet. Do not run status from
+  // Finder's "/" working directory, which would look like a request to create
+  // "/.crewvane-lock". A real workspace queues a second preparation pass and
+  // then performs the full CLI check.
+  const checked = workspace
+    ? await exec(status.path, ["status", "--root", workspace], { timeout: 15_000 })
+    : undefined;
   const installed = await cliStatus();
   if (window && !window.isDestroyed()) {
     window.webContents.send("crewvane:event", { type: "cli-status", status: installed });
   }
-  return { ...installed, output: checked.stdout.trim() };
+  return { ...installed, output: checked?.stdout.trim() ?? "" };
 }
 function client(path: string, workspace = root) {
   const session = sessionName(workspace);
@@ -303,6 +334,15 @@ function client(path: string, workspace = root) {
   return new HerdrClient(herdrRunner(path, session), session, workspace, async () => {
     await terminals.attach(path, session, workspace!);
     if (root === workspace) window.webContents.send("crewvane:event", { type: "terminal-available", session, title: "全局管家" });
+  });
+}
+function externalClient(path: string, workspace = root) {
+  const session = sessionName(workspace);
+  if (!workspace) throw new Error("请先选择工作区");
+  return new HerdrClient(herdrRunner(path, session), session, workspace, async () => {
+    // External scenes must never depend on the embedded PTY succeeding. Start
+    // the named server headlessly; the user's terminal performs the attach.
+    startDetachedHerdrServer(path, session, workspace);
   });
 }
 async function closeEndedGoalSession(target: WorkspaceService, goalId: string, executable?: string) {
@@ -822,6 +862,27 @@ async function openHerdr(reference?: HerdrReference, goalId?: string) {
     type: "terminal-open", session, title: reference?.agent === "concierge" ? "全局管家" : "工作现场", goalId,
   });
 }
+async function openExternalScene(
+  reference?: HerdrReference,
+  goalId?: string,
+): Promise<ExternalSceneLease> {
+  const target = activeService(),
+    session = sessionName(target.root),
+    status = await herdrInstallation.ensure();
+  if (!status.executable)
+    throw new Error(status.detail || "Herdr 尚未准备好，请在设置中重试");
+  const connection = externalClient(status.executable, target.root);
+  await connection.ensureSession();
+  if (reference?.tabId || reference?.agent) await connection.open(reference);
+  else await connection.ensureWorkspace();
+  if (goalId && reference?.agent && reference.agent !== "concierge")
+    await target.execute({ type: "scene.visit", goalId });
+  return externalTerminals.open({
+    workspaceRoot: target.root,
+    session,
+    herdrExecutable: status.executable,
+  });
+}
 async function openConcierge(target = activeService(), goalId?: string) {
   // A stored tab is only a locator. It may still be open while the concierge
   // process has exited or been replaced by a manually started agent.
@@ -838,6 +899,58 @@ async function openConcierge(target = activeService(), goalId?: string) {
   }
   if (root === target.root) broadcastSnapshot(await target.read(), target.root);
   return reference;
+}
+async function openConciergeExternal(target = activeService(), goalId?: string) {
+  const reference = await prepareConcierge(target);
+  const lease = await openExternalScene(reference, goalId);
+  const latest = (await target.read()).concierge;
+  if (latest.status !== "ready" || latest.detail) {
+    await target.execute({
+      type: "concierge.status",
+      status: "ready",
+      reference: latest,
+      live: latest.live ?? null,
+    });
+  }
+  if (root === target.root) broadcastSnapshot(await target.read(), target.root);
+  return lease;
+}
+async function openEmbeddedScene(target: WorkspaceService, goalId?: string) {
+  const state = await target.read();
+  if (!goalId) {
+    await openConcierge(target);
+    return;
+  }
+  const item = state.goals.find(goal => goal.id === goalId);
+  if (!item) throw new Error("目标不存在");
+  if (item.mode === "concierge" && !item.herdr) {
+    await openConcierge(target, goalId);
+    return;
+  }
+  await openHerdr(item.herdr, goalId);
+}
+async function openExternalSceneForGoal(target: WorkspaceService, goalId?: string) {
+  const state = await target.read();
+  if (!goalId) return openConciergeExternal(target);
+  const item = state.goals.find(goal => goal.id === goalId);
+  if (!item) throw new Error("目标不存在");
+  if (item.mode === "concierge" && !item.herdr)
+    return openConciergeExternal(target, goalId);
+  return openExternalScene(item.herdr, goalId);
+}
+async function openPreferredScene(
+  target: WorkspaceService,
+  goalId?: string,
+): Promise<SceneOpenResult> {
+  const status = await externalTerminals.status();
+  if (status.settings.openWith === "external") {
+    return {
+      mode: "external",
+      lease: await openExternalSceneForGoal(target, goalId),
+    };
+  }
+  await openEmbeddedScene(target, goalId);
+  return { mode: "embedded" };
 }
 async function reconcileConcierge(target: WorkspaceService, executable: string) {
   if (preparations.has(target.root)) return;
@@ -1177,6 +1290,10 @@ app.whenReady().then(async () => {
     XDG_CONFIG_HOME: join(app.getPath("home"), ".config"),
     XDG_STATE_HOME: join(app.getPath("home"), ".local/state"),
   } : process.env;
+  externalTerminals = new ExternalTerminalManager({
+    userDataRoot: app.getPath("userData"),
+    env: integrationEnvironment,
+  });
   herdrPlugin = new HerdrPlugin(
     app.isPackaged ? join(process.resourcesPath, "herdr-plugin") : join(app.getAppPath(), "herdr-plugin"),
     join(app.getPath("userData"), "herdr-plugin"),
@@ -1338,10 +1455,32 @@ app.whenReady().then(async () => {
     return configureAgentRuntime(id, action);
   });
   ipcMain.handle("crewvane:clipboard-read", (event) => { sender(event); return clipboard.readText(); });
-  ipcMain.handle("crewvane:clipboard-write", (event, value: unknown) => {
+  ipcMain.handle("crewvane:clipboard-write", async (event, value: unknown) => {
     sender(event);
     if (typeof value !== "string" || value.length > 2_000_000) throw new Error("剪贴板文本无效");
-    clipboard.writeText(value);
+    await clipboard.writeText(value);
+  });
+  ipcMain.handle("crewvane:clipboard-content", async (event) => {
+    sender(event);
+    const items = await clipboard.read();
+    if (items.some(item => item.types.some(type => type.startsWith("image/"))))
+      return { kind: "image" as const };
+    const text = await clipboard.readText();
+    return text ? { kind: "text" as const, text } : { kind: "empty" as const };
+  });
+  ipcMain.handle("crewvane:scene-settings", (event) => {
+    sender(event);
+    return externalTerminals.status();
+  });
+  ipcMain.handle("crewvane:scene-settings-save", (event, input: SceneSettings) => {
+    sender(event);
+    activeService();
+    return externalTerminals.save(input);
+  });
+  ipcMain.handle("crewvane:scene-settings-test", async (event) => {
+    sender(event);
+    activeService();
+    return openExternalScene();
   });
   ipcMain.handle("crewvane:prepare-concierge", (event) => { sender(event); return prepareConcierge(); });
   ipcMain.handle("crewvane:coordinator-status", async event => {
@@ -1358,18 +1497,15 @@ app.whenReady().then(async () => {
   ipcMain.handle("crewvane:open-terminal", async event => { sender(event); await openHerdr(); });
   ipcMain.handle("crewvane:open-herdr", async (event, goalId?: string) => {
     sender(event);
-    const target = activeService(), state = await target.read();
-    if (!goalId) {
-      await openConcierge(target);
-      return;
-    }
-    const item = goalId ? state.goals.find((goal) => goal.id === goalId) : undefined;
-    if (goalId && !item) throw new Error("目标不存在");
-    if (item?.mode === "concierge" && !item.herdr) {
-      await openConcierge(target, goalId);
-      return;
-    }
-    await openHerdr(item?.herdr, goalId);
+    await openEmbeddedScene(activeService(), goalId);
+  });
+  ipcMain.handle("crewvane:open-scene", async (event, goalId?: string) => {
+    sender(event);
+    return openPreferredScene(activeService(), goalId);
+  });
+  ipcMain.handle("crewvane:open-scene-external", async (event, goalId?: string) => {
+    sender(event);
+    return openExternalSceneForGoal(activeService(), goalId);
   });
   ipcMain.handle("crewvane:terminal-snapshot", (event) => { sender(event); activeService(); return terminals.snapshot(sessionName()); });
   ipcMain.handle("crewvane:terminal-write", (event, session: string, data: string) => {

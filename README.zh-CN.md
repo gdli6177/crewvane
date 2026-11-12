@@ -108,6 +108,14 @@ Crewvane 会在 Agent 会话之外持久保存短回合续跑：checkpoint、外
 Herdr 提供持久终端会话和 Agent 通信。桌面应用自带经过校验的 Herdr 二进制文件；
 可选的 Herdr 插件还能在终端内打开注意力、用一句话新建目标、直接回到全局管家。
 
+### 工作现场由你熟悉的终端承载
+
+“回到现场”默认在 iTerm2、Terminal 或 Ghostty 中打开同一个 Herdr Session，
+保留原生组合键、图片粘贴、输入法和终端行为。Crewvane 会复用已有窗口，并在设置
+中记住终端偏好。也可以切换到内嵌轻现场快速查看；其中的目标事实与外部终端完全
+共用同一份 Herdr 现场。仅粘贴图片时，轻现场会把一次 `Ctrl+V` 交给当前 Agent，
+由 Agent 自己读取系统剪贴板。
+
 ### 即时生命周期，明确业务决定
 
 Crewvane 会检测 Codex、Claude Code、Cursor、Qoder 和 OMP，并为提供官方接入能力的
@@ -209,8 +217,9 @@ Crewvane CLI 运行时和经过校验的 Herdr 二进制文件，无需另装 No
 ### 第一次使用
 
 1. 选择一个专用工作区目录。
-2. 打开“设置”，安装 Crewvane CLI 和可选 Crewvane Skills，检查“Agent 接入”，
-   再配置管家、负责人或工人的 Agent 启动命令。
+2. 打开“设置”，选择“回到现场”默认使用外部终端还是内嵌轻现场，安装 Crewvane
+   CLI 和可选 Crewvane Skills，检查“Agent 接入”，再配置管家、负责人或工人的
+   Agent 启动命令。
 3. 准备管家。
 4. 点击“新目标”，用自然语言交代工作；需要时可以粘贴或添加截图。
 

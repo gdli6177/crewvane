@@ -1,6 +1,6 @@
 {
   "name": "@crewvane/cli",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Crewvane 全局管家与注意力中心 CLI",
   "license": "MIT",
   "type": "module",

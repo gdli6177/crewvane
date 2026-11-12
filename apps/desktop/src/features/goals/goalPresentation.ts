@@ -164,8 +164,11 @@ function executionPresentation(goal: Goal): Pick<GoalPresentation, "label" | "de
     detail: "负责人已写回本轮进展；目标仍按记录的下一步跟进，不代表整个目标已完成。",
   };
   if (goal.live?.state === "idle" || goal.live?.state === "done") return {
-    label: "负责人空闲", tone: "waiting",
-    detail: "负责人当前空闲；以已记录的进展和下一步为准，空闲本身不代表目标完成。",
+    label: goal.next.trim() ? "按计划跟进" : "待管家更新",
+    tone: "running",
+    detail: goal.next.trim()
+      ? "负责人当前空闲；目标仍在跟进中，下一步已经记录。到了需要你处理时会进入注意力。"
+      : "负责人当前空闲，尚未记录明确的下一步；管家会补全推进计划。",
   };
   return goal.herdr ? {
     label: "待管家跟进", tone: "running",

@@ -9,7 +9,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
-import { ArrowLeft, ChevronRight, FileText, Grip, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, ExternalLink, FileText, Grip, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
 import { api } from "./api.js";
 import type { GoalSceneContext } from "./features/goals/goalPresentation.js";
 import "@xterm/xterm/css/xterm.css";
@@ -54,6 +54,7 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [error, setError] = useState(""), [expanded, setExpanded] = useState(false);
+  const [externalBusy, setExternalBusy] = useState(false);
   const [clipboardNotice, setClipboardNotice] = useState("");
   const [geometry, setGeometry] = useState<TerminalGeometry | undefined>(savedGeometry);
   const [attempt, setAttempt] = useState(0);
@@ -81,8 +82,26 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
     announceClipboardNotice(`已粘贴 ${Array.from(text).length} 个字符`);
   }
   function pasteSystemClipboard() {
-    void api.readClipboardText()
-      .then(pasteText)
+    void api.readClipboardContent()
+      .then(content => {
+        if (content.kind === "text") {
+          pasteText(content.text);
+          return;
+        }
+        if (content.kind === "image") {
+          const terminal = term.current;
+          terminal?.focus();
+          void api.writeTerminal(session, "\x16")
+            .then(() => announceClipboardNotice("已把剪贴板图片交给当前 Agent"))
+            .catch(reason => {
+              announceClipboardNotice("图片粘贴失败");
+              setError(String(reason).replace(/^Error: /, ""));
+            });
+          return;
+        }
+        announceClipboardNotice("剪贴板是空的");
+        term.current?.focus();
+      })
       .catch((reason) => {
         announceClipboardNotice("读取剪贴板失败");
         setError(String(reason).replace(/^Error: /, ""));
@@ -273,6 +292,7 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
         <div>
           <span className={`terminal-dot ${error ? "offline" : ""}`} />
           <strong>{title}</strong>
+          <small>轻现场</small>
           <small className="terminal-clipboard-status" role="status" aria-live="polite">
             {clipboardNotice || (
               title === "全局管家"
@@ -282,6 +302,23 @@ export function HerdrTerminal({ session, title, goal, theme, visible, onClose, o
           </small>
         </div>
         <div>
+          <button
+            className="icon-button"
+            aria-label="在外部终端打开"
+            title="在外部终端打开同一现场"
+            disabled={externalBusy}
+            onClick={() => {
+              setExternalBusy(true);
+              void api.openExternalScene(goal?.id)
+                .then(lease => announceClipboardNotice(
+                  `已在 ${lease.terminal === "iterm2" ? "iTerm2" : lease.terminal === "terminal" ? "Terminal" : "Ghostty"} 打开`,
+                ))
+                .catch(reason => setError(String(reason).replace(/^Error: /, "")))
+                .finally(() => setExternalBusy(false));
+            }}
+          >
+            <ExternalLink size={16} />
+          </button>
           <button className="icon-button" aria-label={expanded ? "退出全屏现场" : "全屏显示现场"} title={expanded ? "退出全屏（Esc）" : "全屏显示"} onClick={() => setExpanded(!expanded)}>{expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           <button className="secondary terminal-hide" title="隐藏面板，Agent 继续执行" onClick={onClose}><X size={15} />隐藏终端</button>
         </div>

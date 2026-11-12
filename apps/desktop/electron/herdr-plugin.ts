@@ -62,7 +62,10 @@ export class HerdrPlugin {
     readonly expectedVersion: string,
     readonly environment: NodeJS.ProcessEnv = process.env,
     readonly runner: Runner = async (executable, args, env) => exec(executable, args, {
-      env, timeout: 30_000, maxBuffer: 2_000_000,
+      // An existing Herdr server may need to answer after it wakes up or
+      // upgrades. Causing a false error at exactly 30s makes settings look
+      // broken while the command is still healthy.
+      env, timeout: 60_000, maxBuffer: 2_000_000,
     }),
   ) {}
 
