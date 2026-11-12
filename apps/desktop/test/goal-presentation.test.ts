@@ -158,10 +158,11 @@ test("a manual active goal is presented as owned by the human", async () => {
   assert.match(view.detail, /标记完成/);
 });
 
-test("an idle owner is only pending reconciliation after a real watchdog request", async () => {
+test("an idle owner stays in normal follow-up until a real watchdog request", async () => {
   const service = new WorkspaceService(await fixture());
   const goal = await service.execute({ type:"goal.create", input:{
     title:"负责人已空闲", projectId:"personal", mode:"concierge",
+    next:"等待下一次真实进展。",
   } }) as Goal;
   await service.execute({ type:"session.set", goalId:goal.id, reference:{
     session:"test", paneId:"w1:p2", agent:"owner-a",
@@ -170,8 +171,9 @@ test("an idle owner is only pending reconciliation after a real watchdog request
     state:"done", reachable:true, checkedAt:new Date(Date.now()-120_000).toISOString(),
   } } });
   let state = await service.read(), current = state.goals[0]!;
-  assert.equal(goalProgressLabel(current), "负责人空闲");
-  assert.equal(presentGoal(current, state).label, "负责人空闲");
+  assert.equal(goalProgressLabel(current), "按计划跟进");
+  assert.equal(presentGoal(current, state).label, "按计划跟进");
+  assert.match(presentGoal(current, state).detail, /目标仍在跟进中/);
   assert.doesNotMatch(presentGoal(current, state).detail, /结果尚未写回|管家会核对/);
   assert.doesNotMatch(presentGoal(current, state).detail, /正在执行/);
   await service.execute({ type:"watchdog.inspect", at:new Date().toISOString() });
@@ -306,7 +308,10 @@ test("semantic human requests, external waiting and manual ownership outrank idl
 });
 
 test("runtime labels describe lost connections and pending input without inventing reconciliation", async () => {
-  const { service, goalId } = await writtenRuntimeFixture();
+  const service = new WorkspaceService(await fixture());
+  const goalId = ((await service.execute({
+    type: "goal.direct", text: "现场生命周期状态",
+  })) as Goal).id;
   for (const [state, reachable, expected] of [
     ["idle", false, "现场连接中断"],
     ["blocked", true, "现场待输入"],
@@ -319,6 +324,30 @@ test("runtime labels describe lost connections and pending input without inventi
     assert.equal(goalProgressLabel(goal), expected);
     assert.equal(presentGoal(goal, snapshot).label, expected);
   }
+});
+
+test("a semantic receipt outranks a stale scene connection status", async () => {
+  const service = new WorkspaceService(await fixture());
+  const goal = await service.execute({ type:"goal.direct", text:"回报后现场断开" }) as Goal;
+  const at = new Date().toISOString();
+  await service.execute({ type:"agent.runtime.register", goalId:goal.id, attempt:{
+    goalId:goal.id, attemptId:"attempt_written_disconnected", agent:"owner-a",
+    adapter:"codex", startedAt:at,
+  }, hookTokenHash:"d".repeat(64), capabilities:["turn.started", "turn.settled"] });
+  for (const [sequence, type] of [[1, "turn.started"], [2, "turn.settled"]] as const)
+    await service.execute({ type:"agent.runtime.event", event:{
+      version:"v1", eventId:`written-disconnected-${sequence}`, sequence, type, at,
+      source:"hook", adapter:"codex", agent:"owner-a", goalId:goal.id,
+      attemptId:"attempt_written_disconnected", turnId:"turn-written",
+    } });
+  await service.execute({ type:"goal.progress", goalId:goal.id, actor:"owner-a",
+    summary:"本轮已写回真实进展。", next:"继续按计划跟进。" });
+  await service.execute({ type:"live.sync", presences:{ [goal.id]:{
+    state:"idle", reachable:false, checkedAt:at,
+  } } });
+  const current = (await service.read()).goals[0]!;
+  assert.equal(goalProgressLabel(current), "本轮已回报");
+  assert.match(presentGoal(current, await service.read()).detail, /已写回本轮进展/);
 });
 
 test("decision context uses the latest agent handoff while keeping transport events out of conversation", async () => {

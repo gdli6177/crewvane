@@ -124,6 +124,16 @@ The desktop app includes its own verified Herdr binary, and the optional Herdr
 plugin adds attention, one-line goal intake, and concierge shortcuts inside
 Herdr.
 
+### Work in the terminal you already know
+
+“Open scene” now launches the same Herdr session in iTerm2, Terminal, or Ghostty
+by default, preserving native shortcuts, image paste, IME behavior, and terminal
+semantics. Crewvane reuses an existing window and remembers the terminal choice.
+An embedded lightweight scene remains available for quick inspection and shares
+the exact same Herdr session. When the clipboard contains only an image, the
+embedded scene sends one `Ctrl+V` to the active Agent so the Agent can read the
+system clipboard itself.
+
 ### Instant lifecycle, explicit decisions
 
 Crewvane detects Codex, Claude Code, Cursor, Qoder, and OMP and installs managed
@@ -224,6 +234,10 @@ Download the latest installer from
 Open the DMG, drag **Crewvane.app** into **Applications**, then launch it. The
 packaged app includes Electron, the Crewvane CLI runtime, and a verified Herdr
 binary; Node.js and Homebrew are not required for normal installation.
+
+In Settings, choose whether “Open scene” should use an external terminal or the
+embedded lightweight scene. The default is the first installed standard terminal
+among iTerm2, Terminal, and Ghostty.
 
 Your agent CLIs still need to be installed and authenticated separately. Crewvane
 uses the commands you configure and does not read their credentials.

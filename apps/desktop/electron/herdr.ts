@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
@@ -55,6 +55,27 @@ export const herdrRunner = (
     }
   },
 });
+
+export function startDetachedHerdrServer(
+  executable: string,
+  session: string,
+  workspace: string,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const child = spawn(executable, ["server"], {
+    detached: true,
+    stdio: "ignore",
+    cwd: workspace,
+    env: {
+      ...environment,
+      PWD: workspace,
+      HERDR_SESSION: session,
+      HERDR_STARTUP_CWD: workspace,
+      HERDR_MACOS_SERVER_CONTEXT: "user",
+    },
+  });
+  child.unref();
+}
 function payload(raw: string): any {
   try {
     return JSON.parse(raw);

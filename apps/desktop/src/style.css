@@ -690,6 +690,24 @@ h1 em { color: var(--accent); font-style: normal; }
 .settings-status.ready { color: var(--mint); }
 .settings-status.ready i { background: var(--mint); }
 .settings-foot { grid-column: 1 / -1; margin: 4px 0 0; color: var(--muted); font-size: var(--fs-caption); line-height: 1.7; }
+.scene-settings-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.scene-settings-panel > div { display: grid; align-content: start; gap: 9px; min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-soft); }
+.scene-settings-panel strong { color: var(--text); font-size: var(--fs-meta); font-weight: 620; }
+.scene-settings-panel p { margin: 0; color: var(--muted); font-size: var(--fs-caption); line-height: 1.65; }
+.scene-settings-panel .ui-choice-group { width: fit-content; max-width: 100%; }
+.scene-terminal-options { display: flex; flex-wrap: wrap; gap: 7px; }
+.scene-terminal-options button { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--secondary); background: var(--surface); font: inherit; font-size: var(--fs-caption); cursor: pointer; transition: color .16s ease, border-color .16s ease, background .16s ease; }
+.scene-terminal-options button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 46%, var(--line)); }
+.scene-terminal-options button[aria-pressed="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 52%, var(--line)); background: var(--accent-soft); }
+.scene-terminal-options button:disabled { opacity: .45; cursor: not-allowed; }
+.experimental-settings { grid-column: 1 / -1; overflow: hidden; border: 1px dashed color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: var(--r-lg); background: color-mix(in srgb, var(--surface-soft) 62%, transparent); }
+.experimental-settings > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 13px 16px; color: var(--secondary); list-style: none; cursor: pointer; }
+.experimental-settings > summary::-webkit-details-marker { display: none; }
+.experimental-settings > summary > span { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: var(--fs-meta); font-weight: 620; }
+.experimental-settings > summary > span svg { color: var(--accent); }
+.experimental-settings > summary small { max-width: 560px; color: var(--muted); font-size: var(--fs-caption); line-height: 1.55; text-align: right; }
+.experimental-settings[open] > summary { border-bottom: 1px solid var(--line); }
+.experimental-settings .ui-settings-card { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
 
 .ui-form { display: grid; gap: var(--space-4); }
 .ui-form__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
@@ -936,15 +954,6 @@ h1 em { color: var(--accent); font-style: normal; }
 .autonomy-record p.failed, .autonomy-detail-body .failed { color: var(--danger); }
 .autonomy-record p.passed, .autonomy-detail-body .passed { color: var(--mint); }
 .goal-reopen-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
-.autonomy-setup-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.autonomy-setup-options > button { display: grid; align-content: start; gap: 7px; min-height: 190px; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); color: inherit; background: var(--surface-soft); text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
-.autonomy-setup-options > button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); transform: translateY(-1px); }
-.autonomy-setup-options > button:disabled { opacity: .65; cursor: wait; }
-.autonomy-setup-options > button > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: var(--r-sm); color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--surface)); }
-.autonomy-setup-options strong { color: var(--text); font-size: var(--fs-subtitle); }
-.autonomy-setup-options small { color: var(--secondary); font-size: var(--fs-meta); line-height: 1.65; }
-.autonomy-setup-options em { margin-top: auto; color: var(--muted); font-size: var(--fs-caption); font-style: normal; }
-.autonomy-setup-note { margin: 2px 0 0; color: var(--muted); font-size: var(--fs-caption); line-height: 1.6; }
 .autonomy-settings-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .autonomy-pause-control { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 8px; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-soft); }
 .autonomy-pause-control input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
@@ -961,8 +970,10 @@ h1 em { color: var(--accent); font-style: normal; }
 .autonomy-project-row form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px; }
 .autonomy-project-row form .policy-actions { grid-column: 1 / -1; }
 @media (max-width: 900px) {
-  .autonomy-facts, .autonomy-scope, .autonomy-setup-options, .autonomy-settings-form { grid-template-columns: 1fr; }
+  .autonomy-facts, .autonomy-scope, .autonomy-settings-form, .scene-settings-panel { grid-template-columns: 1fr; }
   .autonomy-override { align-items: stretch; flex-direction: column; }
   .autonomy-override select { width: 100%; min-width: 0; }
   .autonomy-project-row, .autonomy-project-row form, .goal-reopen-form { grid-template-columns: 1fr; }
+  .experimental-settings > summary { align-items: flex-start; flex-direction: column; }
+  .experimental-settings > summary small { text-align: left; }
 }

@@ -185,6 +185,27 @@ try {
     await page.keyboard.press("Enter");
     await expect.poll(() => readFile(pasteFile, "utf8").catch(() => ""), { timeout: 30_000 }).toBe(pasteMarker);
   }
+  // Agent CLIs perform the real image read themselves. The embedded terminal's
+  // contract is to recognize an image-only clipboard and send one Ctrl+V byte
+  // instead of reporting a false "no text" result.
+  const imageResult = join(workspace, "terminal-image-paste.txt"),
+    imagePng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  await app.evaluate(async ({ clipboard, ClipboardItem }, png) => {
+    const bytes = Buffer.from(png, "base64");
+    await clipboard.write([
+      new ClipboardItem({ "image/png": new Blob([bytes], { type: "image/png" }) }),
+    ]);
+  }, imagePng);
+  await page.evaluate(({ session, imageResult }) => {
+    const quote = text => `'${text.replaceAll("'", "'\\''")}'`;
+    window.crewvane.writeTerminal(session,
+      `/usr/bin/python3 -c ${quote(`import os, tty\npath=${JSON.stringify(imageResult)}\nopen(path, "w").write("ready")\ntty.setraw(0)\ndata=os.read(0, 1)\nopen(path, "w").write(str(data[0]))`)}\r`);
+  }, { session, imageResult });
+  await expect.poll(() => readFile(imageResult, "utf8").catch(() => ""), { timeout: 30_000 }).toBe("ready");
+  await textarea.focus();
+  await page.keyboard.press("Meta+V");
+  await expect.poll(() => readFile(imageResult, "utf8").catch(() => ""), { timeout: 30_000 }).toBe("22");
+  await expect(page.getByRole("status")).toContainText("图片交给当前 Agent");
   await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
   assert.equal(await page.locator(".terminal-panel").isVisible(), false);
   await page.locator(".top-actions").getByRole("button", { name: "新目标", exact: true }).click();
@@ -273,6 +294,7 @@ try {
   console.log(JSON.stringify({ ok: true, home, session, checks: [
     "real Herdr TUI in embedded PTY", "real shell input/output", "collapse/reopen reuses PID",
     "system clipboard paste through Meta+V, Control+V, browser paste and native Electron menu paste",
+    "image-only clipboard sends exactly one Ctrl+V to the active Agent",
     "ordinary Herdr drag copies through OSC 52 to the macOS clipboard",
     "fullscreen toggle reuses the terminal process", "dark/light", "reject unrelated terminal input",
     "scene context opens goal record and returns to attention without losing the terminal",

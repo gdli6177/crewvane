@@ -139,6 +139,7 @@ try {
   await page.locator(".attention-card").filter({ hasText: "我去银行办手续" }).click();
   await page.getByRole("button", { name: "1 小时后提醒", exact: true }).click();
   await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator(".attention-card").filter({ hasText: "我去银行办手续" })).toHaveCount(0);
   assert.equal((await snapshot(page)).goals.find(goal => goal.id === personal.id).mode, "manual");
   assert.equal((await snapshot(page)).concierge.status, "not_ready");

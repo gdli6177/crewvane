@@ -147,6 +147,10 @@ function executionPresentation(goal: Goal): Pick<GoalPresentation, "label" | "de
     label: "已提醒写回", tone: "running",
     detail: "正在处理本轮唯一一次写回提醒；仍缺少结果时再交给管家核对。",
   };
+  if (receipt === "written") return {
+    label: "本轮已回报", tone: "running",
+    detail: "负责人已写回本轮进展；目标仍按记录的下一步跟进，不代表整个目标已完成。",
+  };
   if (goal.live?.reachable === false) return {
     label: "现场连接中断", tone: "waiting",
     detail: "当前无法连接负责人现场；这不等于目标完成或失败。",
@@ -159,13 +163,12 @@ function executionPresentation(goal: Goal): Pick<GoalPresentation, "label" | "de
     label: "现场待输入", tone: "waiting",
     detail: "负责人现场正在等待输入或批准；需要人介入时会明确进入注意力。",
   };
-  if (receipt === "written") return {
-    label: "本轮已回报", tone: "running",
-    detail: "负责人已写回本轮进展；目标仍按记录的下一步跟进，不代表整个目标已完成。",
-  };
   if (goal.live?.state === "idle" || goal.live?.state === "done") return {
-    label: "负责人空闲", tone: "waiting",
-    detail: "负责人当前空闲；以已记录的进展和下一步为准，空闲本身不代表目标完成。",
+    label: goal.next.trim() ? "按计划跟进" : "待管家更新",
+    tone: "running",
+    detail: goal.next.trim()
+      ? "负责人当前空闲；目标仍在跟进中，下一步已经记录。到了需要你处理时会进入注意力。"
+      : "负责人当前空闲，尚未记录明确的下一步；管家会补全推进计划。",
   };
   return goal.herdr ? {
     label: "待管家跟进", tone: "running",

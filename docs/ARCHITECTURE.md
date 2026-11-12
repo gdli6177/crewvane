@@ -59,7 +59,7 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 
 `done` 只是 Agent 空闲。目标只有在交付检查与证据完整、且人工验收或独立复核门禁通过后才会完成；自动完成不表示已经合并或上线。
 
-活跃目标的负责人持续 `idle` / `done` 90 秒且仍未写回结果时，巡检请管家核对该负责人是否遗漏结果、真实等待或交付。运行标签由列表和详情共享的事实映射生成：仅空闲显示“负责人空闲”，当前 turn 已写回显示“本轮已回报”；真正持久记录核对请求后才显示“待管家核对”，确认送达后显示“已请管家核对”，不声称管家正在执行。旧 `recovery` 提示本身不能产生核对请求。需要人处理、验收、外部等待和人工接管的业务事实优先于运行标签。恢复 `working` 或提交新的结构化决定、交付后清除旧核对提示。`active` 只表示目标仍需跟进。终端空闲不自动改变业务状态，也不会直接产生人的注意力事项或自动验收。
+活跃目标的负责人持续 `idle` / `done` 90 秒且仍未写回结果时，巡检请管家核对该负责人是否遗漏结果、真实等待或交付。运行标签由列表和详情共享的事实映射生成：当前 turn 已写回显示“本轮已回报”；未产生核对请求且已有下一步时显示“按计划跟进”，缺少下一步时显示“待管家更新”；真正持久记录核对请求后才显示“待管家核对”，确认送达后显示“已请管家核对”，不声称管家正在执行。旧 `recovery` 提示本身不能产生核对请求。需要人处理、验收、外部等待和人工接管的业务事实优先于运行标签。恢复 `working` 或提交新的结构化决定、交付后清除旧核对提示。`active` 只表示目标仍需跟进。终端空闲不自动改变业务状态，也不会直接产生人的注意力事项或自动验收。
 
 可信 Stop Hook 进一步缩短这段反馈链：回合结束后等待 5 秒，若当前 turn 仍没有结构化 Crewvane 写回，就向同一负责人发送一次命令提醒；再等 30 秒仍缺失时标记 `protocol_missing` 并交给管家，不直接打扰人。Hook heartbeat 不进入 `Activity`，不会重置工作区配置的业务无进展计时（默认 30 分钟）。没有受支持 Hook 的 Agent 继续使用 90 秒 Herdr 路径。详细 Adapter 矩阵、事件模型、隐私限制和故障降级见 [Agent Runtime Hooks](product/agent-runtime-hooks.md)。
 
@@ -74,6 +74,12 @@ Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解�
 注意力中的真实现场介入与有真实引用的普通活动目标直接打开 Herdr；决定、验收、到期跟进与派发失败使用轻量动作卡。已完成和已放弃目标只打开历史记录。完整记录继续承担附件、消息历史和目标管理，现场条仅展示结构化目标事实并提供回到注意力的入口。
 
 入口策略集中在 `apps/desktop/src/features/goals/goalEntry.ts`，动作卡复用 `GoalActionDock` 与 core 命令。Electron 的 `terminal-open` 事件携带当前 `goalId`，渲染进程只从同一份工作区快照派生现场上下文，不维护终端内容副本，也不把滚动历史注入 Agent 上下文。
+
+### 桌面工作现场
+
+0.9.1 起，“回到现场”默认由 `ExternalTerminalManager` 在 iTerm2、Terminal 或 Ghostty 中 attach 当前工作区 Herdr Session。设置保存在 userData 的 `scene-settings.json`（`0600`）；每个工作区、Session 的 TTY lease 与固定 launcher 分别使用私有目录。再次打开时先按真实 TTY 聚焦已有窗口，窗口已关闭才创建新窗口。AppleScript 只接收固定脚本参数，用户文本不拼接进脚本；Session 名称、工作区路径和执行路径都先校验。自动终端失败、权限被拒绝或终端未安装时，目标与 Session 不变，界面明确提示可改用内嵌轻现场。
+
+内嵌轻现场使用同一 Session 与同一核心快照，不维护第二套 Agent 状态。纯文本继续走 xterm PTY；仅图片剪贴板时，渲染进程通过受约束 IPC 确认系统剪贴板类型，再向当前 Agent 写一次 `Ctrl+V`，让 CLI 自己读取剪贴板，避免把图片字节复制进 Crewvane 状态。轻现场标题栏提供强制外部打开入口，用户所选默认模式只影响普通“回到现场”动作。
 
 ## Herdr 管家
 
@@ -139,7 +145,7 @@ Herdr 的 `pane.agent_status_changed`、`pane.exited`、`pane.closed`、`pane.mo
 
 ## 桌面 IPC
 
-渲染进程通过 preload 暴露的有限接口选择工作区与项目、导入与预览受校验的图片、执行目标命令、管理 Herdr 和 CLI、打开 HTTPS 链接。`BrowserWindow` 使用 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，拒绝窗口跳转和权限请求。IPC 校验发送方 URL，项目路径必须先由文件选择器选中；附件导入接受字节而不是任意目标路径，预览与打开只接受当前状态中的附件 ID。
+渲染进程通过 preload 暴露的有限接口选择工作区与项目、导入与预览受校验的图片、执行目标命令、管理 Herdr 和 CLI、读取剪贴板类型、设置工作现场并打开 HTTPS 链接。`BrowserWindow` 使用 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，拒绝窗口跳转和权限请求。IPC 校验发送方 URL，项目路径必须先由文件选择器选中；附件导入接受字节而不是任意目标路径，预览与打开只接受当前状态中的附件 ID。外部终端选择只接受枚举值，Session 名称、终端配置和 TTY lease 在进入系统命令前校验。
 
 目标详情位于 `apps/desktop/src/features/goals/`，拆分为展示状态映射、消息历史、回复编辑器、附件区、状态操作区和组合层。它只依赖显式的 `GoalDetailService`：提交 core 命令、导入和打开附件、打开 Herdr 或 URL、重试派发。模块不直接读取 Electron API，也不从自然语言推断状态。
 

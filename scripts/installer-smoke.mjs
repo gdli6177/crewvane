@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { completeAutonomySetup } from "./lib/autonomy-setup.mjs";
@@ -15,7 +14,10 @@ const exec = promisify(execFile);
 const { version } = JSON.parse(await readFile(join(repo, "apps/desktop/package.json"), "utf8"));
 const installers = join(repo, "apps/desktop/release/installers");
 const stem = `Crewvane-${version}-macOS-arm64`;
-const trial = await mkdtemp(join(tmpdir(), "crewvane-install-test-"));
+// Keep the isolated HOME and Herdr socket paths below macOS's AF_UNIX
+// sun_path limit. CI's TMPDIR is otherwise long enough to make Herdr's own
+// plugin subcommand fail before the installed UI can be exercised.
+const trial = await mkdtemp("/tmp/crewvane-install-test-");
 await exec("shasum", ["-a", "256", "-c", "SHA256SUMS.txt"], { cwd: installers });
 await exec("hdiutil", ["verify", join(installers, `${stem}.dmg`)]);
 async function verifyDownloadedApp(appPath, label) {
