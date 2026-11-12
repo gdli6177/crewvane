@@ -547,6 +547,95 @@ test("custom commands start in the real pane, preserve argv and reuse the record
   assert.equal(messages.length, 2, "both initial instructions and a reused custom CLI receive the role boundary");
 });
 
+test("an interactive pane shell resolves a custom command that Finder-style preflight cannot", async () => {
+  const mock = fake({
+    "agent list": '{"result":{"agents":[]}}',
+    "workspace create": '{"result":{"workspace":{"workspace_id":"w8"},"tab":{"tab_id":"w8:t1"},"root_pane":{"pane_id":"w8:p1"}}}',
+    "pane run": "{}", "pane wait-output": "{}", "tab focus": "{}",
+    "pane process-info": '{"result":{"process_info":{"shell_pid":12,"foreground_processes":[{"pid":42,"name":"cursor-2"}]}}}',
+  });
+  const client = new HerdrClient(mock.runner, "custom-session");
+  const reference = await client.prepareConcierge(
+    "/workspace",
+    undefined,
+    "",
+    "/cli",
+    "/bin",
+    "",
+    undefined,
+    { concierge: 'cursor-2 --model "latest"' },
+    ["--model", "latest"],
+    "cursor-2",
+    "",
+    "herdr",
+    "",
+    "",
+    true,
+  );
+  assert.equal(reference.transport, "pane");
+  assert.ok(mock.calls.some(args =>
+    args[0] === "pane" &&
+    args[1] === "run" &&
+    args[3]?.includes("-ilc") &&
+    args[3].includes("cursor-2")
+  ), "the login shell receives the configured command name so its .zshrc alias or function can resolve it");
+});
+
+test("a dead custom-CLI Pane is never reused from stale output", async () => {
+  const calls: string[][] = [];
+  const runner: HerdrRunner = { async run(args) {
+    calls.push(args);
+    const key = args.slice(0, 2).join(" ");
+    if (key === "agent list") return '{"result":{"agents":[]}}';
+    if (key === "pane process-info") {
+      const paneId = args[args.indexOf("--pane") + 1];
+      return JSON.stringify({ result: { process_info: {
+        shell_pid: 12,
+        foreground_processes: paneId === "w8:p1"
+          ? [{ pid: 42, name: "cursor-2" }]
+          : [],
+      } } });
+    }
+    if (key === "workspace create") return '{"result":{"workspace":{"workspace_id":"w8"},"tab":{"tab_id":"w8:t1"},"root_pane":{"pane_id":"w8:p1"}}}';
+    if (key === "pane run" || key === "pane wait-output" || key === "tab focus")
+      return "{}";
+    throw new Error(`unexpected Herdr call ${key}`);
+  } };
+  const existing = {
+    session: "crewvane-test",
+    workspaceId: "w1",
+    tabId: "w1:t1",
+    paneId: "w1:p1",
+    agent: "concierge",
+    processId: 42,
+    transport: "pane" as const,
+    launchPolicy: "control-plane-v1" as const,
+  };
+  const reference = await new HerdrClient(runner, "crewvane-test", "/workspace")
+    .prepareConcierge(
+      "/workspace",
+      existing,
+      "",
+      "/cli",
+      "/bin",
+      "",
+      undefined,
+      { concierge: "cursor-2 --model latest" },
+      ["--model", "latest"],
+      "cursor-2",
+      "",
+      "herdr",
+      "",
+      "",
+      true,
+    );
+  assert.equal(reference.paneId, "w8:p1");
+  assert.ok(calls.some(args =>
+    args[0] === "workspace" && args[1] === "create"));
+  assert.equal(calls.some(args =>
+    args[0] === "pane" && args[1] === "run" && args[2] === "w1:p1"), false);
+});
+
 test("a custom Pane discovered as an Agent uses lifecycle-aware prompting", async () => {
   const mock = fake({
     "pane process-info": '{"result":{"process_info":{"shell_pid":12,"foreground_processes":[{"pid":42,"name":"codex"}]}}}',

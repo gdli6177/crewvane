@@ -12,6 +12,10 @@ import type {
 import type { WatchdogRequest } from "../../../packages/core/src/watchdog.js";
 import { attachmentAbsolutePath } from "../../../packages/core/src/attachments.js";
 import { attentionRequest } from "../../../packages/core/src/model.js";
+import {
+  renderAgentCommand,
+  renderLoginShellAgentCommand,
+} from "../../../packages/core/src/agent-command.js";
 import { ownerSceneReplyInstructions } from "../../../cli/src/owner-instructions.js";
 const exec = promisify(execFile);
 export const CONCIERGE_LAUNCH_POLICY = "control-plane-v1" as const;
@@ -389,13 +393,19 @@ export class HerdrClient {
     herdrBinary = "herdr",
     hostSocket = "",
     hostToken = "",
+    resolveExecutableInLoginShell = false,
   ): Promise<HerdrReference> {
     const concierge = await this.findConcierge(existing);
     if (concierge) return concierge;
     let workspaceId: string | undefined,
       tabId: string | undefined,
       paneId: string | undefined;
-    if (existing?.session === this.session && existing.paneId) {
+    // A known Agent can leave a usable shell behind. A Pane-tracked custom
+    // CLI cannot: Herdr may keep the stale Pane and its output while the shell
+    // child has exited. Reusing it makes pane.wait-output match old output and
+    // then strands the launch command, so recovery always needs a fresh site.
+    if (existing?.session === this.session && existing.paneId &&
+      existing.transport !== "pane") {
       try {
         const current = payload(
           await this.runner.run(["pane", "get", existing.paneId]),
@@ -456,7 +466,18 @@ export class HerdrClient {
     await this.runner.run(["pane", "run", paneId, environment]);
     await this.runner.run(["pane", "wait-output", paneId, "--match", "__CREWVANE_ENV_READY__", "--timeout", "10000"], 15_000);
     if (!kind && executable) {
-      await this.runner.run(["pane", "run", paneId, [executable, ...nativeArgs].map(quoteShell).join(" ")]);
+      await this.runner.run([
+        "pane",
+        "run",
+        paneId,
+        resolveExecutableInLoginShell
+          ? renderLoginShellAgentCommand(
+            process.env.SHELL || "/bin/zsh",
+            executable,
+            nativeArgs,
+          )
+          : renderAgentCommand(executable, nativeArgs),
+      ]);
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const running = await this.foreground(paneId);

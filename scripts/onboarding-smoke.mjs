@@ -19,6 +19,9 @@ const log = join(home, "custom-cli.jsonl"), customCli = join(home, "my custom ag
 const testEnvironment = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"),
   XDG_STATE_HOME: join(home, ".local/state"),
   XDG_DATA_HOME: join(home, ".local/share"), XDG_CACHE_HOME: join(home, ".cache"),
+  // GitHub Actions invokes this script from bash even on macOS. The fixture
+  // intentionally models the product's macOS target and the user's .zshrc.
+  SHELL: "/bin/zsh",
   PATH: "/usr/bin:/bin", CREWVANE_TEST_HOME: home,
   CREWVANE_TEST_USER_DATA: userData, CREWVANE_TEST_WORKSPACE: "",
   CREWVANE_TEST_ISOLATE_TOOLS: "1", CREWVANE_TEST_SKIP_HERDR_SETUP: "",
@@ -37,6 +40,13 @@ readline.createInterface({input:process.stdin}).on("line", text => {
  if (text === "STOP") process.exit(0);
 });
 `, { mode: 0o700 });
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
+await writeFile(join(home, ".zshrc"), [
+  "cv-local-agent() {",
+  `  exec ${shellQuote(customCli)} "$@"`,
+  "}",
+  "",
+].join("\n"), { mode: 0o600 });
 let app, installed, installedExecutable;
 const errors = [];
 async function picker(path, canceled = false) {
@@ -149,7 +159,10 @@ try {
   ).toBe(await realpath(rootB));
   await completeAutonomySetup(page);
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  const command = `"${customCli}" --model "local test model"`;
+  // This command exists only as a function in the isolated user's .zshrc.
+  // Finder and Crewvane's directory scan cannot resolve it; the real Herdr
+  // pane shell must preserve and execute the configured bare command name.
+  const command = `cv-local-agent --model "local test model"`;
   await page.getByLabel("管家启动命令").fill(command);
   await page.getByRole("button", { name: "保存偏好", exact: true }).click();
   await page.getByText("Agent 偏好已保存，将用于新启动的会话。", { exact: true }).waitFor();

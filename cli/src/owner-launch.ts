@@ -9,6 +9,8 @@ import {
   agentRuntimeCapabilities,
   agentRuntimeSocketPath,
   parseAgentCommand,
+  renderAgentCommand,
+  renderLoginShellAgentCommand,
   resumeAgentArgs,
   newId,
   WorkspaceService,
@@ -478,7 +480,18 @@ export async function launchOwner(
         };
       }
     } else {
-      await sendShellCommand(run, paneId, [executable, ...command.args].map(quoteShell).join(" "));
+      const launch = !command.executable.includes("/")
+        ? renderLoginShellAgentCommand(
+          environment.SHELL || "/bin/zsh",
+          executable,
+          command.args,
+        )
+        : renderAgentCommand(executable, command.args);
+      await sendShellCommand(
+        run,
+        paneId,
+        launch,
+      );
       const deadline = Date.now() + 20_000;
       let processId = 0;
       while (Date.now() < deadline) {

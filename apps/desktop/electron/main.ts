@@ -803,24 +803,30 @@ async function doPrepareConcierge(target: WorkspaceService) {
     const preferences = state.agents ?? { concierge: "codex" };
     const command = parseAgentCommand(preferences.concierge, (await agentChoices()).map(option => option.kind));
     const agentExecutable = await executable(command.executable, target.root);
-    if (!agentExecutable) throw new Error(`未找到 ${command.executable} CLI，请先安装，或在设置中修改管家启动命令。`);
+    // Finder does not see shell aliases or functions. The actual interactive
+    // pane is the source of truth; directory preflight is only an optimization.
+    const launchExecutable = agentExecutable ??
+      (command.executable.startsWith("~/")
+        ? join(home, command.executable.slice(2))
+        : command.executable);
     const reference = await connection.prepareConcierge(
       target.root,
       state.concierge,
       command.kind ?? "",
       join(home, ".local/bin"),
       `${dirname(status.executable)}:${join(home, ".local/bin")}`,
-      dirname(agentExecutable),
+      agentExecutable ? dirname(agentExecutable) : join(home, ".local/bin"),
       async (reference) => {
         await target.execute({ type: "concierge.status", status: "not_ready", reference, detail: "正在启动管家…" });
       },
       preferences,
       command.args,
-      agentExecutable,
+      launchExecutable,
       (await cliStatus()).directory,
       status.executable,
       herdrHostBridge?.socketPath ?? "",
       herdrHostBridge?.token ?? "",
+      !agentExecutable,
     );
     refreshedConcierges.set(target.root, conciergeIdentity(reference));
     await target.execute({

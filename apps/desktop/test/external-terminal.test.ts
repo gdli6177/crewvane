@@ -13,6 +13,8 @@ async function fixture(options: {
   installed?: Array<"iterm2" | "terminal" | "ghostty">;
   focus?: boolean;
   failFocus?: boolean;
+  processAlive?: boolean;
+  ttyProcessAlive?: boolean;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "crewvane-scene-")),
     calls: Array<{ command: string; args: string[] }> = [],
@@ -30,6 +32,15 @@ async function fixture(options: {
     },
     run: async (command, args) => {
       calls.push({ command, args });
+      if (command === "/bin/kill")
+        return options.processAlive === false
+          ? Promise.reject(new Error("No such process"))
+          : { stdout: "", stderr: "" };
+      if (command === "/bin/ps")
+        return {
+          stdout: options.ttyProcessAlive === false ? "" : "123\n",
+          stderr: "",
+        };
       if (command === "/usr/bin/osascript" &&
         args.some(value => value.includes("tty of"))) {
         if (options.failFocus)
@@ -128,10 +139,101 @@ test("opening an external scene writes a private launcher and reuses its TTY", a
     const reused = await manager.open(input);
     assert.equal(reused.id, opened.id);
     assert.equal(reused.tty, "/dev/ttys123");
-    assert.equal(calls.length, callCount + 1);
+    assert.ok(calls.slice(callCount).some(call =>
+      call.command === "/bin/ps" &&
+      call.args[0] === "-t"
+    ));
     assert.match(calls.at(-1)?.args[1] ?? "", /tty of/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an alive external scene process activates its existing window before TTY matching", async () => {
+  const { root, calls, manager } = await fixture({ focus: false });
+  const workspace = "/tmp/workspace-process-reuse",
+    session = "crewvane-process-reuse",
+    hash = (value: string) =>
+      createHash("sha256").update(value).digest("hex").slice(0, 16);
+  try {
+    const folder = join(root, "external-terminal"),
+      leaseRoot = join(folder, "leases"),
+      id = `${hash(workspace)}-${hash(session)}`,
+      { mkdir } = await import("node:fs/promises");
+    await mkdir(leaseRoot, { recursive: true, mode: 0o700 });
+    await writeFile(join(leaseRoot, `${id}.json`), JSON.stringify({
+      id: "existing-process",
+      terminal: "terminal",
+      session,
+      workspaceHash: hash(workspace),
+      openedAt: "2026-11-12T07:00:00.000Z",
+    }), { mode: 0o600 });
+    await writeFile(join(leaseRoot, `${id}.tty`), "/dev/ttys321\n", { mode: 0o600 });
+    await writeFile(join(leaseRoot, `${id}.pid`), "4242\n", { mode: 0o600 });
+    const reused = await manager.open({
+      workspaceRoot: workspace,
+      session,
+      herdrExecutable: "/tmp/herdr",
+    });
+    assert.equal(reused.id, "existing-process");
+    assert.equal(reused.processId, 4242);
+    assert.deepEqual(calls.slice(0, 2), [
+      { command: "/bin/kill", args: ["-0", "4242"] },
+      { command: "/usr/bin/open", args: ["-a", "Terminal"] },
+    ]);
+    assert.equal(calls.some(call =>
+      call.command === "/usr/bin/open" &&
+      call.args.some(value => /external-terminal\/launchers/.test(value))
+    ), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a closed external scene skips the slow AppleScript probe and opens cleanly", async () => {
+  for (const modern of [true, false]) {
+    const { root, calls, manager } = await fixture({
+      focus: false,
+      processAlive: false,
+      ttyProcessAlive: false,
+    });
+    const workspace = `/tmp/closed-${modern ? "modern" : "legacy"}`,
+      session = `crewvane-closed-${modern ? "modern" : "legacy"}`,
+      hash = (value: string) =>
+        createHash("sha256").update(value).digest("hex").slice(0, 16);
+    try {
+      const folder = join(root, "external-terminal"),
+        leaseRoot = join(folder, "leases"),
+        id = `${hash(workspace)}-${hash(session)}`,
+        { mkdir } = await import("node:fs/promises");
+      await mkdir(leaseRoot, { recursive: true, mode: 0o700 });
+      await writeFile(join(leaseRoot, `${id}.json`), JSON.stringify({
+        id: "closed-scene",
+        terminal: "terminal",
+        session,
+        workspaceHash: hash(workspace),
+        openedAt: "2026-11-12T07:00:00.000Z",
+      }), { mode: 0o600 });
+      await writeFile(join(leaseRoot, `${id}.tty`), "/dev/ttys999\n", { mode: 0o600 });
+      if (modern)
+        await writeFile(join(leaseRoot, `${id}.pid`), "4242\n", { mode: 0o600 });
+      const opened = await manager.open({
+        workspaceRoot: workspace,
+        session,
+        herdrExecutable: "/tmp/herdr",
+      });
+      assert.notEqual(opened.id, "closed-scene");
+      assert.equal(calls.some(call =>
+        call.command === "/usr/bin/osascript" &&
+        call.args.some(value => value.includes("tty of"))
+      ), false, "closed windows must not wait on AppleScript");
+      assert.ok(calls.some(call =>
+        call.command === "/usr/bin/open" &&
+        call.args.some(value => /external-terminal\/launchers/.test(value))
+      ));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -217,6 +319,26 @@ test("a denied focus automation activates the terminal without opening a duplica
     assert.equal(calls.some(call =>
       call.command === "/usr/bin/open" &&
       call.args.some(value => /external-terminal\/launchers/.test(value))), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Ghostty receives the launcher as one -e command even when its path contains spaces", async () => {
+  const { root, calls, manager } = await fixture({ installed: ["ghostty"] });
+  try {
+    await manager.save({ openWith: "external", terminal: "ghostty" });
+    await manager.open({
+      workspaceRoot: "/tmp/ghostty-workspace",
+      session: "crewvane-ghostty",
+      herdrExecutable: "/tmp/herdr",
+    });
+    const opened = calls.find(call => call.command === "open");
+    assert.ok(opened);
+    assert.deepEqual(opened.args.slice(0, 3), ["-na", "Ghostty", "--args"]);
+    assert.equal(opened.args[3], "-e");
+    assert.match(opened.args[4] ?? "", /\/external-terminal\/launchers\//);
+    assert.equal(opened.args.length, 5);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
