@@ -308,7 +308,10 @@ test("semantic human requests, external waiting and manual ownership outrank idl
 });
 
 test("runtime labels describe lost connections and pending input without inventing reconciliation", async () => {
-  const { service, goalId } = await writtenRuntimeFixture();
+  const service = new WorkspaceService(await fixture());
+  const goalId = ((await service.execute({
+    type: "goal.direct", text: "现场生命周期状态",
+  })) as Goal).id;
   for (const [state, reachable, expected] of [
     ["idle", false, "现场连接中断"],
     ["blocked", true, "现场待输入"],
@@ -321,6 +324,30 @@ test("runtime labels describe lost connections and pending input without inventi
     assert.equal(goalProgressLabel(goal), expected);
     assert.equal(presentGoal(goal, snapshot).label, expected);
   }
+});
+
+test("a semantic receipt outranks a stale scene connection status", async () => {
+  const service = new WorkspaceService(await fixture());
+  const goal = await service.execute({ type:"goal.direct", text:"回报后现场断开" }) as Goal;
+  const at = new Date().toISOString();
+  await service.execute({ type:"agent.runtime.register", goalId:goal.id, attempt:{
+    goalId:goal.id, attemptId:"attempt_written_disconnected", agent:"owner-a",
+    adapter:"codex", startedAt:at,
+  }, hookTokenHash:"d".repeat(64), capabilities:["turn.started", "turn.settled"] });
+  for (const [sequence, type] of [[1, "turn.started"], [2, "turn.settled"]] as const)
+    await service.execute({ type:"agent.runtime.event", event:{
+      version:"v1", eventId:`written-disconnected-${sequence}`, sequence, type, at,
+      source:"hook", adapter:"codex", agent:"owner-a", goalId:goal.id,
+      attemptId:"attempt_written_disconnected", turnId:"turn-written",
+    } });
+  await service.execute({ type:"goal.progress", goalId:goal.id, actor:"owner-a",
+    summary:"本轮已写回真实进展。", next:"继续按计划跟进。" });
+  await service.execute({ type:"live.sync", presences:{ [goal.id]:{
+    state:"idle", reachable:false, checkedAt:at,
+  } } });
+  const current = (await service.read()).goals[0]!;
+  assert.equal(goalProgressLabel(current), "本轮已回报");
+  assert.match(presentGoal(current, await service.read()).detail, /已写回本轮进展/);
 });
 
 test("decision context uses the latest agent handoff while keeping transport events out of conversation", async () => {
