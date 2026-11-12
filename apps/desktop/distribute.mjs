@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/pr
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -24,6 +25,26 @@ const output = join(here, "release", "installers");
 const app = join(here, "release", "Crewvane-darwin-arm64", "Crewvane.app");
 const stem = `Crewvane-${metadata.version}-macOS-arm64`;
 const stage = await mkdtemp(join(tmpdir(), "crewvane-installer-"));
+const dmg = join(output, `${stem}.dmg`);
+
+async function createDmg() {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    await rm(dmg, { force: true });
+    try {
+      await exec("hdiutil", ["create", "-volname", "Crewvane", "-srcfolder", stage,
+        "-format", "UDZO", "-ov", dmg], { timeout: 180_000 });
+      return;
+    } catch (error) {
+      const stderr = typeof error === "object" && error && "stderr" in error
+        ? String(error.stderr)
+        : "";
+      if (attempt === 4 || !/Resource busy/i.test(stderr)) throw error;
+      console.warn(`hdiutil reported a transient busy resource; retrying (${attempt + 1}/4)`);
+      await delay(attempt * 1_000);
+    }
+  }
+}
+
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 try {
@@ -35,8 +56,7 @@ try {
     "若提示“无法验证开发者”，请在 macOS 系统设置 > 隐私与安全性中选择“仍要打开”。\n" +
     "若提示“已损坏”，请核对 SHA-256 并从 GitHub Releases 重新下载当前版本，不要继续使用 v0.3.0。\n" +
     "使用说明：https://github.com/gdli6177/crewvane/blob/main/docs/crewvane.md\n");
-  await exec("hdiutil", ["create", "-volname", "Crewvane", "-srcfolder", stage,
-    "-format", "UDZO", "-ov", join(output, `${stem}.dmg`)], { timeout: 180_000 });
+  await createDmg();
   await exec("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", app,
     join(output, `${stem}.zip`)], { timeout: 180_000 });
   const files = [`${stem}.dmg`, `${stem}.zip`];
