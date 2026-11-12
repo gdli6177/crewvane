@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Bot,
@@ -9,6 +9,7 @@ import {
   MessageSquareText,
   PauseCircle,
   PlayCircle,
+  Plus,
   Radio,
   Sparkles,
   SquareTerminal,
@@ -20,6 +21,7 @@ import type {
   Goal,
   GoalAttachment,
   WorkspaceState,
+  SkillPackView,
 } from "../../../../../packages/core/src/types.js";
 import { GoalActionDock } from "./GoalActionDock.js";
 import { GoalAttachments } from "./GoalAttachments.js";
@@ -124,6 +126,18 @@ export function GoalDetail({
   const [replyMode, setReplyMode] = useState<GoalReplyMode | null>(null);
   const [descriptionOpen, setDescriptionOpen] = useState(false);
   const [reopenNote, setReopenNote] = useState("");
+  const [methodPacks, setMethodPacks] = useState<SkillPackView[]>([]);
+  const [methodPickerOpen, setMethodPickerOpen] = useState(false);
+  useEffect(() => {
+    if (!service.methodPacks) return;
+    let current = true;
+    void service.methodPacks().then(packs => {
+      if (current) setMethodPacks(packs);
+    }).catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [goal.id, service]);
   const view = presentGoal(goal, state);
   const descriptionCanCollapse = goal.description.trim().length > 240;
   const focusTitle = view.needsDecision
@@ -320,6 +334,122 @@ export function GoalDetail({
                           ? "Herdr 状态保持可用；目标完成、等待外部和找人决定仍以 Crewvane 结构化为准。"
                           : "Hook 不可用时由 Herdr 与巡检完整兜底，不会阻止目标继续执行。"}
                     </p>
+                  )}
+                </section>
+              )}
+              {(goal.skills?.length || methodPacks.some(pack =>
+                pack.source === "local" && pack.status !== "missing")) && (
+                <section className="goal-methods" aria-label="这个目标使用的工作方法">
+                  <header>
+                    <span><Sparkles size={14} aria-hidden="true" /></span>
+                    <div>
+                      <strong>工作方法</strong>
+                      <small>只作用于这个目标，可随时移除</small>
+                    </div>
+                    {!view.ended && service.methodPacks && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<Plus size={14} />}
+                        disabled={busy}
+                        onClick={() => {
+                          setMethodPickerOpen(open => !open);
+                          void service.methodPacks?.().then(setMethodPacks).catch(() => {});
+                        }}
+                      >
+                        添加
+                      </Button>
+                    )}
+                  </header>
+                  {!!goal.skills?.length && (
+                    <div className="goal-method-chips">
+                      {goal.skills.map(binding => {
+                        const current = methodPacks.find(pack =>
+                          pack.id === binding.packId && pack.source === "local");
+                        const unavailable =
+                          !current ||
+                          current.status === "missing" ||
+                          current.status === "disabled" ||
+                          (current.digest && current.digest !== binding.digest);
+                        return (
+                          <span
+                            className={`goal-method-chip ${unavailable ? "unavailable" : ""}`}
+                            key={binding.packId}
+                            title={`${binding.packId}@${binding.version}`}
+                          >
+                            <Sparkles size={12} />
+                            {current?.name ?? binding.packId}
+                            {unavailable && <small>需重新挂载</small>}
+                            {!view.ended && (
+                              <button
+                                type="button"
+                                aria-label={`移除 ${current?.name ?? binding.packId}`}
+                                disabled={busy}
+                                onClick={async () => {
+                                  try {
+                                    await service.command({
+                                      type: "goal.skill.detach",
+                                      goalId: goal.id,
+                                      packId: binding.packId,
+                                      actor: "human",
+                                    });
+                                    notify(`已从这个目标移除 ${current?.name ?? binding.packId}`);
+                                  } catch {
+                                    // The shared command surface reports the error.
+                                  }
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            )}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {methodPickerOpen && !view.ended && (
+                    <div className="goal-method-picker">
+                      {methodPacks.filter(pack =>
+                        pack.source === "local" &&
+                        ["ready", "needs-approval"].includes(pack.status) &&
+                        !goal.skills?.some(binding => binding.packId === pack.id)).length ? (
+                        methodPacks
+                          .filter(pack =>
+                            pack.source === "local" &&
+                            ["ready", "needs-approval"].includes(pack.status) &&
+                            !goal.skills?.some(binding => binding.packId === pack.id))
+                          .map(pack => (
+                            <button
+                              type="button"
+                              key={pack.id}
+                              disabled={busy}
+                              onClick={async () => {
+                                try {
+                                  await service.command({
+                                    type: "goal.skill.attach",
+                                    goalId: goal.id,
+                                    packId: pack.id,
+                                    actor: "human",
+                                  });
+                                  setMethodPickerOpen(false);
+                                  notify(`已为这个目标添加「${pack.name}」`);
+                                } catch {
+                                  // The shared command surface reports the error.
+                                }
+                              }}
+                            >
+                              <strong>{pack.name}</strong>
+                              <span>{pack.description}</span>
+                              {pack.status === "needs-approval" && <small>包含未授权脚本；说明仍可使用</small>}
+                            </button>
+                          ))
+                      ) : (
+                        <p>
+                          还没有可用的本地工作方法。可在设置安装，或让 Agent 使用
+                          「crewvane-local-pack-author」创建。
+                        </p>
+                      )}
+                    </div>
                   )}
                 </section>
               )}

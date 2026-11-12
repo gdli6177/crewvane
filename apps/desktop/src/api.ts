@@ -1,4 +1,4 @@
-import type { CrewvaneCommand, GoalAttachment } from "../../../packages/core/src/index.js";
+import type { CrewvaneCommand, GoalAttachment, SkillPackManifest, SkillPackView } from "../../../packages/core/src/index.js";
 import type { HerdrStatus } from "../electron/herdr-install.js";
 import type { HerdrPluginStatus } from "../electron/herdr-plugin.js";
 import type { WebhookSaveInput, WebhookSettings } from "../electron/webhook-notifications.js";
@@ -30,6 +30,22 @@ export interface DesktopApi {
   testWebhook(): Promise<WebhookSettings>;
   installHerdr(): Promise<unknown>; cliStatus(): Promise<{ installed: boolean; path: string; directory: string }>;
   skillsStatus(): Promise<SkillsStatus>; installSkills(): Promise<SkillsInstallResult>;
+  methodPacksStatus(): Promise<SkillPackView[]>;
+  previewMethodPack(): Promise<{
+    path: string;
+    manifest: SkillPackManifest;
+    digest: string;
+    files: string[];
+    totalBytes: number;
+    entryPreview: string;
+    references: Array<{ path: string; content: string; characters: number }>;
+  } | null>;
+  installMethodPack(path: string, approveScripts: string[]): Promise<SkillPackView>;
+  mutateMethodPack(
+    packId: string,
+    action: "approve" | "disable" | "enable" | "remove",
+    scriptIds?: string[],
+  ): Promise<SkillPackView[]>;
   agentRuntimeStatus(): Promise<AgentHookAdapterStatus[]>;
   configureAgentRuntime(
     id: ManagedAdapterId,

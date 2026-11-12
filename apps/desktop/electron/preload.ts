@@ -18,6 +18,15 @@ contextBridge.exposeInMainWorld("crewvane", {
   testWebhook: () => ipcRenderer.invoke("crewvane:webhook-test"),
   installHerdr: () => ipcRenderer.invoke("crewvane:install-herdr"), cliStatus: () => ipcRenderer.invoke("crewvane:cli-status"),
   skillsStatus: () => ipcRenderer.invoke("crewvane:skills-status"), installSkills: () => ipcRenderer.invoke("crewvane:install-skills"),
+  methodPacksStatus: () => ipcRenderer.invoke("crewvane:method-packs-status"),
+  previewMethodPack: () => ipcRenderer.invoke("crewvane:method-pack-preview"),
+  installMethodPack: (path: string, approveScripts: string[]) =>
+    ipcRenderer.invoke("crewvane:method-pack-install", path, approveScripts),
+  mutateMethodPack: (
+    packId: string,
+    action: "approve" | "disable" | "enable" | "remove",
+    scriptIds: string[] = [],
+  ) => ipcRenderer.invoke("crewvane:method-pack-action", packId, action, scriptIds),
   agentRuntimeStatus: () => ipcRenderer.invoke("crewvane:agent-runtime-status"),
   configureAgentRuntime: (id: string, action: "install" | "disable" | "uninstall" | "refresh") =>
     ipcRenderer.invoke("crewvane:agent-runtime-action", id, action),

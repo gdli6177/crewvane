@@ -31,7 +31,7 @@ Crewvane 不替代 Codex、Claude Code、OMP、Cursor、Qoder 等 CLI Agent。�
 终端中运行的交互式 Agent，都可以作为工作现场接入。Crewvane 为这些现场补齐
 持久目标、负责人、等待、证据、审批和恢复机制。
 
-> **当前状态：** 早期预览版（`0.9.x`）。桌面界面目前为简体中文，安装包支持
+> **当前状态：** 早期预览版（`0.10.x`）。桌面界面目前为简体中文，安装包支持
 > macOS Apple Silicon。
 
 ## 为什么需要 Crewvane
@@ -107,6 +107,23 @@ Crewvane 会在 Agent 会话之外持久保存短回合续跑：checkpoint、外
 
 Herdr 提供持久终端会话和 Agent 通信。桌面应用自带经过校验的 Herdr 二进制文件；
 可选的 Herdr 插件还能在终端内打开注意力、用一句话新建目标、直接回到全局管家。
+
+### 可复用的工作方法
+
+Crewvane 内置管家、负责人、独立复核者、标准交付、探索研究、发布检查、Agent
+接入和现场恢复 Skills。团队也可以从本地目录安装自己的工作方法，在设置中预览
+适用角色、入口和参考文件，再只挂载到匹配的目标。
+
+说明型能力包不需要脚本。能力包声明确定性脚本时，安装本身不会授权；每个脚本都要
+对当前 SHA-256 单独批准，内容变化后旧授权自动失效。`crewvane skill run` 只记录
+有界审计结果，不能完成、验收或发布目标。
+
+可以使用随应用安装的 `crewvane-local-pack-author` 通过自然语言创建，也可以调用
+`crewvane skill draft / validate / install`。内置方法不能替换，本地方法不能占用
+管家角色，每个目标最多挂载 8 个本地方法。
+
+解析顺序固定为 Core 约束、角色方法、工序方法、目标本地方法和当前任务。包缺失、
+被停用或内容变化时，新 Agent 回合会在启动前明确失败关闭，不会偷偷使用旧内容。
 
 ### 工作现场由你熟悉的终端承载
 
@@ -218,8 +235,8 @@ Crewvane CLI 运行时和经过校验的 Herdr 二进制文件，无需另装 No
 
 1. 选择一个专用工作区目录。
 2. 打开“设置”，选择“回到现场”默认使用外部终端还是内嵌轻现场，安装 Crewvane
-   CLI 和可选 Crewvane Skills，检查“Agent 接入”，再配置管家、负责人或工人的
-   Agent 启动命令。
+   CLI 和可选 Crewvane Skills，检查“Agent 接入”和“工作方法”，再配置管家、
+   负责人或工人的 Agent 启动命令。
 3. 准备管家。
 4. 点击“新目标”，用自然语言交代工作；需要时可以粘贴或添加截图。
 
@@ -244,6 +261,11 @@ crewvane attention --json
 crewvane goal list
 crewvane goal show <goal-id> --json
 crewvane board
+
+crewvane skill list
+crewvane skill validate ./my-method --json
+crewvane skill install ./my-method
+crewvane skill attach <goal-id> my-method
 ```
 
 面向 Agent 的状态命令必须表达明确事实。例如：
@@ -266,7 +288,7 @@ crewvane goal review <goal-id> \
 apps/desktop/       Electron 桌面壳、React UI、应用内 Herdr 终端、插件
 packages/core/      目标、注意力、策略、存储、附件与工作区恢复
 cli/                人类消息入口与明确的 Agent 状态协议
-skills/             随应用打包的 Crewvane 技能；ship-* 为遗留技能
+skills/             随应用打包的 Crewvane 与本地方法创建 Skills
 scripts/            桌面、Herdr、首次启动与安装包验收测试
 docs/               产品规格、架构、QA 与发布说明
 ```
@@ -312,6 +334,8 @@ pnpm test:onboarding
 - Crewvane 协调目标和现场，不为第三方 Agent 提供文件系统或网络沙箱。
   Agent 的访问权限仍由其自身 CLI 决定。
 - Agent 执行依赖 Herdr；Herdr 暂时不可用时，仍可查看目标、提醒和人工验收记录。
+- 0.10.x 已把 Herdr 放到可替换的 Session Adapter 边界之后，但应用当前仍只有
+  Herdr 这一套完整执行后端，不能把“可替换”理解成已经可以卸载 Herdr。
 
 ## 参与贡献
 

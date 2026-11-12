@@ -39,6 +39,31 @@ When the user explicitly says to save for later or not to start, use `capture` i
 
 The managed concierge can persist a new request it has already received in its terminal using `direct --new --handling later|self "$VERBATIM_REQUEST"`. This creates no dispatch. Existing-case `direct` records notes and returns external waits to active coordination; `--handling` must not be used to change an existing goal's execution assignment.
 
+## Work methods and local packs
+
+Use `crewvane skill list --json` to inspect built-in and installed local methods. Built-in
+role and process methods are resolved automatically and cannot be attached or replaced.
+The current-case concierge may inspect a method catalog and explicitly attach a matching
+local method to its current goal with `crewvane skill attach`. Owners and verifiers cannot
+change bindings.
+
+Local methods are bounded instructions, not executable tasks. Never infer goal completion
+from a method, script, Agent Stop, or terminal state. If the user asks to create or update
+a reusable method, load the separate `crewvane-local-pack-author` Skill when available;
+otherwise use:
+
+```sh
+crewvane skill draft "$DRAFT" --id "$PACK_ID" --name "$NAME" \
+  --description "$WHEN_TO_USE" --role owner
+crewvane skill validate "$DRAFT" --json
+crewvane skill install "$DRAFT" --json
+```
+
+Show the preview and get an explicit install decision before installing. Never approve a
+script on the user's behalf. `crewvane skill run PACK_ID SCRIPT_ID --goal GOAL_ID`
+requires an existing goal binding, matching package digest and a user-approved script
+SHA-256. Script output is audit evidence only.
+
 ## Agent execution protocol
 
 Only use status-changing commands when this agent is the registered owner or the concierge for that goal and the stated fact has actually happened. Read [references/cli-protocol.md](references/cli-protocol.md) before using `goal progress`, `goal wait`, `goal review`, `goal decide`, `goal risk`, `goal ship`, `session set`, or any acceptance command.
@@ -49,6 +74,10 @@ Only use status-changing commands when this agent is the registered owner or the
 - `waiting` is exclusively for a named external third party outside the human and all Crewvane Agents. Human choices, confirmations, missing information or actions require `decide` and attention; internal Agent coordination stays `active`. Scheduling a reminder does not change lifecycle.
 - Treat an empty or idle terminal as unknown, not successful.
 - After a human answers in the owner's Herdr scene, write the receipt before ending the turn. Do not ask the human to repeat the same answer in the desktop app. Never treat a Crewvane system check as a human reply.
+- If `owner launch` cannot confirm environment setup but preserves a real scene and
+  recovery ID, use `crewvane owner attach` only after verifying that exact Session,
+  Workspace, Tab, Pane and Agent or foreground process. Never replay a task that may
+  already have been delivered.
 
 Return concise results to the caller, including the goal ID and any unresolved human decision. Do not paste secrets, credentials, or unrelated workspace state into Crewvane.
 

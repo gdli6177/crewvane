@@ -4,12 +4,14 @@ import {
   ArrowRight,
   ArrowUpRight,
   Bell,
+  BookOpen,
   Bot,
   Check,
   ChevronRight,
   CircleAlert,
   Clock3,
   Folder,
+  FolderPlus,
   HardDrive,
   Inbox,
   LayoutDashboard,
@@ -17,6 +19,7 @@ import {
   Moon,
   NotebookPen,
   Copy,
+  PackageOpen,
   Plus,
   RefreshCw,
   Settings2,
@@ -45,6 +48,7 @@ import type {
   Project,
   ReleaseOnMerge,
   ShipPolicy,
+  SkillPackView,
   WorkspaceState,
 } from "../../../packages/core/src/types.js";
 import { api } from "./api.js";
@@ -393,6 +397,7 @@ function App() {
         setBusy(false);
       }
     },
+    methodPacks: () => api.methodPacksStatus(),
   }), [busy]);
   async function pickWorkspace() {
     if (pickingWorkspace) return;
@@ -1789,6 +1794,7 @@ function Settings({
           onChange={onAgentHooksChange}
           notify={notify}
         />
+        <MethodLibrary busy={busy} notify={notify} workspace={workspace} />
         <SettingsSection
           icon={<Zap />}
           title="Crewvane 命令行"
@@ -2093,6 +2099,402 @@ function formatBytes(bytes: number) {
   const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
   const value = bytes / 1024 ** index;
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+type MethodPackPreview = NonNullable<
+  Awaited<ReturnType<typeof api.previewMethodPack>>
+>;
+const methodPackStatus: Record<SkillPackView["status"], string> = {
+  builtin: "内置",
+  ready: "可用",
+  disabled: "已停用",
+  missing: "需要修复",
+  "needs-approval": "有脚本待授权",
+};
+
+function MethodLibrary({
+  busy,
+  notify,
+  workspace,
+}: {
+  busy: boolean;
+  notify: (message: string) => void;
+  workspace: string;
+}) {
+  const [packs, setPacks] = useState<SkillPackView[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState("");
+  const [failure, setFailure] = useState("");
+  const [preview, setPreview] = useState<MethodPackPreview>();
+  const [approvedScripts, setApprovedScripts] = useState<string[]>([]);
+
+  async function refresh() {
+    setLoading(true);
+    setFailure("");
+    try {
+      setPacks(await api.methodPacksStatus());
+    } catch (reason) {
+      setFailure(errorText(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => {
+    void refresh();
+  }, [workspace]);
+
+  async function choosePack() {
+    setFailure("");
+    setWorking("preview");
+    try {
+      const selected = await api.previewMethodPack();
+      if (selected) {
+        setPreview(selected);
+        setApprovedScripts([]);
+      }
+    } catch (reason) {
+      setFailure(errorText(reason));
+    } finally {
+      setWorking("");
+    }
+  }
+  async function installPreview() {
+    if (!preview) return;
+    setWorking("install");
+    setFailure("");
+    try {
+      const installed = await api.installMethodPack(
+        preview.path,
+        approvedScripts,
+      );
+      setPreview(undefined);
+      await refresh();
+      notify(`已安装工作方法「${installed.name}」`);
+    } catch (reason) {
+      setFailure(errorText(reason));
+    } finally {
+      setWorking("");
+    }
+  }
+  async function mutate(
+    pack: SkillPackView,
+    action: "approve" | "disable" | "enable" | "remove",
+    scriptIds: string[] = [],
+  ) {
+    if (
+      action === "remove" &&
+      !window.confirm(
+        `移除「${pack.name}」？已挂载它的目标会暂停启动，直到重新安装或从目标移除。`,
+      )
+    )
+      return;
+    setWorking(`${action}:${pack.id}`);
+    setFailure("");
+    try {
+      setPacks(await api.mutateMethodPack(
+        pack.id,
+        action,
+        scriptIds,
+      ));
+      notify(
+        action === "approve"
+          ? `已授权「${pack.name}」当前版本的脚本`
+          : action === "remove"
+            ? `已移除「${pack.name}」`
+            : action === "disable"
+              ? `已停用「${pack.name}」`
+              : `已启用「${pack.name}」`,
+      );
+    } catch (reason) {
+      setFailure(errorText(reason));
+    } finally {
+      setWorking("");
+    }
+  }
+  async function copyAuthorPrompt() {
+    try {
+      await api.writeClipboardText(
+        `请使用 crewvane-local-pack-author，把我接下来描述的工作方法创建成 Crewvane 本地能力包。先问我真正缺少的信息，使用 crewvane skill draft / validate 创建草稿，展示名称、适用范围、步骤、检查清单和 script SHA-256；得到我明确确认后再 install。工作区：${workspace}`,
+      );
+      notify("创建说明已复制，可发给任意已安装 Crewvane Skills 的 Agent。");
+    } catch (reason) {
+      setFailure(errorText(reason));
+    }
+  }
+
+  const localPacks = packs.filter(pack => pack.source === "local"),
+    builtinPacks = packs.filter(pack => pack.source === "builtin"),
+    previewScripts = preview?.manifest.scripts ?? [];
+  return (
+    <>
+      <SettingsSection
+        wide
+        icon={<BookOpen />}
+        title="工作方法"
+        description="方法告诉负责人和复核者该按什么流程工作。安装和授权都由你决定；目标只使用自己挂载的方法。"
+      >
+        {loading ? (
+          <LoadingState label="正在检查本地工作方法…" />
+        ) : localPacks.length ? (
+          <div className="method-pack-list">
+            {localPacks.map(pack => {
+              const pendingScripts = pack.scripts.filter(script =>
+                !script.approved);
+              return (
+                <article className="method-pack-card" key={pack.id}>
+                  <header>
+                    <span className="method-pack-mark" aria-hidden="true">
+                      <PackageOpen size={17} />
+                    </span>
+                    <div>
+                      <strong>{pack.name}</strong>
+                      <small>{pack.id} · {pack.version}</small>
+                    </div>
+                    <span className={`method-pack-status ${pack.status}`}>
+                      {methodPackStatus[pack.status]}
+                    </span>
+                  </header>
+                  <p>{pack.description || pack.detail || "这个能力包缺少可读说明。"}</p>
+                  <div className="method-pack-meta">
+                    <span>适用于 {pack.roles.map(role =>
+                      role === "owner" ? "负责人" : role === "verifier" ? "复核者" : "管家").join("、")}</span>
+                    {pack.referenceCount > 0 && <span>{pack.referenceCount} 份参考</span>}
+                    {pack.scripts.length > 0 && (
+                      <span>{pack.scripts.filter(script => script.approved).length}/{pack.scripts.length} 个脚本已授权</span>
+                    )}
+                  </div>
+                  {pendingScripts.length > 0 && (
+                    <div className="method-script-list">
+                      {pendingScripts.map(script => (
+                        <div className="method-script-row" key={script.id}>
+                          <div>
+                            <strong>{script.description}</strong>
+                            <code>{script.sha256}</code>
+                            {script.approvalInvalidated && <small>脚本内容变化，旧授权已失效</small>}
+                          </div>
+                          <Button
+                            size="sm"
+                            disabled={Boolean(busy || working)}
+                            onClick={() => void mutate(pack, "approve", [script.id])}
+                          >
+                            授权当前版本
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <footer>
+                    <Button
+                      variant={pack.status === "disabled" ? "secondary" : "ghost"}
+                      size="sm"
+                      disabled={Boolean(busy || working || pack.status === "missing")}
+                      onClick={() => void mutate(
+                        pack,
+                        pack.status === "disabled" ? "enable" : "disable",
+                      )}
+                    >
+                      {working === `${pack.status === "disabled" ? "enable" : "disable"}:${pack.id}`
+                        ? "正在保存…"
+                        : pack.status === "disabled" ? "启用" : "停用"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash2 size={13} />}
+                      disabled={Boolean(busy || working)}
+                      onClick={() => void mutate(pack, "remove")}
+                    >
+                      移除
+                    </Button>
+                  </footer>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            inline
+            icon={<PackageOpen />}
+            title="还没有本地工作方法"
+            description="把一个重复流程、评审清单或团队 SOP 变成方法。安装后，可在目标详情中单独挂载。"
+            action={(
+              <>
+                <Button
+                  size="sm"
+                  icon={<Sparkles size={14} />}
+                  onClick={() => void copyAuthorPrompt()}
+                >
+                  让 Agent 创建
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<FolderPlus size={14} />}
+                  disabled={Boolean(busy || working)}
+                  onClick={() => void choosePack()}
+                >
+                  从文件夹安装
+                </Button>
+              </>
+            )}
+          />
+        )}
+        {!!builtinPacks.length && (
+          <details className="method-builtins">
+            <summary>
+              <span>
+                <BookOpen size={14} />
+                {builtinPacks.length} 个内置方法
+              </span>
+              <small>由 Crewvane 随版本维护，可查看，不占用目标的本地槽位。</small>
+            </summary>
+            <div>
+              {builtinPacks.map(pack => (
+                <article key={pack.id}>
+                  <strong>{pack.name}</strong>
+                  <span>{pack.description}</span>
+                </article>
+              ))}
+            </div>
+          </details>
+        )}
+        {failure && <p className="ui-field__error" role="alert">{failure}</p>}
+        {!!localPacks.length && (
+          <div className="ui-settings-card__actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Sparkles size={14} />}
+              onClick={() => void copyAuthorPrompt()}
+            >
+              让 Agent 创建
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<FolderPlus size={14} />}
+              disabled={Boolean(busy || working)}
+              onClick={() => void choosePack()}
+            >
+              {working === "preview" ? "正在检查…" : "从文件夹安装"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<RefreshCw size={14} />}
+              disabled={loading || Boolean(working)}
+              onClick={() => void refresh()}
+            >
+              重新检查
+            </Button>
+          </div>
+        )}
+      </SettingsSection>
+      {preview && (
+        <Modal
+          wide
+          title="检查本地工作方法"
+          description="确认适用角色和执行边界后再安装。脚本默认不授权。"
+          onClose={() => {
+            if (!working) setPreview(undefined);
+          }}
+          error={failure}
+        >
+          <div className="method-preview">
+            <header>
+              <span className="method-pack-mark" aria-hidden="true">
+                <PackageOpen size={18} />
+              </span>
+              <div>
+                <h3>{preview.manifest.name}</h3>
+                <p>{preview.manifest.description}</p>
+                <small>
+                  {preview.manifest.id} · {preview.manifest.version} ·
+                  适用于 {preview.manifest.roles.map(role =>
+                    role === "owner" ? "负责人" : "复核者").join("、")}
+                </small>
+              </div>
+            </header>
+            <div className="method-preview-facts">
+              <span>{preview.files.length} 个文件</span>
+              <span>{formatBytes(preview.totalBytes)}</span>
+              <span>{preview.manifest.references?.length ?? 0} 份参考</span>
+              <code title={preview.digest}>SHA-256 {preview.digest.slice(0, 16)}…</code>
+            </div>
+            <section>
+              <strong>入口说明预览</strong>
+              <pre>{preview.entryPreview}</pre>
+            </section>
+            {preview.references.length > 0 && (
+              <section>
+                <strong>参考文件</strong>
+                <p>这些内容会在目标挂载后进入负责人或复核者上下文。</p>
+                <div className="method-preview-references">
+                  {preview.references.map(reference => (
+                    <details key={reference.path}>
+                      <summary>
+                        <span>{reference.path}</span>
+                        <small>{reference.characters} 字符</small>
+                      </summary>
+                      <pre>{reference.content}</pre>
+                    </details>
+                  ))}
+                </div>
+              </section>
+            )}
+            {previewScripts.length > 0 && (
+              <section>
+                <strong>可选脚本</strong>
+                <p>脚本只在你勾选并安装后获得当前内容摘要的授权；内容变化会自动失效。</p>
+                <div className="method-preview-scripts">
+                  {previewScripts.map(script => (
+                    <Checkbox
+                      key={script.id}
+                      label={script.description}
+                      description={<code>{script.sha256}</code>}
+                      checked={approvedScripts.includes(script.id)}
+                      onChange={event => {
+                        setApprovedScripts(current =>
+                          event.target.checked
+                            ? [...new Set([...current, script.id])]
+                            : current.filter(id => id !== script.id));
+                      }}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+            <div className="modal-actions">
+              <Button
+                variant="ghost"
+                disabled={Boolean(working)}
+                onClick={() => setPreview(undefined)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                disabled={Boolean(working)}
+                onClick={() => void installPreview()}
+              >
+                {working === "install"
+                  ? "正在安装…"
+                  : approvedScripts.length
+                    ? "安装并授权所选脚本"
+                    : "仅安装说明"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function errorText(value: unknown) {
+  return String(value).replace(
+    /^Error invoking remote method '[^']+': (?:Error: )?/,
+    "",
+  );
 }
 function StorageMaintenance() {
   const [status, setStatus] = useState<

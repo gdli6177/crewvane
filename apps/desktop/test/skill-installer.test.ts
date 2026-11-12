@@ -118,3 +118,71 @@ test("protocol changes update managed skills even when the app version is unchan
     assert.equal((await installer.status()).targets[0]!.phase, "installed");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("installs the local pack author beside the main skill on every detected Agent target", async () => {
+  const root = await mkdtemp(join(tmpdir(), "crewvane-multi-skill-"));
+  try {
+    const source = join(root, "skills"),
+      home = join(root, "home");
+    await mkdir(join(source, "crewvane", "references"), { recursive: true });
+    await mkdir(join(source, "crewvane-local-pack-author", "references"), {
+      recursive: true,
+    });
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(source, "crewvane", "SKILL.md"), "# Crewvane\n");
+    await writeFile(
+      join(source, "crewvane", "references", "cli-protocol.md"),
+      "# Protocol\n",
+    );
+    await writeFile(
+      join(source, "crewvane-local-pack-author", "SKILL.md"),
+      "# Local pack author\n",
+    );
+    await writeFile(
+      join(source, "crewvane-local-pack-author", "references", "manifest.md"),
+      "# Manifest\n",
+    );
+
+    const installer = new CrewvaneSkillInstaller(
+      source,
+      home,
+      "0.10.0",
+      ["crewvane", "crewvane-local-pack-author"],
+    );
+    const first = await installer.install();
+    assert.equal(first.errors.length, 0);
+    assert.equal(first.status.installed, first.status.available);
+    assert.equal(
+      await readFile(
+        join(home, ".codex", "skills", "crewvane-local-pack-author", "SKILL.md"),
+        "utf8",
+      ),
+      "# Local pack author\n",
+    );
+
+    await writeFile(
+      join(source, "crewvane-local-pack-author", "references", "manifest.md"),
+      "# Manifest v2\n",
+    );
+    const target = (await installer.status()).targets.find(item =>
+      item.id === "codex");
+    assert.equal(target?.phase, "outdated");
+    await installer.install();
+    assert.match(
+      await readFile(
+        join(
+          home,
+          ".codex",
+          "skills",
+          "crewvane-local-pack-author",
+          "references",
+          "manifest.md",
+        ),
+        "utf8",
+      ),
+      /Manifest v2/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

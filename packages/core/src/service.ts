@@ -19,12 +19,14 @@ import type {
   Goal,
   GoalAttachment,
   GoalBrief,
+  GoalSkillBinding,
   ReleaseTarget,
   Verification,
   VerificationCriterion,
   WorkspaceState,
   WorkflowStep,
 } from "./types.js";
+import { SkillRegistry } from "./skill-registry.js";
 import { agentReceiptMarker, isAgentRuntimeAdapter } from "./agent-runtime.js";
 import {
   isHighRiskCategory,
@@ -1151,6 +1153,136 @@ export class WorkspaceService {
           item.updatedAt = at;
           return item;
         }
+        case "goal.skill.attach": {
+          const item = goal(command.goalId);
+          ongoing(item, true);
+          const actor = command.actor === "concierge" ? "管家" : "你",
+            registry = new SkillRegistry(this.root),
+            resolved = await registry.binding(command.packId),
+            binding: GoalSkillBinding = {
+              packId: resolved.packId,
+              version: resolved.version,
+              digest: resolved.digest,
+              roles: resolved.roles,
+              attachedAt: nowIso(),
+              attachedBy: command.actor,
+            };
+          item.skills = [
+            ...(item.skills ?? []).filter(candidate => candidate.packId !== binding.packId),
+            binding,
+          ].sort((left, right) => left.packId.localeCompare(right.packId));
+          if (item.skills.length > 8)
+            throw new Error("每个目标最多挂载 8 个本地能力包");
+          activity(
+            item,
+            "skill",
+            `已挂载本地能力包：${resolved.view.name}（${resolved.packId}@${resolved.version}）。`,
+            actor,
+          );
+          return item;
+        }
+        case "goal.skill.detach": {
+          const item = goal(command.goalId),
+            packId = text(command.packId, "能力包 ID", 100);
+          ongoing(item, true);
+          const existing = item.skills?.find(candidate => candidate.packId === packId);
+          if (!existing) throw new Error("该能力包未挂载到当前目标");
+          item.skills = item.skills!.filter(candidate => candidate.packId !== packId);
+          if (!item.skills.length) delete item.skills;
+          activity(
+            item,
+            "skill",
+            `已移除本地能力包：${packId}@${existing.version}。`,
+            command.actor === "concierge" ? "管家" : "你",
+          );
+          return item;
+        }
+        case "goal.skill.audit": {
+          const item = goal(command.goalId),
+            packId = text(command.packId, "能力包 ID", 100),
+            scriptId = text(command.scriptId, "脚本 ID", 80);
+          if (!item.skills?.some(binding => binding.packId === packId))
+            throw new Error("该能力包未挂载到当前目标");
+          if (command.outcome !== "succeeded" && command.outcome !== "failed")
+            throw new Error("能力包脚本结果无效");
+          activity(
+            item,
+            "skill",
+            `能力包脚本 ${packId}/${scriptId} ${command.outcome === "succeeded" ? "执行成功" : "执行失败"}：${text(command.summary, "脚本执行结果", 8_000)}`,
+            command.actor?.trim() || "系统",
+          );
+          return item;
+        }
+        case "goal.skill.resolve": {
+          const item = goal(command.goalId),
+            value = command.resolution;
+          ongoing(item, true);
+          if (!["concierge", "owner", "verifier"].includes(value.role))
+            throw new Error("能力包解析角色无效");
+          if (!Array.isArray(value.packs) || value.packs.length > 12)
+            throw new Error("能力包解析结果无效");
+          if (typeof value.digest !== "string" || !/^[a-f0-9]{64}$/.test(value.digest))
+            throw new Error("能力包解析摘要无效");
+          for (const pack of value.packs) {
+            if (
+              !pack ||
+              typeof pack.id !== "string" ||
+              typeof pack.version !== "string" ||
+              typeof pack.digest !== "string" ||
+              !Array.isArray(pack.roles) ||
+              !pack.roles.every(role => ["concierge", "owner", "verifier"].includes(role)) ||
+              !["builtin", "local"].includes(pack.source) ||
+              !/^[a-f0-9]{64}$/.test(pack.digest)
+            )
+              throw new Error("能力包解析明细无效");
+          }
+          const resolution = {
+            id: newId("skillres"),
+            role: value.role,
+            ...(value.attemptId ? { attemptId: id(value.attemptId) } : {}),
+            resolvedAt: nowIso(),
+            digest: value.digest,
+            packs: structuredClone(value.packs),
+          } as const;
+          item.skillResolutions = [...(item.skillResolutions ?? []), resolution].slice(-40);
+          stamp(item);
+          return resolution;
+        }
+        case "goal.owner-launch.recovery": {
+          const item = goal(command.goalId),
+            value = command.recovery;
+          ongoing(item, true);
+          if (
+            typeof value.id !== "string" ||
+            !/^[A-Za-z0-9_-]{8,160}$/.test(value.id) ||
+            typeof value.attemptId !== "string" ||
+            !/^[A-Za-z0-9_-]{8,160}$/.test(value.attemptId) ||
+            typeof value.session !== "string" ||
+            !/^[a-zA-Z0-9_-]{1,80}$/.test(value.session) ||
+            !["pending", "attached", "superseded"].includes(value.status) ||
+            !Number.isFinite(Date.parse(value.createdAt))
+          )
+            throw new Error("负责人恢复信息无效");
+          if (value.tabId !== undefined && !/^[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_-]{1,64}$/.test(value.tabId))
+            throw new Error("负责人恢复信息中的 Tab ID 无效");
+          if (value.paneId !== undefined && !/^[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_-]{1,64}$/.test(value.paneId))
+            throw new Error("负责人恢复信息中的 Pane ID 无效");
+          item.ownerLaunchRecovery = {
+            ...structuredClone(value),
+            createdAt: iso(value.createdAt),
+            ...(value.attachedAt ? { attachedAt: iso(value.attachedAt) } : {}),
+            ...(value.detail ? { detail: text(value.detail, "恢复说明", 2_000) } : {}),
+          };
+          activity(
+            item,
+            "session",
+            value.status === "attached"
+              ? `已通过恢复 ID ${value.id} 绑定现成负责人现场。`
+              : `负责人启动恢复 ID：${value.id}。环境确认失败时可使用 owner attach 绑定已核实的现场。`,
+            "系统",
+          );
+          return item;
+        }
         case "goal.takeover": {
           const item = goal(command.goalId);
           ongoing(item, false, true);
@@ -1356,6 +1488,7 @@ export class WorkspaceService {
           delete item.watchdog;
           delete item.recovery;
           delete item.agentRuntime;
+          delete item.ownerLaunchRecovery;
           activity(item, "message", note, "你");
           activity(item, "session", item.next, "系统");
           return item;

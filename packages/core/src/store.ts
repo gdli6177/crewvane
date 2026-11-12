@@ -131,6 +131,30 @@ function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
       !Array.isArray(goal.activities) || !nonEmptyString(goal.createdAt) ||
       !nonEmptyString(goal.updatedAt))
       invalidState("工作区快照包含结构不完整的目标。");
+    if (goal.skills !== undefined) {
+      if (!Array.isArray(goal.skills) || goal.skills.length > 8 ||
+        goal.skills.some(skill =>
+          !record(skill) ||
+          !nonEmptyString(skill.packId) ||
+          !nonEmptyString(skill.version) ||
+          !/^[a-f0-9]{64}$/.test(String(skill.digest)) ||
+          !Array.isArray(skill.roles) ||
+          !skill.roles.every(role => role === "owner" || role === "verifier") ||
+          !nonEmptyString(skill.attachedAt) ||
+          !["human", "concierge"].includes(String(skill.attachedBy))))
+        invalidState("工作区快照包含无效的目标能力包绑定。");
+    }
+    if (goal.skillResolutions !== undefined &&
+      (!Array.isArray(goal.skillResolutions) || goal.skillResolutions.length > 40))
+      invalidState("工作区快照包含无效的能力包解析记录。");
+    if (goal.ownerLaunchRecovery !== undefined) {
+      const recovery = goal.ownerLaunchRecovery;
+      if (!record(recovery) || !nonEmptyString(recovery.id) ||
+        !nonEmptyString(recovery.attemptId) || !nonEmptyString(recovery.session) ||
+        !["pending", "attached", "superseded"].includes(String(recovery.status)) ||
+        !nonEmptyString(recovery.createdAt))
+        invalidState("工作区快照包含无效的负责人恢复信息。");
+    }
   }
   if (value.recovery !== undefined) {
     const recovery = value.recovery;

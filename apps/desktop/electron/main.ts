@@ -12,6 +12,7 @@ import {
   attentionRequest,
   attachmentAbsolutePath,
   importAttachmentBytes,
+  SkillRegistry,
   validateGoalAttachments,
   WorkspaceService,
   type CrewvaneCommand,
@@ -65,6 +66,7 @@ const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 const selections = new Set<string>();
+const selectedSkillDirectories = new Set<string>();
 const knownGoalStatuses = new Map<string, GoalStatus>();
 let knownGoalStatusWorkspace: string | undefined;
 let lastSnapshotSignature: string | undefined;
@@ -286,6 +288,69 @@ function skillsStatus() {
 }
 function installSkills() {
   return skillInstaller.install();
+}
+function methodRegistry() {
+  const target = activeService();
+  return {
+    target,
+    registry: new SkillRegistry(target.root, app.getVersion()),
+  };
+}
+async function methodPacksStatus() {
+  return methodRegistry().registry.list();
+}
+async function previewMethodPack() {
+  methodRegistry();
+  const picked = await dialog.showOpenDialog(window, {
+    title: "选择本地能力包目录",
+    buttonLabel: "检查能力包",
+    properties: ["openDirectory"],
+  });
+  if (picked.canceled || !picked.filePaths[0]) return null;
+  const path = await realpath(picked.filePaths[0]),
+    { registry } = methodRegistry(),
+    preview = await registry.validate(path);
+  selectedSkillDirectories.add(path);
+  return { path, ...preview };
+}
+async function installMethodPack(path: string, approveScripts: string[]) {
+  if (typeof path !== "string" || !selectedSkillDirectories.has(path))
+    throw new Error("请先通过目录选择器检查能力包");
+  if (!Array.isArray(approveScripts) || approveScripts.length > 20 ||
+    approveScripts.some(id => typeof id !== "string"))
+    throw new Error("脚本授权参数无效");
+  const { registry } = methodRegistry(),
+    installed = await registry.install(path, { approveScripts });
+  selectedSkillDirectories.delete(path);
+  if (window && !window.isDestroyed())
+    window.webContents.send("crewvane:event", {
+      type: "method-packs-status",
+      packs: await registry.list(),
+    });
+  return installed;
+}
+async function mutateMethodPack(
+  packId: string,
+  action: "approve" | "disable" | "enable" | "remove",
+  scriptIds: string[] = [],
+) {
+  if (typeof packId !== "string") throw new Error("能力包 ID 无效");
+  const { registry } = methodRegistry();
+  if (action === "approve") {
+    if (!Array.isArray(scriptIds) || !scriptIds.length)
+      throw new Error("至少选择一个需要授权的脚本");
+    await registry.approveScripts(packId, scriptIds);
+  } else if (action === "disable") await registry.disable(packId, true);
+  else if (action === "enable") await registry.disable(packId, false);
+  else if (action === "remove") await registry.remove(packId);
+  else throw new Error("无效的能力包操作");
+  const packs = await registry.list();
+  if (window && !window.isDestroyed())
+    window.webContents.send("crewvane:event", {
+      type: "method-packs-status",
+      packs,
+    });
+  return packs;
 }
 let cliInstallQueue: Promise<{ output: string }> = Promise.resolve({ output: "" });
 function installCli(workspace = root) {
@@ -1308,10 +1373,11 @@ app.whenReady().then(async () => {
   );
   skillInstaller = new CrewvaneSkillInstaller(
     app.isPackaged
-      ? join(process.resourcesPath, "crewvane-skill")
-      : join(here, "../../skills/crewvane"),
+      ? join(process.resourcesPath, "crewvane-skills")
+      : join(here, "../../skills"),
     app.getPath("home"),
     app.getVersion(),
+    ["crewvane", "crewvane-local-pack-author"],
   );
   app.setName("Crewvane");
   // BrowserWindow.icon is ignored by the macOS Dock in development.
@@ -1450,6 +1516,34 @@ app.whenReady().then(async () => {
   ipcMain.handle("crewvane:install-cli", (event) => { sender(event); return installCli(); });
   ipcMain.handle("crewvane:skills-status", (event) => { sender(event); return skillsStatus(); });
   ipcMain.handle("crewvane:install-skills", (event) => { sender(event); return installSkills(); });
+  ipcMain.handle("crewvane:method-packs-status", (event) => {
+    sender(event);
+    return methodPacksStatus();
+  });
+  ipcMain.handle("crewvane:method-pack-preview", (event) => {
+    sender(event);
+    return previewMethodPack();
+  });
+  ipcMain.handle("crewvane:method-pack-install", (event, path: unknown, scripts: unknown) => {
+    sender(event);
+    return installMethodPack(
+      path as string,
+      scripts as string[],
+    );
+  });
+  ipcMain.handle("crewvane:method-pack-action", (
+    event,
+    packId: unknown,
+    action: unknown,
+    scriptIds: unknown,
+  ) => {
+    sender(event);
+    return mutateMethodPack(
+      packId as string,
+      action as "approve" | "disable" | "enable" | "remove",
+      (scriptIds as string[] | undefined) ?? [],
+    );
+  });
   ipcMain.handle("crewvane:agent-runtime-status", (event) => {
     sender(event);
     return agentRuntimeStatus();

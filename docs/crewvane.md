@@ -18,11 +18,12 @@ Crewvane 帮你记住并行工作里的下一步。所有项目和个人事项�
 2. 安装包内置官方 Herdr TUI CLI，首次启动无需 Homebrew、系统 PATH 或额外下载。应用启动后会通过轻量的 GitHub Releases API 检查最新版，校验资产 SHA-256 和实际可执行版本；较新的官方版本可更新到应用自己的运行目录，不修改用户已有安装。联网检查失败时继续使用应用内置或本机可用版本，并在“设置”显示更新提示和重试入口。在“设置”可查看实际路径、检查更新，并安装应用内 Crewvane CLI。
 3. Herdr 就绪后，应用会自动安装并注册内置的 Crewvane 注意力插件。不需要另外运行 `herdr plugin install`；从 Herdr 的插件动作可以打开注意力控制台、直接进入一行新建目标，或回到全局管家。插件同时订阅 Herdr 原生 Agent 状态和 Pane / Tab / Workspace 生命周期事件，负责人阻塞、移动、退出或关闭现场时立即写回 Crewvane；Pane 被移动后会自动改用 Herdr 返回的新身份。桌面轮询只作为插件断线时的兜底。
 4. 在“Agent 接入”检查本机 Agent。Crewvane 会自动安装已支持且格式兼容的生命周期 Hook；Codex 首次显示“等待信任”时，需要按界面提示在 `/hooks` 中审核并信任 Crewvane 条目。已有用户 Hook 会保留，停用或卸载只移除 Crewvane 管理的条目。
-5. 在“Agent 启动命令”填写各角色使用的 CLI 命令，可附带模型等参数；负责人和工人留空则跟随上一级。点击“准备管家”会在后台准备该工作区唯一的 `concierge`。
-6. 在“设置 → 上线策略与决定账本”确认项目策略。新项目默认外部审批；只有你可以在桌面修改。
-7. 在“设置 → 工作现场”选择“回到现场”默认打开外部终端还是内嵌轻现场；外部模式会自动选择已安装的 iTerm2、Terminal 或 Ghostty，并复用同一 Herdr Session。0.9.2 起按真实 attach 进程复用原窗口，只切换目标 Herdr Tab；自定义 Agent 可以填写 `.zshrc` 中的 alias 或函数名。0.9.1 不再在首次进入目标界面时弹出自主推进设置；自主推进与自动验收收进设置中的折叠实验区，默认使用人工验收。
-8. 点击“新目标”，在一个输入框里直接说要做什么、知道哪些背景、怎样算完成，按“交给管家”或 `⌘ / Ctrl + Enter`。不用先选项目、流程、等待对象或提醒；完整原文和附件随目标通知发给管家，同时保存在目标中供后续读取。输入框支持粘贴截图、拖入图片或选择 PNG、JPEG、WebP、GIF，最多 8 张、单张 10 MB、总计 30 MB。保存后直接打开目标详情，可以继续补充意见、查看图片或查看派发状态。在项目页创建时自动带上当前项目，其他时候先作为个人事项保存，管家不会凭空猜项目。
-9. 忙碌时关闭窗口即可；目标、提醒和 Herdr 现场会保留。
+5. 在“设置 → 工作方法”确认内置角色与工序；需要团队 SOP 时点“让 Agent 创建”，或从文件夹预览并安装本地能力包。安装只进入工作区库，目标需要在详情中显式挂载。
+6. 在“Agent 启动命令”填写各角色使用的 CLI 命令，可附带模型等参数；负责人和工人留空则跟随上一级。点击“准备管家”会在后台准备该工作区唯一的 `concierge`。
+7. 在“设置 → 上线策略与决定账本”确认项目策略。新项目默认外部审批；只有你可以在桌面修改。
+8. 在“设置 → 工作现场”选择“回到现场”默认打开外部终端还是内嵌轻现场；外部模式会自动选择已安装的 iTerm2、Terminal 或 Ghostty，并复用同一 Herdr Session。0.9.2 起按真实 attach 进程复用原窗口，只切换目标 Herdr Tab；自定义 Agent 可以填写 `.zshrc` 中的 alias 或函数名。0.9.1 不再在首次进入目标界面时弹出自主推进设置；自主推进与自动验收收进设置中的折叠实验区，默认使用人工验收。
+9. 点击“新目标”，在一个输入框里直接说要做什么、知道哪些背景、怎样算完成，按“交给管家”或 `⌘ / Ctrl + Enter`。不用先选项目、流程、等待对象或提醒；完整原文和附件随目标通知发给管家，同时保存在目标中供后续读取。输入框支持粘贴截图、拖入图片或选择 PNG、JPEG、WebP、GIF，最多 8 张、单张 10 MB、总计 30 MB。保存后直接打开目标详情，可以继续补充意见、查看图片或查看派发状态。在项目页创建时自动带上当前项目，其他时候先作为个人事项保存，管家不会凭空猜项目。
+10. 忙碌时关闭窗口即可；目标、提醒和 Herdr 现场会保留。
 
 点击侧边栏的“找管家 / 回到现场”或目标里的“回到现场”时，默认在 iTerm2、Terminal 或 Ghostty 中打开同一个 Herdr Session，保留原生组合键、图片粘贴和输入法。Crewvane 会复用已有窗口；首次控制 iTerm2 或 Terminal 时，macOS 可能请求“自动化”权限。拒绝权限不会丢目标或 Session，可在“设置 → 工作现场”改用内嵌轻现场。
 
@@ -39,6 +40,36 @@ Agent 启动命令允许任意本机交互式 CLI、启动脚本、`npx --yes my
 Crewvane 不会替 Codex、OMP、Cursor 或其他 CLI 自动添加 `workspace-write`、网络、审批或额外目录参数。模型、沙箱和权限选项都按你填写的原生参数交给对应 CLI；实际能力由该 CLI 自己决定。
 
 从 Finder 启动时，Crewvane 会读取用户登录 shell 的 PATH，并检查常见安装目录，不只依赖桌面进程的精简 PATH。“设置 → 工作现场 → 测试打开现场”可独立打开当前现场，即使管家启动命令有误也能查看；“准备管家”才会启动或恢复管家。
+
+## 工作方法与本地能力包
+
+“工作方法”把重复流程、团队评审清单和标准 SOP 变成 Agent 可读取的 Skill。
+Crewvane 内置管家、负责人、独立复核者、标准交付、探索研究、发布检查、Agent
+接入和 Herdr 现场恢复方法；这些内置方法自动按角色和目标类型生效，不需要挂载，
+也不能被本地方法覆盖。
+
+设置中有两个安装入口：
+
+- **让 Agent 创建**：复制说明给已安装 Crewvane Skills 的 Agent。它使用
+  `crewvane-local-pack-author`，通过对话补齐触发场景、步骤、证据和角色，生成草稿
+  并验证；只有你明确确认后才安装。
+- **从文件夹安装**：选择本地能力包目录。应用先显示名称、版本、适用角色、文件数、
+  参考文件和入口预览，再允许安装。带脚本的方法默认不授权脚本。
+
+安装不等于使用。打开目标详情，在“工作方法”中点“添加”，选择可用方法；一个目标
+最多挂载 8 个本地方法。方法只在目标绑定时进入负责人或复核者上下文，并保存本次
+解析使用的包摘要。停用或删除已挂载的方法不会静默降级：下一次启动会明确失败，
+要求重新安装或从目标移除。
+
+本地能力包的入口说明最多 12,000 字符；单份参考最多 12,000 字符、每包参考合计
+最多 24,000 字符；整个目录最多 100 个文件、5 MB。符号链接、路径穿越、二进制
+参考和摘要不匹配会被拒绝。格式详细说明见
+[工作方法与本地能力包](product/local-capability-packs.md)。
+
+只有在确定性执行明显优于文字步骤时才添加脚本。安装前会显示脚本用途和 SHA-256；
+你必须逐项授权，授权只对当前内容有效。脚本变化后旧授权自动失效。`skill run` 只
+能运行当前目标已挂载、已授权且摘要匹配的脚本，并把有界结果记为审计事件。脚本
+成功仍不代表任务完成或通过验收。
 
 ## Agent 即时事件
 
@@ -210,11 +241,25 @@ crewvane bot bind --id <BOT_ID> --name "本地 Bot" --role initiator \
   --project <PROJECT_ID> --operation goal.submit --operation goal.read \
   --expires-at 2026-12-31T23:59:59+08:00
 crewvane bot call --file bot-request.json
+crewvane skill list
+crewvane skill show acme.release-review --json
+crewvane skill validate ~/Methods/acme.release-review --json
+crewvane skill install ~/Methods/acme.release-review
+crewvane skill attach <GOAL_ID> acme.release-review
+crewvane skill run acme.release-review inspect --goal <GOAL_ID>
+crewvane owner attach <GOAL_ID> --name owner-release --session <SESSION> \
+  --workspace <WORKSPACE_ID> --tab <TAB_ID> --pane <PANE_ID> \
+  --agent owner-release --recovery-id <RECOVERY_ID>
 ```
 
 `CREWVANE_WORKSPACE=/path/to/workspace` 可以替代 `--root`。桌面和 CLI 使用同一把锁，不会覆盖彼此的并发修改。`goal message` 与 `direct` 是消息入口，只追加原话和附件；`progress`、`wait`、`review`、`decide` 等是 Agent 或受信任适配器在明确事实发生后使用的高级状态协议。`direct` 不接受 `--next`。
 
 自主目标相关命令分两类：`goal brief`、`goal checkpoint`、`goal verify`、`goal boundary`、`goal review` 和 Bot 发起方协议供执行侧写回明确事实；`goal autonomy`、`autonomy set`、`project autonomy`、`release approve/reject` 和 `goal reopen` 是人用入口，不能交给受管 Agent 或 Bot 代调用。发布目标只能通过 `release create` 建立，`goal kind` 只能切换 `delivery | discovery`。完整字段、门禁和失败语义见 [自主目标规格](product/autonomous-goals.md)。
+
+`skill install / approve / disable / enable / remove` 是人用管理入口；受管 Agent
+只能查看方法目录、为当前目标挂载匹配方法，并运行当前目标中已批准且摘要匹配的
+脚本。`owner attach` 只用于 `owner launch` 留下的真实恢复现场，必须来自同一
+Herdr Session，不能用来给普通目标凭空创建负责人。
 
 `crewvane board` 是 Herdr 注意力插件使用的终端控制台；可直接处理决定、等待推进、人工接管、验收与退回，按 `g` 可回到全局管家。桌面未运行时，`ask`、消息、决定和跟进仍会保存为待派发请求，下一次启动桌面后继续发送。
 

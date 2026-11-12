@@ -38,6 +38,7 @@ export const activityKindLabel: Record<Activity["kind"], string> = {
   verification: "复核",
   release: "发布",
   reopened: "重开",
+  skill: "方法",
 };
 
 const contentKinds = new Set<Activity["kind"]>([
