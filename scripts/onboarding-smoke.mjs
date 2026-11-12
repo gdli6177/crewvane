@@ -19,6 +19,9 @@ const log = join(home, "custom-cli.jsonl"), customCli = join(home, "my custom ag
 const testEnvironment = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"),
   XDG_STATE_HOME: join(home, ".local/state"),
   XDG_DATA_HOME: join(home, ".local/share"), XDG_CACHE_HOME: join(home, ".cache"),
+  // GitHub Actions invokes this script from bash even on macOS. The fixture
+  // intentionally models the product's macOS target and the user's .zshrc.
+  SHELL: "/bin/zsh",
   PATH: "/usr/bin:/bin", CREWVANE_TEST_HOME: home,
   CREWVANE_TEST_USER_DATA: userData, CREWVANE_TEST_WORKSPACE: "",
   CREWVANE_TEST_ISOLATE_TOOLS: "1", CREWVANE_TEST_SKIP_HERDR_SETUP: "",
