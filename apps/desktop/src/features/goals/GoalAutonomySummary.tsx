@@ -274,8 +274,8 @@ export function GoalAutonomySummary({
               <div className="autonomy-record">
                 <strong>{verificationSiteLabels[autonomy.verificationSite.status]}</strong>
                 <p>
-                  {autonomy.verificationSite.reference.agent || "独立复核者"}
-                  {autonomy.verificationSite.reference.paneId
+                  {autonomy.verificationSite.reference?.agent || "独立复核者"}
+                  {autonomy.verificationSite.reference?.paneId
                     ? ` · ${autonomy.verificationSite.reference.paneId}`
                     : ""}
                   {" · "}{time(autonomy.verificationSite.at)}

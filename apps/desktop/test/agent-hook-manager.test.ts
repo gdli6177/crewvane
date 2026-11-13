@@ -6,6 +6,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -162,6 +163,115 @@ test("all supported detected Agents install once, preserve user hooks, and expos
   assert.equal(CLI.endsWith("crewvane"), true);
 });
 
+test("every JSON adapter preserves pre-existing hooks and uninstall restores them exactly", async () => {
+  const { home, manager } = await fixture([
+    "codex",
+    "claude",
+    "cursor-agent",
+    "qodercli",
+    "omp",
+  ]);
+  const codexPath = join(home, ".codex", "hooks.json");
+  const claudePath = join(home, ".claude", "settings.json");
+  const cursorPath = join(home, ".cursor", "hooks.json");
+  const qoderPath = join(home, ".qoder", "settings.json");
+  const grouped = {
+    SessionStart: [{ hooks: [{ type: "command", command: "openviking-session-start" }] }],
+    UserPromptSubmit: [{ hooks: [{ type: "command", command: "openviking-prompt" }] }],
+    Stop: [{ hooks: [{ type: "command", command: "openviking-stop" }] }],
+    SessionEnd: [{ hooks: [{ type: "command", command: "openviking-session-end" }] }],
+  };
+  const originals: Record<string, any> = {
+    codex: { custom: "codex", hooks: { ...grouped,
+      PreToolUse: [{
+        matcher: "Bash",
+        hooks: [{ type: "command", command: "openviking-pre-tool" }],
+      }],
+    } },
+    claude: { theme: "dark", hooks: { ...grouped,
+      Notification: [{ matcher: "", hooks: [{ type: "command", command: "openviking-notification" }] }],
+      PreToolUse: [{
+        matcher: "Edit",
+        hooks: [{ type: "command", command: "openviking-pre-tool" }],
+      }],
+    } },
+    cursor: {
+      version: 1,
+      userSetting: "cursor",
+      hooks: {
+        sessionStart: [{ command: "openviking-1", timeout: 5 }],
+        beforeSubmitPrompt: [{ command: "openviking-2", timeout: 5 }],
+        afterAgentResponse: [{ command: "openviking-3", timeout: 5 }],
+        stop: [{ command: "openviking-4", timeout: 5 }],
+        sessionEnd: [{ command: "openviking-5", timeout: 5 }],
+        beforeShellExecution: [{ command: "openviking-6", timeout: 5 }],
+        afterFileEdit: [{ command: "openviking-7", timeout: 5 }],
+      },
+    },
+    qoder: { approvalMode: "ask", hooks: { ...grouped,
+      PermissionRequest: [{ hooks: [{ type: "command", command: "openviking-permission" }] }],
+    } },
+  };
+  for (const [id, path] of [
+    ["codex", codexPath],
+    ["claude", claudePath],
+    ["cursor", cursorPath],
+    ["qoder", qoderPath],
+  ] as const) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(originals[id]));
+  }
+  const ompDirectory = join(home, ".omp", "agent", "extensions");
+  await mkdir(ompDirectory, { recursive: true });
+  await writeFile(join(ompDirectory, "user-extension.js"), "// unrelated OMP extension\n");
+
+  await manager.autoInstallDetected();
+  const installedCodex = await json(codexPath),
+    installedClaude = await json(claudePath),
+    installedCursor = await json(cursorPath),
+    installedQoder = await json(qoderPath);
+  assert.equal(installedCodex.custom, "codex");
+  assert.equal(installedClaude.theme, "dark");
+  assert.equal(installedCursor.userSetting, "cursor");
+  assert.equal(installedQoder.approvalMode, "ask");
+  for (const [config, event, command] of [
+    [installedCodex, "SessionStart", "openviking-session-start"],
+    [installedCodex, "PreToolUse", "openviking-pre-tool"],
+    [installedClaude, "Stop", "openviking-stop"],
+    [installedClaude, "Notification", "openviking-notification"],
+    [installedClaude, "PreToolUse", "openviking-pre-tool"],
+    [installedQoder, "SessionEnd", "openviking-session-end"],
+    [installedQoder, "PermissionRequest", "openviking-permission"],
+  ] as const) {
+    assert.equal(
+      handlers(config, event).filter((handler: any) =>
+        handler.command === command).length,
+      1,
+      `${event} must retain ${command}`,
+    );
+  }
+  assert.ok(handlers(installedCursor, "beforeShellExecution")
+    .some((handler: any) => handler.command === "openviking-6"));
+  assert.ok(handlers(installedCursor, "afterFileEdit")
+    .some((handler: any) => handler.command === "openviking-7"));
+  assert.equal(handlers(installedCodex, "PreToolUse").length, 1);
+  assert.equal(handlers(installedClaude, "PreToolUse").length, 1);
+  assert.equal(await readFile(join(ompDirectory, "user-extension.js"), "utf8"),
+    "// unrelated OMP extension\n");
+
+  for (const id of ["codex", "claude-code", "cursor", "qoder", "omp"] as const)
+    await manager.uninstall(id);
+
+  assert.deepEqual(await json(codexPath), originals.codex);
+  assert.deepEqual(await json(claudePath), originals.claude);
+  assert.deepEqual(await json(cursorPath), originals.cursor);
+  assert.deepEqual(await json(qoderPath), originals.qoder);
+  assert.equal(await readFile(join(ompDirectory, "user-extension.js"), "utf8"),
+    "// unrelated OMP extension\n");
+  assert.equal(await stat(join(ompDirectory, "crewvane.js")).then(() => true).catch(() => false),
+    false);
+});
+
 test("disable and uninstall remove only Crewvane entries and stay suppressed across auto-install", async () => {
   const { home, manager } = await fixture(["cursor-agent"]);
   const path = join(home, ".cursor", "hooks.json");
@@ -193,6 +303,121 @@ test("disable and uninstall remove only Crewvane entries and stay suppressed acr
     (await manager.status()).find(status => status.id === "cursor")?.status,
     "disabled",
   );
+});
+
+test("grouped adapters preserve empty user groups and commands that merely mention the protocol", async () => {
+  for (const [command, id, directory, filename] of [
+    ["codex", "codex", ".codex", "hooks.json"],
+    ["claude", "claude-code", ".claude", "settings.json"],
+    ["qodercli", "qoder", ".qoder", "settings.json"],
+  ] as const) {
+    const { home, manager } = await fixture([command]);
+    const path = join(home, directory, filename);
+    const original = {
+      custom: { enabled: true },
+      hooks: {
+        Stop: [
+          { matcher: "user-empty", hooks: [] },
+          { hooks: [{
+            type: "command",
+            command: `echo 'hook ingest --adapter ${id}'`,
+          }] },
+        ],
+      },
+    };
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(original));
+    await manager.install(id);
+    assert.deepEqual((await json(path)).hooks.Stop.slice(0, 2), original.hooks.Stop);
+    await manager.install(id);
+    await manager.disable(id);
+    assert.deepEqual(await json(path), original);
+    await manager.uninstall(id);
+    assert.deepEqual(await json(path), original);
+  }
+});
+
+test("uninstall without managed entries is a byte-for-byte no-op for every JSON adapter", async () => {
+  for (const [command, id, directory, filename] of [
+    ["codex", "codex", ".codex", "hooks.json"],
+    ["claude", "claude-code", ".claude", "settings.json"],
+    ["cursor-agent", "cursor", ".cursor", "hooks.json"],
+    ["qodercli", "qoder", ".qoder", "settings.json"],
+  ] as const) {
+    const { home, manager } = await fixture([command]);
+    const path = join(home, directory, filename);
+    const body = '{ "hooks": { "Stop": [] }, "custom": "untouched" }\n';
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, body);
+    await manager.uninstall(id);
+    assert.equal(await readFile(path, "utf8"), body);
+  }
+});
+
+test("upgrades keep hooks added after first install and mixed-group metadata for every JSON adapter", async () => {
+  for (const [command, id, directory, filename, event] of [
+    ["codex", "codex", ".codex", "hooks.json", "Stop"],
+    ["claude", "claude-code", ".claude", "settings.json", "Stop"],
+    ["cursor-agent", "cursor", ".cursor", "hooks.json", "stop"],
+    ["qodercli", "qoder", ".qoder", "settings.json", "Stop"],
+  ] as const) {
+    const { home, manager } = await fixture([command]);
+    const path = join(home, directory, filename);
+    await manager.install(id);
+    const config = await json(path);
+    const user = { command: `echo hook ingest --adapter ${id}`, timeout: 7 };
+    config.hooks[event] = id === "cursor"
+      ? [...config.hooks[event], user]
+      : [{ matcher: "user-matcher", hooks: [user, ...handlers(config, event)] }];
+    config.latestUserSetting = true;
+    await writeFile(path, JSON.stringify(config));
+    await manager.install(id);
+    assert.ok(handlers(await json(path), event).some((entry: any) => entry.command === user.command));
+    await manager.uninstall(id);
+    const remaining = await json(path);
+    assert.equal(remaining.latestUserSetting, true);
+    assert.deepEqual(remaining.hooks[event], id === "cursor"
+      ? [user] : [{ matcher: "user-matcher", hooks: [user] }]);
+  }
+});
+
+test("separate manager instances serialize changes to the same Agent config", async () => {
+  const { home, manager, root } = await fixture(["cursor-agent"]);
+  const second = new AgentHookManager({
+    home,
+    userData: join(root, "second-installation"),
+    commandPath: async command => command === "cursor-agent" ? "/fixture/cursor-agent" : undefined,
+    version: async () => "1.4.0",
+  });
+  const path = join(home, ".cursor", "hooks.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    version: 1,
+    hooks: { stop: [{ command: "user-hook" }] },
+  }));
+  await Promise.all([manager.install("cursor"), second.install("cursor")]);
+  const stop = handlers(await json(path), "stop");
+  assert.equal(stop.filter((entry: any) => entry.command === "user-hook").length, 1);
+  assert.equal(stop.length, 2, "Concurrent installs must retain one managed handler.");
+});
+
+test("configuration symlinks and unrelated OMP marker comments are never replaced", async () => {
+  const { home, manager, root } = await fixture(["cursor-agent", "omp"]);
+  const target = join(root, "shared-user-hooks.json");
+  const body = '{"version":1,"hooks":{"stop":[{"command":"openviking"}]}}\n';
+  await writeFile(target, body);
+  const path = join(home, ".cursor", "hooks.json");
+  await mkdir(dirname(path), { recursive: true });
+  await symlink(target, path);
+  await assert.rejects(manager.install("cursor"), /真实文件/);
+  assert.equal(await readFile(target, "utf8"), body);
+  const ompPath = join(home, ".omp", "agent", "extensions", "crewvane.js");
+  const extension = "// user extension\n// mentions Crewvane managed OMP extension\n";
+  await mkdir(dirname(ompPath), { recursive: true });
+  await writeFile(ompPath, extension);
+  await assert.rejects(manager.install("omp"), /同名文件/);
+  await manager.uninstall("omp");
+  assert.equal(await readFile(ompPath, "utf8"), extension);
 });
 
 test("malformed JSON and a future Cursor schema are protected and reported as incompatible", async () => {

@@ -7,7 +7,8 @@ const internalNames = new Set([
   "尚未开始", "agent", "agents", "bot", "concierge", "owner", "worker", "self",
 ]);
 function agentNames(state: WorkspaceState) {
-  return new Set([state.concierge.agent, ...state.goals.map(goal => goal.herdr?.agent)]
+  return new Set([state.concierge.agent, ...state.goals.flatMap(goal =>
+    [goal.herdr?.agent, goal.agentRuntime?.attempt.agent])]
     .filter((agent): agent is string => Boolean(agent)).map(identity));
 }
 function internalParty(value: string, agents: Set<string>) {
@@ -50,7 +51,7 @@ export function normalizeExternalWaits(state: WorkspaceState) {
     const party = goal.waitingFor;
     // Older versions overwrote the execution owner with the waiting party.
     if (goal.owner === party)
-      goal.owner = goal.mode === "manual" ? "你" : goal.herdr?.agent || "待分配负责人";
+      goal.owner = goal.mode === "manual" ? "你" : goal.agentRuntime?.attempt.agent || goal.herdr?.agent || "待分配负责人";
     if (externalParty(party, agents) && !pendingHumanAction(goal)) continue;
     goal.status = goal.attention?.kind === "review" && goal.delivery ? "review" : "active";
     delete goal.waitingFor;

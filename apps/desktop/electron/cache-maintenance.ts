@@ -1,5 +1,6 @@
 import { lstat, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { staleSessionStorage } from "../../../packages/sessions/src/maintenance.js";
 
 const BROWSER_CACHE_DIRECTORIES = [
   "Cache",
@@ -28,7 +29,7 @@ export interface CacheMaintenancePaths {
 }
 
 export interface CacheCategoryUsage {
-  id: "browser" | "logs" | "temporary";
+  id: "browser" | "logs" | "temporary" | "sessions";
   label: string;
   bytes: number;
   files: number;
@@ -189,10 +190,17 @@ export async function inspectManagedCaches(
     temporaryRoots(paths).map(({ root, matches }) =>
       filteredUsage(root, matches, temporaryBefore)),
   ));
+  const sessionRoot = join(paths.userDataRoot, "session-control");
+  const sessions = await entryUsage(sessionRoot, -Infinity);
+  const staleSessions = sum(await Promise.all(
+    (await staleSessionStorage(sessionRoot, now)).map(path => entryUsage(path, Infinity)),
+  ));
   const categories: CacheCategoryUsage[] = [
     { id: "browser", label: "界面与渲染缓存", ...browser },
     { id: "logs", label: "诊断日志", ...logs },
     { id: "temporary", label: "遗留临时文件", ...temporary },
+    { id: "sessions", label: "现场交接与启动记录", ...sessions,
+      staleBytes: staleSessions.bytes, staleFiles: staleSessions.files },
   ];
   const total = sum(categories);
   return {
@@ -291,6 +299,10 @@ export async function clearManagedCaches(
   if (paths.logsRoot) await removeStaleChildren(paths.logsRoot, staleBefore, warnings);
   await Promise.all(temporaryRoots(paths).map(({ root, matches }) =>
     removeFiltered(root, matches, mode === "automatic" ? temporaryBefore : undefined, warnings)));
+  for (const path of await staleSessionStorage(join(paths.userDataRoot, "session-control"), now)) {
+    try { await rm(path, { recursive: true, force: true }); }
+    catch (error) { warnings.push(`现场缓存：${error instanceof Error ? error.message : String(error)}`); }
+  }
   if (options.clearBrowserRuntime) {
     try {
       await options.clearBrowserRuntime();

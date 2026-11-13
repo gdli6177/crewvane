@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
 } from "../../../packages/core/src/agent-command.js";
 import { SkillRegistry } from "../../../packages/core/src/skill-registry.js";
 import { ownerSceneReplyInstructions } from "../../../cli/src/owner-instructions.js";
+import { startDetachedHerdrServer } from "../../../packages/sessions/src/herdr/server.js";
 const exec = promisify(execFile);
 export const CONCIERGE_LAUNCH_POLICY = "control-plane-v1" as const;
 export interface HerdrRunner {
@@ -61,26 +62,7 @@ export const herdrRunner = (
   },
 });
 
-export function startDetachedHerdrServer(
-  executable: string,
-  session: string,
-  workspace: string,
-  environment: NodeJS.ProcessEnv = process.env,
-) {
-  const child = spawn(executable, ["server"], {
-    detached: true,
-    stdio: "ignore",
-    cwd: workspace,
-    env: {
-      ...environment,
-      PWD: workspace,
-      HERDR_SESSION: session,
-      HERDR_STARTUP_CWD: workspace,
-      HERDR_MACOS_SERVER_CONTEXT: "user",
-    },
-  });
-  child.unref();
-}
+export { startDetachedHerdrServer };
 function payload(raw: string): any {
   try {
     return JSON.parse(raw);
@@ -368,6 +350,33 @@ export class HerdrClient {
     // Without a persisted control-plane reference, provenance is unknown.
     // Never close or reuse a same-named process the user may have started.
     return;
+  }
+  /**
+   * Re-verifies one migrated v3 reference without granting control from a
+   * title, pane name or recycled PID alone. The OS birth time is required for
+   * a migrated process before it can become a closable v4 scene.
+   */
+  async inspectManagedReference(
+    existing: HerdrReference,
+  ): Promise<{ reference: HerdrReference; live: LivePresence } | undefined> {
+    if (existing.session !== this.session || !existing.paneId || !existing.processId) return;
+    const listed = agents(await this.runner.run(["agent", "list"]));
+    const agent = listed.find(item =>
+      item.pane_id === existing.paneId &&
+      (!existing.agent || item.name === existing.agent || item.agent === existing.agent ||
+        item.agent_kind === existing.agent));
+    if (!agent) return;
+    const foreground = await this.foreground(existing.paneId).catch(() => []);
+    if (!foreground.some(process => process.pid === existing.processId)) return;
+    return {
+      reference: {
+        ...existing,
+        workspaceId: named(agent.workspace_id) ?? existing.workspaceId,
+        tabId: named(agent.tab_id) ?? existing.tabId,
+        agent: named(agent.name) ?? existing.agent,
+      },
+      live: livePresence(agent, new Date().toISOString()),
+    };
   }
   async findConcierge(existing?: HerdrReference): Promise<HerdrReference | undefined> {
     return (await this.inspectConcierge(existing))?.reference;

@@ -125,6 +125,18 @@ test("an older CLI gets a private latest copy without changing the user's instal
   assert.equal(result.version, "0.9.5"); assert.equal(result.executable, path);
   assert.deepEqual(await readFile(external), binary("0.8.0"));
 }));
+test("explicit update checks never download or replace an installed runtime", () => fixture(async ({ tools, path }) => {
+  await writeFile(path, binary("0.8.0"), { mode: 0o700 });
+  const { calls, fetcher } = server();
+  const result = await new HerdrInstallation(tools, path, () => {}, fetcher, "darwin", "arm64").check();
+  assert.equal(calls.length, 1);
+  assert.equal(result.version, "0.8.0");
+  assert.equal(result.latestVersion, "0.9.5");
+  assert.equal(result.updateAvailable, true);
+  assert.equal(result.phase, "ready");
+  assert.match(result.detail!, /可更新/);
+  assert.deepEqual(await readFile(path), binary("0.8.0"));
+}));
 test("checksum failures leave the existing binary untouched and keep it usable", () => fixture(async ({ tools, path }) => {
   await writeFile(path, binary("0.8.0"), { mode: 0o700 });
   const install = new HerdrInstallation(tools, path, () => {}, server(binary("0.9.5"), "0".repeat(64)).fetcher, "darwin", "arm64");

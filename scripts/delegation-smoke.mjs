@@ -14,7 +14,7 @@ const trial = await realpath(await mkdtemp("/tmp/cv-delegate-"));
 const workspace = join(trial, "workspace"), home = join(trial, "home");
 const session = `crewvane-trial-${randomUUID().slice(0, 8)}`;
 const trialAgent = process.env.CREWVANE_TRIAL_AGENT ??
-  "omp --tools=read,bash,edit,write --approval-mode=yolo";
+  "omp";
 await mkdir(workspace); await mkdir(home);
 await writeFile(join(workspace, "AGENTS.md"), `# 隔离产品验收
 只处理本工作区目标，不访问其他项目或用户文件，不提交、发布或发送外部消息。
@@ -81,7 +81,7 @@ try {
       inspected++;
       await capture(`minute-${inspected}`);
       console.log(JSON.stringify({step:"waiting",minute:inspected,goals:selected.map(goal=>({
-        id:goal.id,status:goal.status,dispatch:goal.dispatch?.status,pane:goal.herdr?.paneId,
+        id:goal.id,status:goal.status,dispatch:goal.dispatch?.status,pane:goal.scene?.locator.paneId,
         question:goal.attention?.summary,
       }))}));
     }
@@ -89,16 +89,17 @@ try {
   }
   const goals = current.goals.filter(goal=>ids.includes(goal.id));
   assert.ok(goals.every(goal=>goal.status==="review"),"both goals must reach review through real owners");
-  assert.equal(new Set(goals.map(goal=>goal.herdr?.paneId)).size,2,"each goal has a distinct owner pane");
+  assert.equal(new Set(goals.map(goal=>goal.scene?.locator.paneId)).size,2,"each goal has a distinct owner pane");
   for (const [index,marker] of ["ALPHA_READY","BETA_READY"].entries()) {
     const goal = goals.find(goal=>goal.id===ids[index]);
-    assert.ok(goal.herdr?.paneId && goal.herdr?.tabId && goal.herdr?.agent);
-    assert.equal(goal.herdr.session,session);
-    assert.notEqual(goal.herdr.paneId,current.concierge.paneId);
-    assert.notEqual(goal.herdr.tabId,current.concierge.tabId);
+    assert.equal(goal.scene?.backend, "herdr");
+    assert.ok(goal.scene.locator.paneId && goal.scene.locator.tabId);
+    assert.equal(goal.scene.locator.session,session);
+    assert.notEqual(goal.scene.locator.paneId,current.concierge.scene.locator.paneId);
+    assert.notEqual(goal.scene.locator.tabId,current.concierge.scene.locator.tabId);
     const delivered = JSON.parse(await readFile(join(workspace,`${marker}.json`),"utf8"));
     assert.equal(delivered.marker,marker);
-    assert.equal(delivered.executorPane,goal.herdr.paneId,"the actual executor is the registered owner, not concierge");
+    assert.equal(delivered.executorPane,goal.scene.locator.paneId,"the actual executor is the registered owner, not concierge");
     assert.ok(goal.delivery.checks.length && goal.delivery.checks.every(check=>check.result==="passed"));
     if (marker === "ALPHA_READY") {
       assert.equal(goal.attachments.length, 1);
@@ -112,19 +113,19 @@ try {
   const diagnostics = await capture("two-real-owners");
   const data = JSON.parse(diagnostics.listed.stdout), agents = data.result?.agents ?? data.agents;
   assert.equal(agents.length,3,"two goals have exactly two owners and one concierge, without duplicate starts");
-  assert.equal(agents.filter(agent=>agent.name==="concierge").length,1);
-  assert.ok(goals.every(goal=>agents.some(agent=>agent.pane_id===goal.herdr.paneId)));
+  assert.equal(agents.filter(agent=>agent.pane_id===current.concierge.scene.locator.paneId).length,1);
+  assert.ok(goals.every(goal=>agents.some(agent=>agent.pane_id===goal.scene.locator.paneId)));
   const directGoal = goals.at(-1), dispatchBeforeDirect = directGoal.dispatch?.id,
     directMarker = `DIRECT_TERMINAL_${randomUUID().slice(0, 8)}`;
-  const directPrompt = await app.evaluate(async (_electron, {session,directMarker}) => {
+  const directPrompt = await app.evaluate(async (_electron, {session,directMarker,currentConciergePane}) => {
     const { execFile } = process.getBuiltinModule("node:child_process");
     return await new Promise(resolve => execFile("herdr", [
-      "--session", session, "agent", "prompt", "concierge",
+      "--session", session, "agent", "prompt", currentConciergePane,
       `这是用户直接发给你的 Herdr 终端消息。按你的身份协议，只把原话同步回 Crewvane 当前目标，不要开始新的执行或创建负责人。原话：追加下一步 ${directMarker}`,
       "--wait", "--timeout", "180000",
     ], {timeout:190_000,maxBuffer:512_000}, (error, stdout, stderr) =>
       resolve({error:error?.message,stdout,stderr})));
-  }, {session,directMarker});
+  }, {session,directMarker,currentConciergePane:current.concierge.scene.locator.paneId});
   assert.equal(directPrompt.error, undefined, directPrompt.stderr || directPrompt.error);
   await expect.poll(async () => {
     const state = await snapshot();
@@ -140,10 +141,10 @@ try {
   assert.equal(directActivity?.actor, "你 · Herdr 直聊");
   console.log(JSON.stringify({step:"direct-terminal-synced",goalId:directGoal.id,directMarker}));
   const newTaskMarker = `DIRECT_NEW_${randomUUID().slice(0, 8)}`;
-  const newTaskPrompt = await app.evaluate(async (_electron, {session,newTaskMarker}) => {
+  const newTaskPrompt = await app.evaluate(async (_electron, {session,newTaskMarker,currentConciergePane}) => {
     const { execFile } = process.getBuiltinModule("node:child_process");
     return await new Promise(resolve => execFile("herdr", [
-      "--session", session, "agent", "prompt", "concierge",
+      "--session", session, "agent", "prompt", currentConciergePane,
       `这是用户通过 Herdr 终端直接发来的独立新任务。严格只执行下面两步，不创建负责人，不做其他任务：
 1. 运行 crewvane direct --new "直接终端新任务 ${newTaskMarker}" --json
 2. 从返回 JSON 读取 id，运行 crewvane goal progress <id> --summary "已直接受理终端新任务" --next "整理完成标准并创建负责人" --json
@@ -151,7 +152,7 @@ try {
       "--wait", "--timeout", "180000",
     ], {timeout:190_000,maxBuffer:512_000}, (error, stdout, stderr) =>
       resolve({error:error?.message,stdout,stderr})));
-  }, {session,newTaskMarker});
+  }, {session,newTaskMarker,currentConciergePane:current.concierge.scene.locator.paneId});
   assert.equal(newTaskPrompt.error, undefined, newTaskPrompt.stderr || newTaskPrompt.error);
   let directNew;
   await expect.poll(async () => {
@@ -177,25 +178,25 @@ try {
   await expect.poll(async()=> (await page.evaluate(()=>window.crewvane.environment())).workspace).toBe(workspace);
   await page.evaluate(()=>window.crewvane.prepareConcierge());
   const restored = await snapshot();
-  assert.equal(restored.concierge.paneId,current.concierge.paneId,"resuming refreshes the existing concierge without replacing it");
-  assert.deepEqual(restored.goals.filter(goal=>ids.includes(goal.id)).map(goal=>goal.herdr),goals.map(goal=>goal.herdr));
+  assert.equal(restored.concierge.scene.locator.paneId,current.concierge.scene.locator.paneId,"resuming refreshes the existing concierge without replacing it");
+  assert.deepEqual(restored.goals.filter(goal=>ids.includes(goal.id)).map(goal=>goal.scene.locator),goals.map(goal=>goal.scene.locator));
   const resumed=await capture("resumed-roles");
   const resumedData=JSON.parse(resumed.listed.stdout);
   assert.equal((resumedData.result?.agents ?? resumedData.agents).length,3);
   await page.evaluate(goalId => window.crewvane.command({
     type:"goal.accept",goalId,actor:"你",
   }),goals[0].id);
-  await expect.poll(async()=> (await snapshot()).goals.find(goal=>goal.id===goals[0].id)?.herdr)
+  await expect.poll(async()=> (await snapshot()).goals.find(goal=>goal.id===goals[0].id)?.scene)
     .toBe(undefined);
   const afterClose = await capture("first-owner-closed"),
     remaining = JSON.parse(afterClose.listed.stdout).result?.agents ?? [];
   assert.equal(remaining.length,2,"acceptance closes one owner, preserving the concierge and the other goal");
-  assert.ok(remaining.some(agent=>agent.name==="concierge"));
-  assert.ok(remaining.some(agent=>agent.pane_id===goals[1].herdr.paneId));
+  assert.ok(remaining.some(agent=>agent.pane_id===current.concierge.scene.locator.paneId));
+  assert.ok(remaining.some(agent=>agent.pane_id===goals[1].scene.locator.paneId));
   await page.evaluate(goalId => window.crewvane.command({
     type:"goal.accept",goalId,actor:"你",
   }),goals[1].id);
-  await expect.poll(async()=> (await snapshot()).goals.find(goal=>goal.id===goals[1].id)?.herdr)
+  await expect.poll(async()=> (await snapshot()).goals.find(goal=>goal.id===goals[1].id)?.scene)
     .toBe(undefined);
   await page.evaluate(goalId => window.crewvane.command({
     type:"goal.delete",goalId,actor:"你",
@@ -204,7 +205,7 @@ try {
   assert.equal((JSON.parse(afterDelete.listed.stdout).result?.agents ?? []).length,1,
     "permanent deletion closes its owner and preserves only the global concierge");
   assert.equal((await snapshot()).goals.some(goal=>goal.id===goals[1].id),false);
-  assert.equal((await snapshot()).concierge.paneId,current.concierge.paneId);
+  assert.equal((await snapshot()).concierge.scene.locator.paneId,current.concierge.scene.locator.paneId);
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,trial,session,checks:[
     "two desktop goals create two independent real owners","one global concierge",

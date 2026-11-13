@@ -339,7 +339,7 @@ test("concierge notifications carry method constraints and a local method catalo
       args[0] === "agent" && args[1] === "prompt")![3]!;
     assert.match(prompt, /\[CREWVANE_METHOD_CONTEXT\]/);
     assert.match(prompt, /Agent 接入流程/);
-    assert.match(prompt, /Herdr 现场恢复/);
+    assert.match(prompt, /工作现场恢复/);
     assert.match(prompt, /发布复核 \(acme\.release-review@1\.0\.0\)：可用/);
     assert.match(prompt, /发布前核对真实下载物/);
     assert.doesNotMatch(prompt, /方法正文/);

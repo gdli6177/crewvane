@@ -19,7 +19,7 @@ await writeFile(join(workspace, "AGENTS.md"), `# 隔离验收
 const service = new WorkspaceService(workspace);
 const projectEntry = await service.execute({ type: "project.add", name: "隔离执行项目", path: project });
 const agent = process.env.CREWVANE_TRIAL_AGENT ||
-  `omp --tools=read,bash,edit,write --approval-mode=yolo --no-skills --no-rules --no-extensions --session-dir ${join(trial, "agent-sessions")}`;
+  "omp";
 await service.execute({ type: "agents.configure", preferences: { concierge: agent, owner: agent } });
 await service.execute({
   type: "workspace.autonomy.set",
@@ -66,9 +66,9 @@ try {
   await expect.poll(async () => {
     const current = await state();
     const item = current.goals.find(item => item.id === goal.id);
-    if (item?.dispatch?.status === "failed" && !item.herdr)
+    if (item?.dispatch?.status === "failed" && !item.scene)
       throw new Error(item.dispatch.detail || current.concierge.detail || "首次派发失败");
-    return Boolean(item?.herdr?.agent && item.attention?.kind === "decision");
+    return Boolean(item?.scene?.locator.paneId && item.attention?.kind === "decision");
   }, { timeout: 240_000, intervals: [1000] }).toBe(true);
   const before = (await state()).goals.find(item => item.id === goal.id);
   await page.evaluate(id => window.crewvane.openHerdr(id), goal.id);
@@ -80,11 +80,11 @@ try {
   await expect.poll(async () => {
     const listed = await herdr(["agent", "list"]);
     const data = JSON.parse(listed.stdout);
-    const entry = (data.result?.agents ?? data.agents).find(item => item.name === before.herdr.agent);
+    const entry = (data.result?.agents ?? data.agents).find(item => item.pane_id === before.scene.locator.paneId);
     return ["idle", "done"].includes(entry?.agent_status);
   }, { timeout: 90_000, intervals: [1000] }).toBe(true);
   const quote = "采用方案 A，先确认最小范围。这就是我对当前选择问题的决定。";
-  const reply = await herdr(["agent", "prompt", before.herdr.agent, quote, "--wait", "--timeout", "120000"], 130_000);
+  const reply = await herdr(["agent", "prompt", before.scene.locator.paneId, quote, "--wait", "--timeout", "120000"], 130_000);
   assert.ok(!reply.error || /agent_prompt_stalled/.test(reply.stderr), reply.stderr || reply.error);
   await expect.poll(async () => {
     const current = await state();
@@ -93,7 +93,7 @@ try {
   const current = await state(), after = current.goals.find(item => item.id === goal.id);
   assert.equal(after.attention, null);
   assert.equal(after.sceneReply.quote, quote);
-  assert.deepEqual(after.herdr, before.herdr, "reuse the original owner scene");
+  assert.deepEqual(after.scene, before.scene, "reuse the original owner scene");
   assert.equal(current.decisions.find(item => item.goalId === goal.id).source, "Herdr 负责人现场");
   await page.getByRole("button", { name: "隐藏终端" }).click();
   await page.getByRole("button", { name: "注意力", exact: true }).click();
@@ -101,7 +101,7 @@ try {
   await page.screenshot({ path: join(trial, "after-scene-answer.png") });
   await writeFile(join(trial, "verified-state.json"), JSON.stringify(current, null, 2));
   assert.equal(errors.length, 0, errors.join("\n"));
-  console.log(JSON.stringify({ result: "passed", trial, goalId: goal.id, owner: after.herdr.agent, quote }));
+  console.log(JSON.stringify({ result: "passed", trial, goalId: goal.id, owner: after.scene.locator.paneId, quote }));
 } catch (error) {
   await writeFile(join(trial, "failed-state.json"), JSON.stringify(await state(), null, 2));
   const listed = await herdr(["agent", "list"]);

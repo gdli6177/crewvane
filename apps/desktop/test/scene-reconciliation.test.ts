@@ -26,36 +26,105 @@ test("viewing a scene alone never queues a reconciliation; a real work cycle doe
   await live(service, id, "done");
   let calls = 0;
   const connection = { async requestSceneReply() { calls++; return true; } };
-  await reconcileSceneReply(service, id, connection);
+  await reconcileSceneReply(service, id, connection, { graceMs: 0 });
   assert.equal(calls, 0);
   await live(service, id, "working");
   await live(service, id, "done");
   await Promise.all([
-    reconcileSceneReply(service, id, connection),
-    reconcileSceneReply(new WorkspaceService(root), id, connection),
+    reconcileSceneReply(service, id, connection, { graceMs: 0 }),
+    reconcileSceneReply(new WorkspaceService(root), id, connection, { graceMs: 0 }),
   ]);
   assert.equal(calls, 1);
   // Its own reconciliation round must not create an endless work/check loop.
   await live(service, id, "working");
   await live(service, id, "done");
-  await reconcileSceneReply(service, id, connection);
+  await reconcileSceneReply(service, id, connection, { graceMs: 0 });
   assert.equal(calls, 1);
   assert.equal(attentionGoals((await service.read()).goals).length, 1);
+});
+test("legacy scene reconciliation waits through a user-interaction grace period", async () => {
+  const { service, id } = await fixture();
+  await service.execute({ type: "scene.visit", goalId: id });
+  await live(service, id, "working");
+  await live(service, id, "done");
+  const visit = (await service.read()).goals[0]!.sceneVisit!;
+  assert.ok(visit.pendingAt);
+  let calls = 0;
+  const connection = { async requestSceneReply() { calls++; return true; } };
+  await reconcileSceneReply(service, id, connection, {
+    now: () => new Date(Date.parse(visit.pendingAt!) + 59_999),
+  });
+  assert.equal(calls, 0);
+  await reconcileSceneReply(service, id, connection, {
+    now: () => new Date(Date.parse(visit.pendingAt!) + 60_000),
+  });
+  assert.equal(calls, 1);
+});
+test("hook-capable owners skip scene reconciliation and a real turn cancels the fallback", async () => {
+  const { service, id } = await fixture();
+  const at = new Date().toISOString();
+  await service.execute({
+    type: "agent.runtime.register",
+    goalId: id,
+    attempt: {
+      goalId: id, attemptId: "attempt-hook-owner", agent: "owner-a",
+      adapter: "omp", startedAt: at,
+    },
+    hookTokenHash: "a".repeat(64),
+    capabilities: ["turn.started", "turn.settled"],
+  });
+  await service.execute({ type: "scene.visit", goalId: id });
+  await live(service, id, "working");
+  await live(service, id, "done");
+  let calls = 0;
+  await reconcileSceneReply(service, id, {
+    async requestSceneReply() { calls++; return true; },
+  }, {
+    now: () => new Date(Date.now() + 60_000),
+  });
+  assert.equal(calls, 0);
+  assert.equal((await service.read()).goals[0]!.sceneVisit?.status, "pending");
+  await service.execute({
+    type: "agent.runtime.event",
+    event: {
+      version: "v1", eventId: "event-user-turn", sequence: 1,
+      at: new Date(Date.now() + 60_001).toISOString(),
+      source: "hook", agent: "owner-a", adapter: "omp", goalId: id,
+      attemptId: "attempt-hook-owner", type: "turn.started", turnId: "turn-user",
+      content: { text: "用户在现场提出的真实问题", sha256: "b".repeat(64), truncated: false },
+    },
+  });
+  assert.equal((await service.read()).goals[0]!.sceneVisit, undefined);
+});
+test("a human message from the app cancels fallback reconciliation without resolving attention", async () => {
+  const { service, id } = await fixture();
+  await service.execute({ type: "scene.visit", goalId: id });
+  await live(service, id, "working");
+  await live(service, id, "done");
+  assert.equal((await service.read()).goals[0]!.sceneVisit?.status, "pending");
+  await service.execute({ type: "goal.message", goalId: id, text: "补充一个边界条件" });
+  const current = (await service.read()).goals[0]!;
+  assert.equal(current.sceneVisit, undefined);
+  assert.ok(current.attention);
 });
 test("an owner's semantic receipt skips reconciliation, and failed synchronization can be explicitly retried", async () => {
   const { service, id } = await fixture();
   await service.execute({ type: "scene.visit", goalId: id });
   await live(service, id, "working"); await live(service, id, "done");
-  await reconcileSceneReply(service, id, { async requestSceneReply() { throw new Error("连接中断"); } });
+  await reconcileSceneReply(service, id, {
+    async requestSceneReply() { throw new Error("连接中断"); },
+  }, { graceMs: 0 });
   assert.equal((await service.read()).goals[0]!.sceneVisit?.status, "failed");
   await service.execute({ type: "scene.visit", goalId: id, retry: true });
   await reconcileSceneReply(service, id, { async requestSceneReply(goal) {
     await service.execute({ type: "goal.scene-reply", goalId: id,
       attentionId: goal.attention!.id!, quote: "先交付核心功能。", summary: "已确认范围。", actor: "owner-a" });
     return true;
-  } });
+  } }, { graceMs: 0 });
   let calls = 0;
-  await reconcileSceneReply(service, id, { async requestSceneReply() { calls++; return true; } });
+  await reconcileSceneReply(service, id, {
+    async requestSceneReply() { calls++; return true; },
+  }, { graceMs: 0 });
   assert.equal(calls, 0);
   assert.equal((await service.read()).goals[0]!.sceneReply?.quote, "先交付核心功能。");
 });

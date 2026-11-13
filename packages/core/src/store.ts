@@ -13,6 +13,7 @@ import {
 import { reconcileAutonomyDefaults } from "./autonomy.js";
 import { decisionMarkdown } from "./governance.js";
 import { normalizeExternalWaits } from "./waiting.js";
+import { isSceneReference, type LegacySceneV0 } from "./session-types.js";
 export { initialState, newId } from "./model.js";
 const DEFAULT_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const DEFAULT_EVENT_TAIL_BYTES = 4 * 1024 * 1024;
@@ -99,7 +100,7 @@ export async function compactEventLogIfNeeded(
   await rename(temporary, path);
   return { compacted: true, before, after: Buffer.byteLength(body) };
 }
-function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
+function validateShape(value: unknown, version: 2 | 3 | 4): WorkspaceState {
   if (!record(value))
     throw new IncompatibleWorkspaceStateError(
       "invalid-state",
@@ -117,6 +118,12 @@ function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
   if (!record(value.concierge) || !nonEmptyString(value.concierge.session) ||
     !["not_ready", "ready", "error"].includes(String(value.concierge.status)))
     invalidState("工作区快照中的管家状态无效。");
+  if (version === 4 && (!Number.isSafeInteger(value.backendEpoch) ||
+    (value.backendEpoch as number) < 0))
+    invalidState("工作区后端代次无效。");
+  if (version === 4 && value.concierge.scene !== undefined &&
+    !isSceneReference(value.concierge.scene))
+    invalidState("管家现场身份无效。");
   if (value.decisions !== undefined && !Array.isArray(value.decisions))
     invalidState("工作区快照中的决定账本无效。");
   for (const project of value.projects)
@@ -131,6 +138,8 @@ function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
       !Array.isArray(goal.activities) || !nonEmptyString(goal.createdAt) ||
       !nonEmptyString(goal.updatedAt))
       invalidState("工作区快照包含结构不完整的目标。");
+    if (version === 4 && goal.scene !== undefined && !isSceneReference(goal.scene))
+      invalidState("目标现场身份无效。");
     if (goal.skills !== undefined) {
       if (!Array.isArray(goal.skills) || goal.skills.length > 8 ||
         goal.skills.some(skill =>
@@ -172,7 +181,9 @@ function validateShape(value: unknown, version: 2 | 3): WorkspaceState {
 }
 function migrateStateV2(value: unknown): WorkspaceState {
   const state = validateShape(value, 2);
-  state.version = 3;
+  // v2 first gains conservative v3 business defaults; the next migration
+  // adds session identities without changing authorization.
+  (state as unknown as { version: number }).version = 3;
   state.autonomy = defaultWorkspaceAutonomy();
   state.bots = [];
   state.botRequests = [];
@@ -187,6 +198,47 @@ function migrateStateV2(value: unknown): WorkspaceState {
     delete goal.brief;
     delete goal.release;
   }
+  return migrateStateV3(state);
+}
+function legacyScene(reference: unknown): LegacySceneV0 | undefined {
+  if (!record(reference) || !nonEmptyString(reference.session)) return;
+  return {
+    version: 0,
+    backend: "herdr",
+    verification: "unverified",
+    reference: Object.fromEntries(
+      ["session", "workspaceId", "tabId", "paneId", "agent", "transport", "processId", "launchPolicy"]
+        .filter(key => reference[key] !== undefined)
+        .map(key => [key, structuredClone(reference[key])]),
+    ) as unknown as LegacySceneV0["reference"],
+  };
+}
+function migrateStateV3(value: unknown): WorkspaceState {
+  const state = validateShape(value, 3);
+  state.version = 4;
+  state.backendEpoch = 0;
+  state.concierge.legacyScene = legacyScene(state.concierge);
+  for (const item of state.goals) {
+    if (item.herdr) {
+      item.legacyScene = legacyScene(item.herdr);
+      delete item.herdr;
+    }
+    const runtime = item.agentRuntime;
+    if (runtime?.attempt.scene) {
+      runtime.attempt.legacyScene = legacyScene(runtime.attempt.scene);
+      delete runtime.attempt.scene;
+    }
+    if (item.ownerLaunchRecovery)
+      item.ownerLaunchRecovery.legacyScene = legacyScene(item.ownerLaunchRecovery);
+    const sites = item.autonomy?.verificationSite;
+    if (sites) sites.legacyScene = legacyScene(sites.reference);
+    for (const verification of item.autonomy?.lastVerification ? [item.autonomy.lastVerification] : []) {
+      if (verification.reviewerHerdr) {
+        verification.legacyScene = legacyScene(verification.reviewerHerdr);
+        delete verification.reviewerHerdr;
+      }
+    }
+  }
   return state;
 }
 export function validateState(value: unknown): WorkspaceState {
@@ -196,7 +248,7 @@ export function validateState(value: unknown): WorkspaceState {
       "工作区快照不是有效对象。",
     );
   if (value.version === 2) return migrateStateV2(value);
-  const state = validateShape(value, 3);
+  const state = value.version === 3 ? migrateStateV3(value) : validateShape(value, 4);
   if (state.autonomy !== undefined &&
     (!record(state.autonomy) ||
       !["human-review", "auto-with-verification"].includes(String(state.autonomy.acceptance)) ||
@@ -255,14 +307,22 @@ export class WorkspaceStore {
     const path = join(directory, "state.json"),
       raw = await readFile(path, "utf8"),
       parsed: unknown = JSON.parse(raw);
-    if (!record(parsed) || parsed.version !== 2) return validateState(parsed);
-    const migrated = migrateStateV2(parsed),
-      backup = join(directory, "state.v2.backup.json");
+    if (!record(parsed) || ![2, 3].includes(parsed.version as number)) return validateState(parsed);
+    const migrated = validateState(parsed);
+    // validateState mutates the parsed object. The backup version is read
+    // from the original bytes, never the in-memory migrated value.
+    const originalVersion = (JSON.parse(raw) as { version: number }).version;
+    const backupPath = join(directory, `state.v${originalVersion}.backup.json`);
     try {
-      await lstat(backup);
+      const info = await lstat(backupPath);
+      if (info.isSymbolicLink() || !info.isFile() ||
+        stateDigest(await readFile(backupPath, "utf8")) !== stateDigest(raw))
+        throw new Error("原版本备份与当前快照不一致；为保护新数据，已停止升级。请保留备份并检查版本。");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await writeFile(backup, raw, { mode: 0o600 });
+      await writeFile(backupPath, raw, { mode: 0o600, flag: "wx" });
+      if (stateDigest(await readFile(backupPath, "utf8")) !== stateDigest(raw))
+        throw new Error("原版本备份未能完整保存，已停止升级。");
     }
     const temporary = `${path}.${process.pid}-${randomUUID()}.tmp`,
       serialized = `${JSON.stringify(migrated, null, 2)}\n`;

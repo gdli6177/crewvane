@@ -31,7 +31,8 @@ export const defaultWorkspaceAutonomy = (): WorkspaceAutonomy => ({
   updatedAt: new Date().toISOString(),
 });
 export const initialState = (recovery?: WorkspaceRecovery): WorkspaceState => ({
-  version: 3,
+  version: 4,
+  backendEpoch: 0,
   name: "我的工作台",
   projects: [{
     id: "personal",

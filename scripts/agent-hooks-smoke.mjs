@@ -51,7 +51,10 @@ await service.execute({
   type: "agents.configure",
   preferences: {
     concierge,
-    owner: "codex --no-daemon --dangerously-bypass-hook-trust --no-alt-screen -a never -s danger-full-access",
+    // Explicit one-off trust applies ONLY to this freshly created, vetted
+    // test HOME. Product launchers never add this flag to user commands.
+    // Installation must still report waiting-trust until an event arrives.
+    owner: "codex --no-daemon --no-alt-screen --dangerously-bypass-hook-trust",
   },
 });
 await service.execute({
@@ -75,6 +78,9 @@ async function launchApp() {
   page = await app.firstWindow();
   page.on("pageerror", error => errors.push(String(error)));
   await page.getByRole("heading", { name: "现在，可以安心了。" }).waitFor();
+  await page.evaluate(() => window.crewvane.saveSceneSettings({
+    openWith: "embedded", terminal: "auto",
+  }));
   await expect.poll(async () => (await page.evaluate(() =>
     window.crewvane.herdrStatus())).installed, { timeout: 90_000 }).toBe(true);
   herdrBinary = (await page.evaluate(() => window.crewvane.herdrStatus())).executable;
@@ -93,7 +99,7 @@ try {
     .find(item => item.id === "codex");
   assert.equal(status.status, "waiting-trust");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByText("Agent 接入", { exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole("heading", { name: "Agent 接入", exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(trial, "agent-access-dark.png"), animations: "disabled" });
   await page.getByRole("button", { name: "浅色模式", exact: true }).click();
   await page.screenshot({ path: join(trial, "agent-access-light.png"), animations: "disabled" });
@@ -119,7 +125,7 @@ try {
   ], { env: { ...environment, HERDR_ENV: "1", HERDR_SESSION: session,
     CREWVANE_WORKSPACE: workspace, CREWVANE_HERDR_BINARY: herdrBinary },
   timeout: 190_000, maxBuffer: 1_000_000 })).stdout);
-  assert.ok(launch.reference?.paneId || launch.result?.reference?.paneId);
+  assert.ok(launch.scene?.locator?.paneId || launch.result?.scene?.locator?.paneId);
   trace("owner-launched");
   await expect.poll(async () => (await goal())?.agentRuntime?.lastPrompt?.text,
     { timeout: 180_000, intervals: [500] }).toContain("故意模拟");
@@ -134,6 +140,8 @@ try {
   assert.equal((await goal()).attention, null);
   assert.equal((await goal()).status, "active");
   const attempt = (await goal()).agentRuntime.attempt.attemptId;
+  const ownerPane = (await goal()).scene.locator.paneId;
+  assert(ownerPane);
   const adapterStatus = (await page.evaluate(() => window.crewvane.agentRuntimeStatus()))
     .find(item => item.id === "codex");
   assert.equal(adapterStatus.status, "installed");
@@ -142,20 +150,26 @@ try {
   trace("semantic-write-verified");
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await page.getByText("真实 Codex Hook 验收", { exact: true }).click();
+  try {
+    await expect(page.locator(".terminal-panel")).toBeVisible({ timeout: 8_000 });
+  } catch (error) {
+    const opened = await page.evaluate(id => window.crewvane.openScene(id), goalId);
+    throw new Error(`Goal-row scene did not open; explicit IPC result: ${JSON.stringify(opened)}; ${error}`);
+  }
   await page.getByRole("button", { name: "目标记录", exact: true }).click();
   await page.getByRole("region", { name: "Agent 运行状态" }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(trial, "runtime-dark.png"), animations: "disabled" });
   await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
   await page.screenshot({ path: join(trial, "runtime-light.png"), animations: "disabled" });
   await page.getByRole("button", { name: "关闭", exact: true }).click();
-  await herdr(["agent", "wait", "owner-hooks", "--timeout", "120000"], 130_000);
+  await herdr(["agent", "wait", ownerPane, "--timeout", "120000"], 130_000);
   await page.getByRole("button", { name: "隐藏终端", exact: true }).click();
   await page.getByRole("button", { name: "全部目标", exact: true }).click();
   await expect(page.locator(".goal-row").filter({ hasText: "真实 Codex Hook 验收" })
     .getByText("本轮已回报", { exact: true })).toBeVisible({ timeout: 30_000 });
   await page.screenshot({ path: join(trial, "real-written-idle-list.png"), animations: "disabled" });
   await app.close(); app = undefined;
-  await herdr(["agent", "prompt", "owner-hooks",
+  await herdr(["agent", "prompt", ownerPane,
     `现场补充验收：仅运行 ${cli} goal progress ${goalId} --root ${workspace} --summary "应用关闭期间已真实写回" --next "恢复应用检查离线事件"，然后回复 CV_HOOK_OFFLINE_DONE。`,
     "--wait", "--timeout", "120000"], 130_000);
   const spool = join(workspace, ".crewvane/runtime/spool");
@@ -219,6 +233,15 @@ try {
   trace("passed");
 } catch (error) {
   if (page) await page.screenshot({ path: join(trial, "failure.png") }).catch(() => {});
+  const current = goalId ? await goal().catch(() => undefined) : undefined;
+  const pane = current?.scene?.locator?.paneId;
+  if (pane && herdrBinary) {
+    const result = await exec(herdrBinary, ["--session", session, "pane", "read", pane,
+      "--source", "recent-unwrapped", "--lines", "100"], {
+      env: environment, timeout: 10_000, maxBuffer: 100_000,
+    }).catch(error => ({ stdout: String(error) }));
+    await writeFile(join(trial, "failure-terminal.txt"), result.stdout);
+  }
   if (goalId) await writeFile(join(trial, "failure-goal.json"),
     JSON.stringify(await goal(), null, 2));
   console.error(JSON.stringify({ result: "failed", trial, error: String(error) }));

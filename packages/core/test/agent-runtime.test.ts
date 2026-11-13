@@ -68,7 +68,8 @@ test("a written Hook receipt beats Herdr idle, while expired receipt timers cann
     runtimeEvent(goalId, 2, "turn.settled", { turnId: "written", at: start }),
   ]) await service.execute({ type: "agent.runtime.event", event: item });
   await service.execute({
-    type: "goal.progress", goalId, summary: "真实进展", next: "继续后续验证",
+    type: "goal.progress", goalId, actor: "owner-a",
+    summary: "真实进展", next: "继续后续验证",
   });
   await service.execute({
     type: "live.sync", presences: { [goalId]: {
@@ -173,7 +174,7 @@ function runtimeEvent(
 test("runtime registration, event deduplication, sequence and attempt isolation are explicit", async () => {
   const { service, goalId } = await fixture();
   let runtime = (await service.read()).goals[0]!.agentRuntime!;
-  assert.equal(runtime.attempt.scene?.paneId, "w1:p2");
+  assert.equal(runtime.attempt.legacyScene?.reference.paneId, "w1:p2");
   assert.deepEqual(runtime.capabilities, [
     "session.started",
     "turn.started",
@@ -536,6 +537,59 @@ test("a structured write after protocol_missing clears the stale watchdog prompt
   });
   const goal = (await service.read()).goals[0]!;
   assert.equal(goal.agentRuntime?.receipt?.status, "written");
+  assert.equal(goal.watchdog, undefined);
+});
+
+test("a concierge reconciliation note cannot satisfy an owner write-back or restart settled patrol", async () => {
+  const { service, goalId } = await fixture();
+  const current = Date.now();
+  const liveAt = new Date(current - 120_000).toISOString();
+  const inspectAt = new Date(current + 100_000).toISOString();
+  await service.execute({
+    type: "live.sync",
+    presences: {
+      [goalId]: { state: "idle", reachable: true, checkedAt: liveAt },
+    },
+  });
+  const [request] = await service.execute({
+    type: "watchdog.inspect",
+    at: inspectAt,
+  }) as Awaited<ReturnType<typeof inspectWatchdog>>;
+  assert.equal(request?.reason, "settled");
+  await service.execute({
+    type: "watchdog.report",
+    goalId,
+    at: inspectAt,
+    basis: request!.basis,
+    outcome: "contacted",
+  });
+
+  await service.execute({
+    type: "goal.progress",
+    goalId,
+    actor: "concierge",
+    summary: "已核对负责人和现有成果，尚未发现新的可确认结果。",
+    next: "继续核对原负责人。",
+  });
+  let goal = (await service.read()).goals[0]!;
+  assert.equal(goal.watchdog?.reason, "settled");
+  assert.ok(goal.activities.some(activity =>
+    activity.actor === "concierge" &&
+    activity.text.includes("尚未发现新的可确认结果")));
+  assert.deepEqual(await service.execute({
+    type: "watchdog.inspect",
+    at: new Date(current + 240_000).toISOString(),
+  }), []);
+  assert.equal((await service.read()).goals[0]!.watchdog?.reason, "settled");
+
+  await service.execute({
+    type: "goal.progress",
+    goalId,
+    actor: "owner-a",
+    summary: "负责人已补交真实结果并对齐下一步。",
+    next: "继续执行。",
+  });
+  goal = (await service.read()).goals[0]!;
   assert.equal(goal.watchdog, undefined);
 });
 

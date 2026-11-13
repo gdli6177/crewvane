@@ -1,3 +1,4 @@
+import { hasGoalScene } from "./goalEntry.js";
 import { useState } from "react";
 import {
   Bot,
@@ -360,7 +361,7 @@ export function GoalActionDock({
           <CircleAlert size={18} />
         </span>
         <div>
-          <strong>{goal.herdr ? "负责人现场需要你处理" : "需要你处理"}</strong>
+          <strong>{hasGoalScene(goal) ? "负责人现场需要你处理" : "需要你处理"}</strong>
           <small>{goal.attention?.summary || goal.next}</small>
         </div>
         <div className="goal-action-buttons">
@@ -373,7 +374,7 @@ export function GoalActionDock({
             icon={<SquareTerminal size={15} />}
             onClick={() => void service.openHerdr(goal.id)}
           >
-            {goal.herdr ? "打开工作现场" : "找管家"}
+            {hasGoalScene(goal) ? "打开工作现场" : "找管家"}
           </Button>
         </div>
       </div>

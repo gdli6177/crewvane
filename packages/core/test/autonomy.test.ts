@@ -76,7 +76,7 @@ async function deliver(
 test("acceptance resolution follows goal, project, workspace priority and defaults to human review", async () => {
   const { service } = await fixture();
   let state = await service.read();
-  assert.equal(state.version, 3);
+  assert.equal(state.version, 4);
   assert.equal(state.autonomy.acceptance, "human-review");
   assert.equal(state.autonomy.initializedAt, undefined);
   const item = await service.execute({
@@ -943,7 +943,7 @@ test("v2 workspaces migrate in place with a backup and conservative autonomy def
   await mkdir(join(root, ".crewvane"), { recursive: true });
   await writeFile(join(root, ".crewvane/state.json"), JSON.stringify(legacy));
   const state = await service.read();
-  assert.equal(state.version, 3);
+  assert.equal(state.version, 4);
   assert.equal(state.goals[0]?.kind, "delivery");
   assert.equal(state.goals[0]?.autonomy, undefined);
   assert.equal(state.autonomy.acceptance, "human-review");

@@ -7,12 +7,27 @@ const SETTLED_AFTER = 90_000;
 const ESCALATE_AFTER = 10 * 60_000;
 const RETRY_AFTER = 60_000;
 const NUDGE_AFTER = 15 * 60_000;
+const BUSINESS_WRITES = new Set([
+  "progress", "waiting", "decision", "delivery", "resolved", "review", "blocked",
+]);
 export interface WatchdogRequest { goalId: string; reason: WatchdogReason; basis: string }
 function latestProgress(goal: Goal) {
   return goal.activities.filter(activity => activity.kind !== "watchdog").at(-1);
 }
 function progressAt(goal: Goal) {
   return latestProgress(goal)?.at ?? goal.createdAt;
+}
+function ownerReportedCurrentDispatch(goal: Goal) {
+  const dispatchedAt = Date.parse(
+    goal.dispatch?.at ?? goal.agentRuntime?.attempt.startedAt ?? goal.createdAt,
+  );
+  if (Number.isFinite(Date.parse(goal.agentRuntime?.lastSemanticWriteAt ?? "")) &&
+    Date.parse(goal.agentRuntime!.lastSemanticWriteAt!) >= dispatchedAt)
+    return true;
+  return goal.activities.some(activity =>
+    !["系统", "你", "管家", "concierge", "巡检"].includes(activity.actor) &&
+    BUSINESS_WRITES.has(activity.kind) &&
+    Date.parse(activity.at) >= dispatchedAt);
 }
 function concise(value: string, limit = 180) {
   const characters = Array.from(value.replace(/\s+/g, " ").trim());
@@ -33,6 +48,28 @@ function record(goal: Goal, at: string, text: string) {
   goal.activities.push({ id: newId("act"), at, actor: "巡检", kind: "watchdog", text });
   goal.updatedAt = at;
 }
+function escalateReview(
+  goal: Goal,
+  watch: NonNullable<Goal["watchdog"]>,
+  now: number,
+  at: string,
+  reason: WatchdogReason,
+  noProgressMinutes: number,
+) {
+  if (!watch.contactedAt || now - Date.parse(watch.contactedAt) < ESCALATE_AFTER || watch.escalatedAt)
+    return;
+  watch.escalatedAt = at;
+  const progress = latestProgress(goal);
+  const lastProgress = progress
+    ? `${progress.actor}：${concise(progress.text)}`
+    : "没有可用的历史进展";
+  if (!goal.attention) goal.attention = {
+    id: newId("attention"),
+    kind: "intervention", source: "watchdog", since: at,
+    summary: `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}。最后进展：${lastProgress}。已请管家处理 10 分钟仍未恢复，请查看现场。`,
+  };
+  record(goal, at, `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}；已联系管家，但 10 分钟仍无恢复进展，现请你查看现场。`);
+}
 function reasonFor(
   goal: Goal,
   now: number,
@@ -41,7 +78,7 @@ function reasonFor(
   const age = now - Date.parse(progressAt(goal));
   if (goal.agentRuntime?.receipt?.status === "protocol_missing")
     return "protocol_missing";
-  if (!goal.herdr?.paneId && !goal.herdr?.agent && goal.dispatch?.status !== "pending" &&
+  if (!goal.scene && !goal.herdr?.paneId && !goal.herdr?.agent && goal.dispatch?.status !== "pending" &&
     now - Date.parse(goal.dispatch?.at ?? goal.createdAt) >= OWNER_START_GRACE) return "unassigned";
   if (goal.agentRuntime?.lastEventType === "agent.blocked" &&
     !(goal.live?.state === "working" &&
@@ -59,7 +96,7 @@ function reasonFor(
   // concierge to reconcile the actual owner, rather than guessing from text.
   if (goal.live?.reachable === true && ["idle", "done"].includes(goal.live.state) &&
     now - Date.parse(goal.live.checkedAt) >= SETTLED_AFTER &&
-    receipt?.status !== "written")
+    receipt?.status !== "written" && !ownerReportedCurrentDispatch(goal))
     return "settled";
 }
 export function inspectWatchdog(
@@ -75,10 +112,24 @@ export function inspectWatchdog(
     if (!inspectable(goal) ||
       (goal.attention && goal.attention.source !== "watchdog" && goal.attention.source !== "live")) continue;
     const reason = reasonFor(goal, now, staleAfter), basis = progressAt(goal);
+    const contactedAt = Date.parse(goal.watchdog?.contactedAt ?? "");
+    const liveCheckedAt = Date.parse(goal.live?.checkedAt ?? "");
+    // A concierge's reconciliation note is a semantic write and therefore
+    // changes progressAt, but it is not new activity from the owner. Keep the
+    // original settled review until the owner scene actually reports a new
+    // observation; otherwise every note would start a fresh 90-second loop.
+    const settledAwaitingSceneChange = reason === "settled" &&
+      goal.watchdog?.reason === "settled" && Number.isFinite(contactedAt) &&
+      (!Number.isFinite(liveCheckedAt) || liveCheckedAt <= contactedAt);
     if (!reason) {
       if (goal.attention?.source === "watchdog" || goal.attention?.source === "live") goal.attention = null;
       delete goal.watchdog;
       delete goal.recovery;
+      continue;
+    }
+    if (settledAwaitingSceneChange) {
+      const watch = goal.watchdog!;
+      escalateReview(goal, watch, now, at, reason, noProgressMinutes);
       continue;
     }
     if (!goal.watchdog || goal.watchdog.reason !== reason || goal.watchdog.basis !== basis) {
@@ -89,19 +140,7 @@ export function inspectWatchdog(
       else delete goal.recovery;
     }
     const watch = goal.watchdog;
-    if (watch.contactedAt && now - Date.parse(watch.contactedAt) >= ESCALATE_AFTER && !watch.escalatedAt) {
-      watch.escalatedAt = at;
-      const progress = latestProgress(goal);
-      const lastProgress = progress
-        ? `${progress.actor}：${concise(progress.text)}`
-        : "没有可用的历史进展";
-      if (!goal.attention) goal.attention = {
-        id: newId("attention"),
-        kind: "intervention", source: "watchdog", since: at,
-        summary: `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}。最后进展：${lastProgress}。已请管家处理 10 分钟仍未恢复，请查看现场。`,
-      };
-      record(goal, at, `目标「${goal.title}」${reasonLabel(reason, noProgressMinutes)}；已联系管家，但 10 分钟仍无恢复进展，现请你查看现场。`);
-    }
+    escalateReview(goal, watch, now, at, reason, noProgressMinutes);
     if (watch.escalatedAt) continue;
     const interval = watch.lastError ? RETRY_AFTER : NUDGE_AFTER;
     if (!watch.attemptedAt || now - Date.parse(watch.attemptedAt) >= interval)

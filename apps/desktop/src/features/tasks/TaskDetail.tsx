@@ -1,3 +1,4 @@
+import { hasGoalScene } from "../goals/goalEntry.js";
 import { useState } from "react";
 import { Check, Clock3, Send } from "lucide-react";
 import type { CrewvaneCommand, Goal } from "../../../../../packages/core/src/types.js";
@@ -62,7 +63,7 @@ export function TaskDetail({ goal, service, busy, error, close, delegated, notif
         {!ended && (
           <>
             <div className="task-actions">
-              {goal.herdr && <Button variant="ghost" size="sm" disabled={busy}
+              {hasGoalScene(goal) && <Button variant="ghost" size="sm" disabled={busy}
                 onClick={() => void service.openHerdr(goal.id)}>回到现场</Button>}
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => setNotesOpen(!notesOpen)}>补充说明</Button>
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => setReminderOpen(!reminderOpen)}>
@@ -113,7 +114,7 @@ export function TaskDetail({ goal, service, busy, error, close, delegated, notif
         <div className="modal-actions">
           {ended ? (
             <>
-              {goal.status === "dropped" && !goal.herdr && <Button variant="secondary" disabled={busy} onClick={() => void act(
+              {goal.status === "dropped" && !hasGoalScene(goal) && <Button variant="secondary" disabled={busy} onClick={() => void act(
                 { type: "goal.restore", goalId: goal.id }, "已恢复到待办池", close)}>恢复到待办池</Button>}
               <Button variant="danger" disabled={busy} onClick={() => {
                 if (window.confirm("永久删除这条记录与附件？此操作无法恢复。"))

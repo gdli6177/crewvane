@@ -1,3 +1,6 @@
+import type {
+  BackendBinding, BackendHandoff, LegacySceneV0, ManagedSessionContext, SceneReferenceV1, SceneLaunchIntent,
+} from "./session-types.js";
 export type GoalStatus = "backlog" | "active" | "waiting" | "review" | "completed" | "dropped";
 export type GoalKind = "delivery" | "discovery" | "release";
 export type AcceptanceMode = "human-review" | "auto-with-verification";
@@ -93,6 +96,8 @@ export interface OwnerLaunchRecovery {
   paneId?: string;
   attachedAt?: string;
   detail?: string;
+  scene?: SceneReferenceV1;
+  legacyScene?: LegacySceneV0;
 }
 export type AgentRuntimeEventType =
   | "session.started"
@@ -114,7 +119,8 @@ export interface AgentAttempt {
   adapter: AgentRuntimeAdapterId;
   startedAt: string;
   currentTurnId?: string;
-  scene?: HerdrReference;
+  scene?: SceneReferenceV1;
+  legacyScene?: LegacySceneV0;
 }
 export interface AgentRuntimeReceipt {
   turnId: string;
@@ -338,10 +344,14 @@ export interface Verification {
   criteria: VerificationCriterion[];
   reviewer: string;
   reviewerHerdr?: HerdrReference;
+  reviewerScene?: SceneReferenceV1;
+  legacyScene?: LegacySceneV0;
   verifiedAt: string;
 }
 export interface VerificationSite {
-  reference: HerdrReference;
+  reference?: HerdrReference;
+  scene?: SceneReferenceV1;
+  legacyScene?: LegacySceneV0;
   status: "launching" | "ready" | "blocked" | "failed";
   at: string;
   detail?: string;
@@ -379,6 +389,7 @@ export interface GoalAutonomy {
   continuation?: Continuation;
   lastVerification?: Verification;
   verificationSite?: VerificationSite;
+  verificationLaunch?: SceneLaunchIntent;
   acceptance?: AcceptanceRecord;
   boundaryChange?: BoundaryChange;
 }
@@ -483,6 +494,11 @@ export interface Goal {
   delivery?: Delivery; brief?: GoalBrief; briefHistory?: GoalBrief[];
   autonomy?: GoalAutonomy; release?: ReleaseTarget;
   herdr?: HerdrReference; ownerResume?: OwnerResume; live?: LivePresence;
+  scene?: SceneReferenceV1;
+  legacyScene?: LegacySceneV0;
+  sceneHistory?: SceneReferenceV1[];
+  backendHandoff?: BackendHandoff;
+  sceneLaunch?: SceneLaunchIntent;
   reviewRounds?: number; reviewLimit?: number;
   risk?: RiskEscalation;
   dispatch?: { id?: string; kind?: "resume" | "restart" | "follow_up" | "feedback" | "scene_reply" | "continuation" | "verification"; note?: string; status: "pending" | "sent" | "unconfirmed" | "failed"; at: string; detail?: string };
@@ -511,11 +527,14 @@ export interface SceneVisit {
   at: string;
   worked: boolean;
   status: "watching" | "pending" | "checking" | "checked" | "failed";
+  pendingAt?: string;
   attemptedAt?: string;
   detail?: string;
 }
 export interface WorkspaceState {
-  version: 3; name: string; projects: Project[]; workflows: Workflow[]; goals: Goal[];
+  version: 4; name: string; projects: Project[]; workflows: Workflow[]; goals: Goal[];
+  backendEpoch: number;
+  backendBinding?: BackendBinding;
   autonomy: WorkspaceAutonomy;
   bots?: BotBinding[];
   botRequests?: BotRequestReceipt[];
@@ -523,6 +542,10 @@ export interface WorkspaceState {
   agents?: AgentPreferences;
   recovery?: WorkspaceRecovery;
   concierge: HerdrReference & {
+    scene?: SceneReferenceV1;
+    legacyScene?: LegacySceneV0;
+    launch?: SceneLaunchIntent;
+    initializedAttemptId?: string;
     status: "not_ready" | "ready" | "error";
     detail?: string;
     live?: LivePresence;
@@ -530,6 +553,20 @@ export interface WorkspaceState {
 }
 type WorkspaceCommand =
   | { type: "snapshot" }
+  | { type: "backend.register"; binding: BackendBinding }
+  | { type: "scene.bind"; goalId?: string; scene: SceneReferenceV1; role?: "owner" | "verifier" | "concierge" }
+  | { type: "scene.prepare"; goalId?: string; intent: SceneLaunchIntent }
+  | { type: "scene.launch.result"; goalId?: string; role?: "owner" | "concierge" | "verifier"; requestId: string; status: SceneLaunchIntent["status"]; detail?: string }
+  | { type: "scene.concierge.status"; status: WorkspaceState["concierge"]["status"]; detail?: string; live?: LivePresence; initializedAttemptId?: string }
+  | { type: "scene.release"; goalId?: string; bindingId: string; role?: "owner" | "concierge" | "verifier" }
+  | { type: "scene.retire"; goalId: string; bindingId: string; attemptId: string }
+  | { type: "scene.legacy.clear"; goalId?: string; reason: string }
+  | { type: "scene.observe"; scenes: Array<{ bindingId: string; presence: LivePresence }> }
+  | { type: "backend.revoke"; operationId: string; expectedEpoch: number }
+  | { type: "backend.commit"; binding: BackendBinding; handoffs: Record<string, BackendHandoff> }
+  | { type: "backend.activate"; operationId: string }
+  | { type: "backend.handoff"; goalId: string; operationId: string; patch: Pick<BackendHandoff, "status" | "receiptId" | "detail"> & { method?: BackendHandoff["method"] } }
+  | { type: "session.resume.capture"; goalId: string; resume: OwnerResume }
   | { type: "workspace.rename"; name: string }
   | { type: "workspace.recovery.dismiss" }
   | { type: "agents.configure"; preferences: AgentPreferences }
@@ -623,6 +660,7 @@ type WorkspaceCommand =
     }
   | { type: "goal.scene-reply"; goalId: string; attentionId: string; quote: string; summary: string; actor: string }
   | { type: "scene.visit"; goalId: string; retry?: boolean }
+  | { type: "scene.cancel"; goalId: string; reason: "user-input" }
   | { type: "scene.check"; goalId: string; visitId: string; status: "checking" | "checked" | "failed"; detail?: string }
   | { type: "goal.progress"; goalId: string; summary: string; next?: string; stageId?: string; actor?: string }
   | {
@@ -798,6 +836,7 @@ export type CrewvaneCommand = WorkspaceCommand & {
   attentionId?: string;
   sceneReplyId?: string;
   requestId?: string;
+  managedContext?: ManagedSessionContext;
 };
 
 export interface GoalBriefInput {

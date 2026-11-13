@@ -512,14 +512,12 @@ try {
     `the Webhook test button must send a real request; dialog text: ${await page.locator('[role="dialog"]').innerText()}`,
   );
   await page.getByRole("button", { name: "关闭", exact: true }).click();
+  // Notification fixtures are already delivered, like a direct terminal intake.
+  // A pending dispatch would race the deliberately missing concierge and add
+  // an unrelated human intervention before the external-wait assertion.
   const statusGoal = await service.execute({
-    type: "goal.create",
-    input: {
-      title: "状态通知试用",
-      description: "验证 CLI 侧状态变化会触发 Webhook。",
-      projectId: "personal",
-      mode: "concierge",
-    },
+    type: "goal.direct",
+    text: "状态通知试用\n验证 CLI 侧状态变化会触发 Webhook。",
   });
   await page.waitForTimeout(250);
   await service.execute({
@@ -544,13 +542,8 @@ try {
   assert.equal(statusEvent.body.goal.waitingFor, "法务");
   assert.equal(statusEvent.headers.authorization, "Bearer desktop-smoke-token");
   const deduplicatedReviewGoal = await service.execute({
-    type: "goal.create",
-    input: {
-      title: "企业微信单次验收提醒",
-      description: "验证目标进入待验收时只触发一次外部通知。",
-      projectId: "personal",
-      mode: "concierge",
-    },
+    type: "goal.direct",
+    text: "企业微信单次验收提醒\n验证目标进入待验收时只触发一次外部通知。",
   });
   await page.waitForTimeout(250);
   await service.execute({

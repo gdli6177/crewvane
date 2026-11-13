@@ -80,6 +80,58 @@ export class HerdrInstallation {
     this.pending = this.prepare(force).finally(() => { this.pending = undefined; });
     return this.pending;
   }
+  /**
+   * Metadata-only update discovery for an explicit Settings action. Unlike
+   * ensure(), checking never downloads or replaces a usable binary.
+   */
+  check(): Promise<HerdrStatus> {
+    if (this.pending) return this.pending;
+    this.pending = this.checkNow().finally(() => { this.pending = undefined; });
+    return this.pending;
+  }
+  private async checkNow() {
+    const local = await this.installed();
+    this.publish({
+      installed: !!local,
+      ...local,
+      ...(local ? { latestVersion: local.version } : {}),
+      updateAvailable: false,
+      phase: "checking",
+      detail: local ? `正在检查 Herdr ${local.version} 的更新…` : "正在检查 Herdr 最新版本…",
+    });
+    try {
+      const latest = await this.latest(true);
+      const updateAvailable = !!local && compare(local.version, latest.version) < 0;
+      return this.publish({
+        installed: !!local,
+        ...local,
+        latestVersion: latest.version,
+        updateAvailable,
+        phase: "ready",
+        detail: local
+          ? updateAvailable
+            ? `发现 Herdr ${latest.version}，可更新；当前 ${local.version} 仍可使用。`
+            : `Herdr ${local.version} 已是当前版本。`
+          : `Herdr ${latest.version} 可安装。`,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (local) return this.publish({
+        installed: true,
+        ...local,
+        updateAvailable: false,
+        phase: "ready",
+        detail: `检查更新未完成：${reason}。继续使用${local.executable === this.bundledPath ? "应用内置" : "本机"} Herdr ${local.version}，可稍后重试。`,
+      });
+      this.publish({
+        installed: false,
+        updateAvailable: false,
+        phase: "error",
+        detail: `Herdr 版本检查未完成：${reason}。请检查网络后重试。`,
+      });
+      throw new Error(this.current.detail);
+    }
+  }
   private async latest(force: boolean) {
     if (!force && this.manifest && Date.now() - this.manifest.at < 6 * 3600_000) return this.manifest.value;
     // The official herdr.dev index contains the complete release history and

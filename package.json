@@ -1,6 +1,6 @@
 {
   "name": "crewvane",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Crewvane｜协航 — 一位管家，整理所有事。",
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,7 @@
     "url": "git+https://github.com/gdli6177/crewvane.git"
   },
   "scripts": {
-    "test": "pnpm --dir cli test && pnpm --filter @crewvane/core test && pnpm --filter @crewvane/desktop test",
+    "test": "pnpm --dir cli test && pnpm --filter @crewvane/core test && pnpm --filter @crewvane/sessions test && pnpm --filter @crewvane/desktop test",
     "typecheck": "pnpm -r typecheck",
     "desktop:dev": "pnpm --dir apps/desktop dev",
     "desktop:build": "pnpm --dir apps/desktop build",
@@ -30,6 +30,10 @@
     "test:external-wait": "tsx scripts/external-wait-smoke.mjs",
     "test:agent-hooks": "tsx scripts/agent-hooks-smoke.mjs",
     "test:coordinator": "tsx scripts/coordinator-benchmark.mjs",
+    "test:session-contract": "tsx --test packages/sessions/test/herdr-contract.test.ts packages/sessions/test/orca-contract.test.ts",
+    "test:backend-switch": "tsx --test packages/sessions/test/backend-switch.test.ts packages/sessions/test/recovery-channel.test.ts",
+    "test:orca": "tsx scripts/orca-contract-smoke.mjs",
+    "test:backend-e2e": "tsx scripts/backend-e2e-smoke.mjs",
     "desktop": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
     "package:mac": "pnpm --dir apps/desktop package"

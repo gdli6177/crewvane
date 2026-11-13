@@ -55,6 +55,8 @@ const builtinDefinitions: Array<{
     content: `你是 Crewvane 的控制面管家。用户只需要一个入口，每次通知只处理一个明确案卷。
 - 只负责分发、协调、核对和交接；任何实际执行都交给独立负责人。
 - 首次派发优先使用 crewvane owner launch；已有负责人复用原现场。
+- owner launch 已自动发送首次任务；receipt 为 accepted 或 started 后，不再用 owner send 重复或追加同一任务。owner send 用于之后收到的真实新要求。
+- 确认负责人启动后，记录一次协调结果即结束。dispatch 与 backendHandoff 的传输状态由应用核对，不轮询等待其变化，不因 pending 重复派发。
 - 用户直接发来的新事项先用 direct --new 保存；已有目标的新补充先用 direct --goal 保存。
 - 阅读 crewvane skill list --json。目标确实匹配某个本地方法时，用 crewvane skill attach GOAL_ID PACK_ID 挂载；说明型方法可由你直接挂载，运行脚本仍需单独授权。
 - 只在明确事实发生后使用 progress、wait、decide、review 等语义命令。普通回复、idle、done 和脚本成功都不是业务完成。
@@ -132,19 +134,19 @@ const builtinDefinitions: Array<{
     description: "发现本机 Agent CLI、启动命令和官方 Hook / Extension 能力。",
     kind: "setup",
     roles: ["concierge"],
-    content: `Agent 接入流程：只检测本机实际存在的 CLI；启动命令原样保留可执行文件、参数和模型；不借用某个 Agent 的专属沙箱参数。优先使用官方 Hook / Extension，无法确认时回退 Herdr 与巡检。`,
+    content: `Agent 接入流程：只检测本机实际存在的 CLI；启动命令原样保留可执行文件、参数和模型；不借用某个 Agent 的专属沙箱参数。优先使用官方 Hook / Extension，无法确认时回退当前会话后端与巡检。`,
   },
   {
     id: "crewvane.herdr-recovery",
-    name: "Herdr 现场恢复",
-    description: "owner launch 无法确认环境时，通过现有 Herdr 现场恢复并校验绑定。",
+    name: "工作现场恢复",
+    description: "启动未确认时核对当前后端的原请求与身份，避免重复派发。",
     kind: "setup",
     roles: ["concierge"],
-    content: `当 owner launch 无法确认环境注入时：
-1. 先核对 Herdr Session、Workspace、Tab、Pane 和 Agent，不重复发送业务任务。
-2. 可用官方 Herdr 命令恢复现场；不要把终端输出当作成功握手。
-3. 用 crewvane owner attach 绑定已核实的真实现场；提供当前 Session、Workspace、Tab、Pane、Agent 与 recovery ID。
-4. owner attach 失败就保留未绑定状态并交给人，不手工编辑 state.json。`,
+    content: `当 owner launch 无法确认环境注入或投递时：
+1. 读取当前目标的 scene、sceneLaunch 与 backendHandoff，核对当前 backend、epoch 与原请求；不重复发送业务任务。
+2. 使用 crewvane owner launch 核对原启动意图；它只重发现原请求，不自动重复创建。已有负责人用 owner send，不手工调用后端来绕过身份或送达检查。
+3. Herdr 的旧现场只有经过真实进程核实才能 owner attach；Orca 没有此手工认领入口。不要把屏幕标题或输出当成握手。
+4. 无法核实就保留未确认状态并说明具体恢复操作，不手工编辑 state.json。`,
   },
 ];
 
@@ -269,7 +271,7 @@ function scriptEntries(value: unknown): SkillPackScript[] {
 
 export function parseSkillManifest(
   value: unknown,
-  currentVersion = "0.10.0",
+  currentVersion = "0.11.0",
 ): SkillPackManifest {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new SkillRegistryError("manifest.json 必须是对象");
@@ -345,7 +347,7 @@ async function directoryDigest(directory: string, files: string[]) {
   return hash.digest("hex");
 }
 
-async function loadLocalPack(directory: string, currentVersion = "0.10.0"): Promise<LoadedLocalPack> {
+async function loadLocalPack(directory: string, currentVersion = "0.11.0"): Promise<LoadedLocalPack> {
   const owner = await resolve(directory);
   if (!(await stat(owner)).isDirectory())
     throw new SkillRegistryError("能力包路径必须是目录");
@@ -454,7 +456,7 @@ function validateStoredMetadata(value: unknown): StoredInstallMetadata {
 export class SkillRegistry {
   constructor(
     readonly root: string,
-    readonly currentVersion = "0.10.0",
+    readonly currentVersion = "0.11.0",
   ) {}
 
   get installedRoot() {
