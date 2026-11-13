@@ -23,16 +23,16 @@ Crewvane is an open-source macOS desktop app for one person working with many
 projects and many CLI coding agents at the same time.
 
 It gives every project and personal task a persistent home, routes execution
-through a single concierge agent in [Herdr](https://github.com/herdrdev/herdr), and brings only
+through a single concierge agent, and brings only
 decisions, reviews, due follow-ups, and genuine interventions to your attention.
 The regular work in between stays out of your way.
 
 Crewvane does not replace Codex, Claude Code, OMP, Cursor, Qoder, or another agent.
 It works with interactive CLI agents that can already run in a terminal, keeps
-the terminal sessions in Herdr, and adds the durable workflow around them:
+the terminal sessions in Herdr or Orca, and adds the durable workflow around them:
 state, ownership, waiting, evidence, approvals, and recovery.
 
-> **Status:** early preview (`0.10.x`). The desktop UI is currently in Simplified
+> **Status:** early preview (`0.11.x`). The desktop UI is currently in Simplified
 > Chinese and the packaged app supports macOS on Apple Silicon.
 
 ## Why Crewvane
@@ -124,6 +124,18 @@ The desktop app includes its own verified Herdr binary, and the optional Herdr
 plugin adds attention, one-line goal intake, and concierge shortcuts inside
 Herdr.
 
+Settings can instead select [Orca](https://github.com/stablyai/orca) as the one
+active session backend. Orca provides its native work interface; Crewvane keeps
+goals, attention, evidence and acceptance in its own Core, never a second Orca
+task state. Install or update Orca from Settings, then switch explicitly. A
+switch preserves goals and messages, stops verified old scenes and resumes from
+case records rather than copying terminal history. Only one backend receives work.
+
+The split between code and Skills is deliberate: code guarantees delivery,
+identity, idempotency, state and recovery; Skills guide concierge coordination,
+questioning and delivery practices. Scene answers use structured IDs to reach
+the matching attention item and concierge, so an old reply cannot close a new question.
+
 ### Reusable work methods
 
 Crewvane ships role and process Skills for the concierge, owners, independent
@@ -146,15 +158,24 @@ Skill resolution is explicit and bounded: Core constraints, role Skill, process
 Skill, goal-bound local methods, then the current task. Missing, disabled, or
 changed bindings fail closed before a new Agent turn starts.
 
-### Work in the terminal you already know
+### Choose your working scene
 
-“Open scene” now launches the same Herdr session in iTerm2, Terminal, or Ghostty
+Choose Herdr or Orca in Settings. One installation uses one backend at a time.
+A switch first verifies that the old managed Agents have stopped, then continues
+from saved goal records. Goals and attention remain in the same Crewvane store.
+
+In Herdr mode, “Open scene” launches the same session in iTerm2, Terminal, or Ghostty
 by default, preserving native shortcuts, image paste, IME behavior, and terminal
 semantics. Crewvane reuses an existing window and remembers the terminal choice.
 An embedded lightweight scene remains available for quick inspection and shares
 the exact same Herdr session. When the clipboard contains only an image, the
 embedded scene sends one `Ctrl+V` to the active Agent so the Agent can read the
 system clipboard itself.
+
+Orca mode opens the native Orca window and focuses the registered terminal;
+there is no embedded mode. Settings can detect, install, or update the verified
+Orca version. Terminal history does not move between backends. Native Agent
+sessions resume only where verified; otherwise, work continues from goal records.
 
 ### Instant lifecycle, explicit decisions
 
@@ -168,7 +189,7 @@ A Hook proves only that a session or turn changed state. It never marks a goal
 complete, waiting on a third party, ready for review, or safe for an external
 action. Those facts still come from Crewvane's semantic CLI. After a turn stops,
 Crewvane waits briefly for that write-back, reminds the same owner once if it is
-missing, and then asks the concierge to reconcile. Herdr and the watchdog remain
+missing, and then asks the concierge to reconcile. The selected backend and watchdog remain
 the fallback when an Agent has no compatible Hook.
 
 ### Evidence before completion
@@ -179,7 +200,7 @@ A goal can be accepted only after an owner submits:
 - a location or URL when applicable; and
 - at least one real check that was actually executed.
 
-The terminal scrollback stays in Herdr. It is not silently copied into agent
+The terminal scrollback stays in the selected session backend. It is not silently copied into agent
 context or treated as proof of completion.
 
 ### Human control at hard boundaries
@@ -222,9 +243,9 @@ flowchart LR
     Human[You] --> Desktop[Crewvane Desktop]
     Desktop --> Core[Crewvane Core]
     CLI[Crewvane CLI] --> Core
-    Desktop <--> Herdr[Herdr Sessions]
-    Herdr --> Concierge[Concierge]
-    Herdr --> Owners[Owners and CLI Agents]
+    Desktop <--> Sessions[Herdr or Orca: one selected backend]
+    Sessions --> Concierge[Concierge]
+    Sessions --> Owners[Owners and CLI Agents]
     Core <--> State[(.crewvane workspace)]
     Desktop --> Notify[macOS notifications and HTTPS webhooks]
 ```
@@ -234,7 +255,7 @@ The key boundary is that messages and state changes are separate:
 - `goal.message`, `ask`, and `direct` add human-authored facts;
 - explicit commands such as `progress`, `wait`, `review`, and `resolve` change
   workflow state;
-- Herdr lifecycle events update whether a real agent site is reachable; and
+- Session lifecycle events update whether a real agent site is reachable; and
   they never declare a goal completed.
 
 `waiting` means a named external party outside you and all Crewvane Agents.
@@ -373,10 +394,11 @@ packaged app with an interactive custom CLI. It does not require a model login.
   observe lifecycle events without replacing each Agent's runtime.
 - Crewvane coordinates goals and agent sites but does not sandbox third-party
   agents. Agent file access and network permissions remain governed by that CLI.
-- Herdr is required for agent execution. Planning, records, reminders, and manual
-  review remain readable if Herdr is temporarily unavailable.
-- Herdr is behind a replaceable session-adapter boundary in 0.10.x, but it is
-  still the only complete execution backend in the shipped app.
+- Agent execution requires either Herdr or the verified compatible Orca version.
+  Planning, records, reminders, and manual review remain readable if the selected
+  backend is temporarily unavailable.
+- Orca native Agent-session resume is not yet verified; switching to Orca resumes
+  from goal records. Existing goals remain usable, but terminal history is not migrated.
 
 ## Contributing
 

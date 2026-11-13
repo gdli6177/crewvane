@@ -1,5 +1,6 @@
 import type { CrewvaneCommand, GoalAttachment, SkillPackManifest, SkillPackView } from "../../../packages/core/src/index.js";
 import type { HerdrStatus } from "../electron/herdr-install.js";
+import type { OrcaInstallationStatus } from "../electron/orca-install.js";
 import type { HerdrPluginStatus } from "../electron/herdr-plugin.js";
 import type { WebhookSaveInput, WebhookSettings } from "../electron/webhook-notifications.js";
 import type { SkillsInstallResult, SkillsStatus } from "../electron/skill-installer.js";
@@ -7,13 +8,26 @@ import type { CacheCleanupResult, CacheStatus } from "../electron/cache-maintena
 import type { AgentHookAdapterStatus, ManagedAdapterId } from "../electron/agent-hook-manager.js";
 import type { CoordinatorInboxStatus } from "../electron/coordinator-inbox.js";
 import type {
+  BackendControlV1,
+  SwitchJournal,
+  WorkspaceRegistration,
+} from "../../../packages/sessions/src/control/types.js";
+import type {
   ExternalSceneLease,
   SceneSettings,
   SceneSettingsStatus,
 } from "../electron/external-terminal.js";
 export type SceneOpenResult =
   | { mode: "external"; lease: ExternalSceneLease }
-  | { mode: "embedded" };
+  | { mode: "embedded" }
+  | { mode: "native"; app: "Orca" };
+export interface BackendControlStatus {
+  control: BackendControlV1;
+  journal?: SwitchJournal;
+  workspaces: WorkspaceRegistration[];
+  orca: OrcaInstallationStatus;
+  impact: { goals: number; scenes: number };
+}
 export interface DesktopApi {
   command(command: CrewvaneCommand): Promise<any>;
   importAttachments(inputs: { name: string; bytes: ArrayBuffer }[]): Promise<GoalAttachment[]>;
@@ -22,13 +36,29 @@ export interface DesktopApi {
   selectWorkspace(): Promise<string | null>; selectProject(): Promise<string | null>;
   environment(): Promise<{ workspace?: string; version: string }>;
   herdrStatus(): Promise<HerdrStatus & { session: string; plugin: HerdrPluginStatus }>;
+  orcaStatus(): Promise<OrcaInstallationStatus>;
+  orcaAction(action: "check" | "install" | "cancel" | "refresh"): Promise<OrcaInstallationStatus | void>;
+  selectOrcaApplication(): Promise<OrcaInstallationStatus | null>;
+  backendStatus(): Promise<BackendControlStatus>;
+  switchBackend(backend: "herdr" | "orca"): Promise<{
+    journal?: SwitchJournal;
+    status: BackendControlStatus;
+  }>;
+  retryBackendSwitch(): Promise<{
+    journal?: SwitchJournal;
+    status: BackendControlStatus;
+  }>;
+  cancelBackendSwitch(): Promise<void>;
+  restoreBackend(): Promise<{ journal?: SwitchJournal; status: BackendControlStatus }>;
   cacheMaintenanceStatus(): Promise<CacheStatus>;
   cleanCache(): Promise<CacheCleanupResult>;
   agentChoices(): Promise<{ kind: string; installed: boolean }[]>;
   webhookSettings(): Promise<WebhookSettings>;
   saveWebhook(input: WebhookSaveInput): Promise<WebhookSettings>;
   testWebhook(): Promise<WebhookSettings>;
-  installHerdr(): Promise<unknown>; cliStatus(): Promise<{ installed: boolean; path: string; directory: string }>;
+  installHerdr(): Promise<HerdrStatus>;
+  checkHerdrUpdate(): Promise<HerdrStatus>;
+  cliStatus(): Promise<{ installed: boolean; path: string; directory: string }>;
   skillsStatus(): Promise<SkillsStatus>; installSkills(): Promise<SkillsInstallResult>;
   methodPacksStatus(): Promise<SkillPackView[]>;
   previewMethodPack(): Promise<{
@@ -66,7 +96,7 @@ export interface DesktopApi {
   terminalSnapshot(): Promise<{ session: string; data: string; running: boolean; sequence: number; cols: number; rows: number; error?: string } | undefined>;
   writeTerminal(session: string, data: string): Promise<void>;
   resizeTerminal(session: string, cols: number, rows: number): Promise<void>;
-  openScene(goalId?: string): Promise<SceneOpenResult>;
+  openScene(goalId?: string, recover?: boolean): Promise<SceneOpenResult>;
   openExternalScene(goalId?: string): Promise<ExternalSceneLease>;
   openHerdr(goalId?: string): Promise<void>; openUrl(url: string): Promise<void>; showCli(): Promise<void>;
   openRecoveryBackup(): Promise<void>;

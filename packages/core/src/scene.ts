@@ -9,5 +9,8 @@ export function observeSceneWork(goal: Goal, presence: LivePresence) {
     visit.attentionId !== attentionRequest(goal)?.id || pendingSceneReply(goal) ||
     presence.reachable !== true || Date.parse(presence.checkedAt) < Date.parse(visit.at)) return;
   if (presence.state === "working") visit.worked = true;
-  if (visit.worked && ["idle", "done"].includes(presence.state)) visit.status = "pending";
+  if (visit.worked && ["idle", "done"].includes(presence.state)) {
+    visit.status = "pending";
+    visit.pendingAt = presence.checkedAt;
+  }
 }

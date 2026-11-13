@@ -106,6 +106,44 @@ test("a quiet active owner is still reconciled", () => {
   assert.equal(item.watchdog?.contactedAt, after(2.5));
   assert.ok(item.activities.some(activity => /已请管家核查/.test(activity.text)));
 });
+test("an idle owner that already wrote back its current dispatch is not repeatedly reconciled", () => {
+  const item = goal();
+  item.dispatch = { status: "sent", at: start };
+  item.live = { state: "idle", checkedAt: after(1), reachable: true };
+  item.activities.push({
+    id: "owner-result",
+    kind: "progress",
+    at: after(1.2),
+    actor: "owner-test",
+    text: "阶段 1 已完成，真实断言通过；等待下一次明确交接。",
+  });
+  item.next = "等待下一次明确交接";
+  assert.deepEqual(inspectWatchdog([item], after(5)), []);
+  assert.equal(item.watchdog, undefined);
+  assert.equal(item.attention, null);
+});
+test("a concierge reconciliation note does not restart settled patrol while the owner scene stays unchanged", () => {
+  const item = goal();
+  item.live = { state:"idle", checkedAt:after(1), reachable:true };
+  const [request] = inspectWatchdog([item], after(2.5));
+  assert.equal(request?.reason, "settled");
+  reportWatchdog(item, after(2.5), request!.basis, "contacted");
+  item.activities.push({
+    id: "concierge-review",
+    kind: "progress",
+    at: after(2.6),
+    actor: "管家",
+    text: "已核对负责人和磁盘结果，当前没有新事项。",
+  });
+  assert.deepEqual(inspectWatchdog([item], after(4)), []);
+  assert.equal(item.watchdog?.reason, "settled");
+  assert.equal(item.watchdog?.basis, start);
+  // Only a new observation of the owner scene clears the review and starts a
+  // new business-state evaluation.
+  item.live = { state:"working", checkedAt:after(4.1), reachable:true };
+  assert.deepEqual(inspectWatchdog([item], after(4.2)), []);
+  assert.equal(item.watchdog, undefined);
+});
 test("external waiting does not probe the owner terminal", () => {
   const external = goal();
   external.status = "waiting";

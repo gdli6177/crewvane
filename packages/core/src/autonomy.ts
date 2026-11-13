@@ -423,7 +423,7 @@ export function autoAcceptanceGate(
     verification.outcome !== "passed" || verification.reviewer === delivery.submittedBy ||
     verification.reviewer === goal.owner)
     return { eligible: false, reason: "independent_verification_missing", mode: resolution.mode };
-  if (!verification.reviewerHerdr)
+  if (!verification.reviewerHerdr && !verification.reviewerScene)
     return { eligible: false, reason: "independent_verification_site_missing", mode: resolution.mode };
   const requiredCriteria = goal.brief!.criteria.filter(criterion => criterion.required);
   for (const criterion of requiredCriteria) {

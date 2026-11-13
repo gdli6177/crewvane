@@ -95,6 +95,8 @@ importers:
         specifier: ^0.3.2
         version: 0.3.2
 
+  packages/sessions: {}
+
 packages:
 
   '@electron-internal/extract-zip@1.0.8':

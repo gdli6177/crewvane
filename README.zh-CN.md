@@ -23,7 +23,7 @@ Crewvane 是一个开源 macOS 桌面应用，面向同时处理多个项目、�
 Agent 会话的人。
 
 它为每个项目和个人事项保留持久的记录，通过
-[Herdr](https://github.com/herdrdev/herdr) 中唯一的全局管家统筹执行，只把需要决定、
+唯一的全局管家统筹执行，只把需要决定、
 验收、到期跟进和真正需要介入的事放进注意力面板。普通的推进过程留在后台，
 不再逼你逐个盯着终端。
 
@@ -31,7 +31,7 @@ Crewvane 不替代 Codex、Claude Code、OMP、Cursor、Qoder 等 CLI Agent。�
 终端中运行的交互式 Agent，都可以作为工作现场接入。Crewvane 为这些现场补齐
 持久目标、负责人、等待、证据、审批和恢复机制。
 
-> **当前状态：** 早期预览版（`0.10.x`）。桌面界面目前为简体中文，安装包支持
+> **当前状态：** 早期预览版（`0.11.x`）。桌面界面目前为简体中文，安装包支持
 > macOS Apple Silicon。
 
 ## 为什么需要 Crewvane
@@ -108,6 +108,15 @@ Crewvane 会在 Agent 会话之外持久保存短回合续跑：checkpoint、外
 Herdr 提供持久终端会话和 Agent 通信。桌面应用自带经过校验的 Herdr 二进制文件；
 可选的 Herdr 插件还能在终端内打开注意力、用一句话新建目标、直接回到全局管家。
 
+设置也可以改选 [Orca](https://github.com/stablyai/orca) 作为唯一生效的会话后端。
+Orca 提供原生工作界面，Crewvane 仍在自己的 Core 保存目标、注意力、证据与验收，
+不使用 Orca Task 作为第二份状态。设置提供 Orca 安装、选择已有应用和检查更新。
+切换保留目标与消息，停止已核实的旧现场后按案卷恢复，不搬终端全文，也不会双路派发。
+
+代码与 Skills 的边界保持清晰：代码保证投递、身份、幂等、状态和恢复；Skills 指导
+管家协调、追问与交付方法。现场答复使用结构化 ID 回到对应注意力事项和管家，
+旧回复不能关闭新问题。
+
 ### 可复用的工作方法
 
 Crewvane 内置管家、负责人、独立复核者、标准交付、探索研究、发布检查、Agent
@@ -125,13 +134,20 @@ Crewvane 内置管家、负责人、独立复核者、标准交付、探索研�
 解析顺序固定为 Core 约束、角色方法、工序方法、目标本地方法和当前任务。包缺失、
 被停用或内容变化时，新 Agent 回合会在启动前明确失败关闭，不会偷偷使用旧内容。
 
-### 工作现场由你熟悉的终端承载
+### 选择你熟悉的工作现场
 
-“回到现场”默认在 iTerm2、Terminal 或 Ghostty 中打开同一个 Herdr Session，
+设置中可以选择 Herdr 或 Orca；同一安装只使用一套后端。切换前先核实原受管
+Agent 已停止，再按保存的目标记录在新后端继续，目标与注意力不会分成两份。
+
+Herdr 模式下，“回到现场”默认在 iTerm2、Terminal 或 Ghostty 中打开同一个 Session，
 保留原生组合键、图片粘贴、输入法和终端行为。Crewvane 会复用已有窗口，并在设置
 中记住终端偏好。也可以切换到内嵌轻现场快速查看；其中的目标事实与外部终端完全
 共用同一份 Herdr 现场。仅粘贴图片时，轻现场会把一次 `Ctrl+V` 交给当前 Agent，
 由 Agent 自己读取系统剪贴板。
+
+Orca 模式直接打开 Orca 原生窗口，并定位对应的受管终端；不提供内嵌模式。
+设置中可以检测、安装或更新已验证的 Orca 版本。完整终端历史不会跨后端搬移，
+只有已验证支持原生恢复的 Agent 才会续用原会话，其余按目标案卷继续。
 
 ### 即时生命周期，明确业务决定
 
@@ -143,7 +159,7 @@ Codex 仍要求在它自己的 `/hooks` 界面中审核并信任新条目。
 Hook 只证明会话或回合状态发生了变化，绝不会把目标标成完成、等待第三方、可验收或
 允许外部动作。这些业务事实仍只由 Crewvane 语义 CLI 写入。回合结束后，Crewvane
 会短暂等待结构化写回；缺失时只提醒同一负责人一次，再由管家核对。Agent 没有兼容
-Hook 时，Herdr 和原有 Watchdog 继续完整兜底。
+Hook 时，当前所选后端与原有 Watchdog 继续完整兜底。
 
 ### 有证据，才算完成
 
@@ -153,7 +169,7 @@ Hook 时，Herdr 和原有 Watchdog 继续完整兜底。
 - 可访问的交付位置或链接（如适用）；以及
 - 至少一项真实执行过的检查。
 
-终端滚动记录留在 Herdr，不会被悄悄复制进 Agent 上下文，也不会被当成交付证明。
+终端滚动记录留在当前会话后端，不会被悄悄复制进 Agent 上下文，也不会被当成交付证明。
 
 ### 关键边界由人掌握
 
@@ -191,9 +207,9 @@ flowchart LR
     Human[你] --> Desktop[Crewvane Desktop]
     Desktop --> Core[Crewvane Core]
     CLI[Crewvane CLI] --> Core
-    Desktop <--> Herdr[Herdr Sessions]
-    Herdr --> Concierge[全局管家]
-    Herdr --> Owners[负责人和 CLI Agents]
+    Desktop <--> Sessions[Herdr 或 Orca]
+    Sessions --> Concierge[全局管家]
+    Sessions --> Owners[负责人和 CLI Agents]
     Core <--> State[(.crewvane 工作区)]
     Desktop --> Notify[macOS 通知和 HTTPS Webhooks]
 ```
@@ -202,8 +218,8 @@ flowchart LR
 
 - `goal.message`、`ask`、`direct` 只追加人的原始事实；
 - `progress`、`wait`、`review`、`resolve` 等明确命令改变流程状态；
-- Herdr 生命周期事件更新真实现场是否可达；
-- Herdr 的 `done` 或 `idle` 永远不能宣告目标完成。
+- 会话后端和 Agent Hook 更新真实现场是否可达及回合状态；
+- 终端的 `done` 或 `idle` 永远不能宣告目标完成。
 
 “等待外部”只用于你和所有 Crewvane Agent 之外的具名第三方。
 需要你决定、确认、补充信息或操作时进入注意力；内部协调保持跟进中。
@@ -333,9 +349,10 @@ pnpm test:onboarding
   不替代各 Agent 自己的运行时。
 - Crewvane 协调目标和现场，不为第三方 Agent 提供文件系统或网络沙箱。
   Agent 的访问权限仍由其自身 CLI 决定。
-- Agent 执行依赖 Herdr；Herdr 暂时不可用时，仍可查看目标、提醒和人工验收记录。
-- 0.10.x 已把 Herdr 放到可替换的 Session Adapter 边界之后，但应用当前仍只有
-  Herdr 这一套完整执行后端，不能把“可替换”理解成已经可以卸载 Herdr。
+- Agent 执行需要 Herdr 或已验证兼容的 Orca 版本。所选后端暂时不可用时，
+  仍可查看目标、提醒和人工验收记录。
+- Orca 的原生 Agent 会话恢复尚未验证，切换到 Orca 时按目标记录继续；
+  目标记录会保留，终端全文不会迁移。
 
 ## 参与贡献
 

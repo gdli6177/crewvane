@@ -27,6 +27,7 @@ import type {
   WorkflowStep,
 } from "./types.js";
 import { SkillRegistry } from "./skill-registry.js";
+import { sameScene, validatedScene, type ManagedSessionContext } from "./session-types.js";
 import { agentReceiptMarker, isAgentRuntimeAdapter } from "./agent-runtime.js";
 import {
   isHighRiskCategory,
@@ -392,7 +393,7 @@ function substantiveAgentText(value: string | undefined, label: string, limit: n
 export { attentionGoals, attentionKind } from "./model.js";
 export class WorkspaceService {
   readonly store: WorkspaceStore;
-  constructor(readonly root: string) {
+  constructor(readonly root: string, private readonly managedContext?: ManagedSessionContext) {
     this.store = new WorkspaceStore(root);
   }
   async read() {
@@ -638,6 +639,25 @@ export class WorkspaceService {
     if (command.type === "attachments.cleanup") return this.cleanupAttachments(command);
     if (command.type === "bot.request") return this.executeBotRequest(command);
     return this.store.update(command.type, async (state) => {
+      const managed = this.managedContext ?? command.managedContext;
+      if (managed && state.backendBinding) {
+        const binding = state.backendBinding;
+        if (binding.status === "revoked" ||
+          managed.installationId !== binding.installationId ||
+          managed.backend !== binding.backend || managed.epoch !== binding.epoch ||
+          managed.scopeGeneration !== binding.scopeGeneration)
+          throw new Error("stale_backend_epoch: 当前受管身份已撤销，请重新进入现场。");
+        if (managed.role !== "concierge") {
+          if (!managed.goalId || ("goalId" in command && command.goalId !== managed.goalId))
+            throw new Error("scene_identity_mismatch: 只能写回自己的目标。");
+          const current = state.goals.find(item => item.id === managed.goalId);
+          if (managed.role === "owner" &&
+            managed.attemptId !== current?.agentRuntime?.attempt.attemptId)
+            throw new Error("stale_backend_epoch: 负责人 attempt 已更新。");
+        }
+        if (command.type.startsWith("backend."))
+          throw new Error("后端交接只能由桌面控制服务执行。");
+      }
       const goal = (goalId: string) => {
         const found = state.goals.find((item) => item.id === id(goalId));
         if (!found) throw new Error("找不到目标");
@@ -646,6 +666,15 @@ export class WorkspaceService {
       const stamp = (item: Goal) => {
         item.revision = (item.revision ?? 0) + 1;
         item.updatedAt = nowIso();
+      };
+      const isOwnerSemanticWrite = (actor: string) => {
+        // The concierge can record reconciliation notes with normal semantic
+        // activity kinds, but those notes do not satisfy the owner's write-back
+        // protocol. In particular they must not clear a settled/protocol-missing
+        // patrol, otherwise each probe starts another review loop.
+        if (managed?.role === "concierge" || actor === "concierge" || actor === "管家")
+          return false;
+        return actor !== "系统";
       };
       const activity = (
         item: Goal,
@@ -661,7 +690,7 @@ export class WorkspaceService {
           item.dispatch.status = "sent";
           delete item.dispatch.detail;
         }
-        if (semanticActivityKinds.has(kind) && actor !== "系统" &&
+        if (semanticActivityKinds.has(kind) && isOwnerSemanticWrite(actor) &&
           item.agentRuntime &&
           !["completed", "dropped"].includes(item.status)) {
           const now = nowIso();
@@ -691,6 +720,11 @@ export class WorkspaceService {
         if (["settled", "protocol_missing"].includes(item.watchdog?.reason ?? ""))
           delete item.watchdog;
       };
+      const cancelSceneReconciliation = (item: Goal) => {
+        if (!item.sceneVisit) return false;
+        delete item.sceneVisit;
+        return true;
+      };
       const handBackExternalWait = (item: Goal) => {
         if (item.status !== "waiting") return;
         finishWaitContinuation(item, nowIso());
@@ -714,6 +748,265 @@ export class WorkspaceService {
         }
       }
       switch (command.type) {
+        case "backend.register": {
+          if (state.backendBinding) {
+            if (state.backendBinding.installationId !== command.binding.installationId ||
+              state.backendEpoch !== command.binding.epoch ||
+              state.backendBinding.backend !== command.binding.backend)
+              throw new Error("stale_backend_epoch: 工作区仍有未完成的后端交接。");
+            return state.backendBinding;
+          }
+          if (state.backendEpoch !== command.binding.epoch &&
+            (state.goals.some(item => item.scene || item.herdr || item.legacyScene) ||
+              state.concierge.scene || state.concierge.legacyScene?.reference.paneId))
+            throw new Error("stale_backend_epoch: 工作区后端代次不一致。");
+          state.backendEpoch = command.binding.epoch;
+          state.backendBinding = structuredClone(command.binding);
+          return state.backendBinding;
+        }
+        case "scene.prepare": {
+          const intent = command.intent;
+          if (!intent || !intent.requestId || !intent.bindingId || !intent.attemptId ||
+            intent.backendEpoch !== state.backendEpoch || !["owner", "concierge", "verifier"].includes(intent.role))
+            throw new Error("stale_backend_epoch: 启动意图与当前后端不匹配。");
+          if (!command.goalId) {
+            if (state.concierge.launch?.status === "rejected")
+              delete state.concierge.launch;
+            if (state.concierge.scene || state.concierge.launch) throw new Error("launch_unconfirmed: 管家已有现场或启动意图，请核对原请求。");
+            state.concierge.launch = structuredClone(intent);
+          } else {
+            const item = goal(command.goalId);
+            if (item.mode !== "concierge" || ["completed", "dropped", "backlog"].includes(item.status))
+              throw new Error("该事项不能启动 Agent。");
+            if (intent.role === "verifier") {
+              const autonomy = ensureGoalAutonomy(item);
+              if (autonomy.verificationLaunch?.status === "rejected")
+                delete autonomy.verificationLaunch;
+              if (autonomy.verificationSite?.scene || autonomy.verificationLaunch)
+                throw new Error("launch_unconfirmed: 已有独立复核现场或启动意图。");
+              autonomy.verificationLaunch = structuredClone(intent);
+            } else {
+              if (item.sceneLaunch?.status === "rejected") delete item.sceneLaunch;
+              if (item.scene || item.sceneLaunch) throw new Error("launch_unconfirmed: 该目标已有现场或启动意图，请核对原请求。");
+              item.sceneLaunch = structuredClone(intent);
+            }
+          }
+          return intent;
+        }
+        case "scene.launch.result": {
+          const intent = command.goalId
+            ? command.role === "verifier" ? goal(command.goalId).autonomy?.verificationLaunch : goal(command.goalId).sceneLaunch
+            : state.concierge.launch;
+          if (!intent || intent.requestId !== command.requestId)
+            throw new Error("launch_unconfirmed: 原启动意图已经变化。");
+          intent.status = command.status;
+          if (command.detail) intent.detail = text(command.detail, "启动说明", 1000);
+          else delete intent.detail;
+          return intent;
+        }
+        case "scene.concierge.status": {
+          if (!["ready", "error", "not_ready"].includes(command.status)) throw new Error("无效的管家状态。");
+          if (command.initializedAttemptId) {
+            if (state.concierge.scene?.attemptId !== command.initializedAttemptId)
+              throw new Error("scene_identity_mismatch: 管家初始化对应的现场已经改变。");
+            state.concierge.initializedAttemptId = command.initializedAttemptId;
+          }
+          state.concierge.status = command.status;
+          if (command.detail) state.concierge.detail = text(command.detail, "状态说明", 1000);
+          else delete state.concierge.detail;
+          if (command.live) state.concierge.live = structuredClone(command.live);
+          return state.concierge;
+        }
+        case "scene.bind": {
+          const scene = validatedScene(command.scene);
+          if (scene.backendEpoch !== state.backendEpoch ||
+            (state.backendBinding && (state.backendBinding.installationId !== scene.installationId ||
+              state.backendBinding.backend !== scene.backend ||
+              state.backendBinding.status === "revoked")))
+            throw new Error("stale_backend_epoch: 现场不属于当前后端代次。");
+          if (!command.goalId) {
+            if (state.concierge.initializedAttemptId !== scene.attemptId)
+              delete state.concierge.initializedAttemptId;
+            state.concierge.scene = scene;
+            state.concierge.status = state.concierge.initializedAttemptId === scene.attemptId ? "ready" : "not_ready";
+            delete state.concierge.legacyScene;
+            delete state.concierge.live;
+            return state.concierge;
+          }
+          const item = goal(command.goalId);
+          if (["backlog", "completed", "dropped"].includes(item.status) || item.mode !== "concierge")
+            throw new Error("该事项当前不能启动 Agent 现场。");
+          if (sameScene(state.concierge.scene, scene) ||
+            state.goals.some(other => other.id !== item.id &&
+              !["completed", "dropped"].includes(other.status) && sameScene(other.scene, scene)))
+            throw new Error("scene_identity_mismatch: 目标需要独立负责人现场。");
+          if (command.role === "verifier") {
+            if (sameScene(item.scene, scene)) throw new Error("独立复核不能复用负责人现场。");
+            const autonomy = ensureGoalAutonomy(item);
+            autonomy.verificationSite = {
+              scene,
+              status: "ready",
+              at: nowIso(),
+            };
+          } else {
+            if (item.agentRuntime && item.agentRuntime.attempt.attemptId !== scene.attemptId)
+              throw new Error("scene_identity_mismatch: 现场 attempt 与负责人不一致。");
+            item.scene = scene;
+            item.owner = item.sceneLaunch?.agent || item.agentRuntime?.attempt.agent || item.owner;
+            if (item.agentRuntime) item.agentRuntime.attempt.scene = structuredClone(scene);
+            delete item.legacyScene;
+            delete item.herdr;
+            delete item.live;
+            delete item.sceneVisit;
+          }
+          return item;
+        }
+        case "scene.retire": {
+          // Only the trusted transport calls this after a fresh, identity-bound
+          // exited observation. It retires the binding, not the business goal.
+          const item = goal(command.goalId);
+          if (!item.scene || item.scene.bindingId !== command.bindingId || item.scene.attemptId !== command.attemptId)
+            throw new Error("scene_identity_mismatch: 原现场已经变化，不能恢复。");
+          item.sceneHistory = [...(item.sceneHistory ?? []), item.scene].slice(-20);
+          delete item.scene;
+          delete item.sceneLaunch;
+          delete item.live;
+          delete item.agentRuntime;
+          delete item.sceneVisit;
+          return item;
+        }
+        case "scene.release": {
+          if (!command.goalId) {
+            if (state.concierge.scene?.bindingId !== command.bindingId) return false;
+            delete state.concierge.scene;
+            delete state.concierge.launch;
+            delete state.concierge.live;
+            delete state.concierge.initializedAttemptId;
+            state.concierge.status = "not_ready";
+            return true;
+          }
+          const item = goal(command.goalId);
+          if (command.role === "verifier") {
+            if (item.autonomy?.verificationSite?.scene?.bindingId !== command.bindingId) return false;
+            delete item.autonomy.verificationSite;
+            delete item.autonomy.verificationLaunch;
+            return true;
+          }
+          if (!["completed", "dropped"].includes(item.status))
+            throw new Error("只有已结束的目标可以释放现场。");
+          if (item.scene?.bindingId !== command.bindingId) return false;
+          item.sceneHistory = [...(item.sceneHistory ?? []), item.scene].slice(-20);
+          delete item.scene;
+          delete item.sceneLaunch;
+          delete item.live;
+          return true;
+        }
+        case "scene.legacy.clear": {
+          const reason = text(command.reason, "旧现场清理原因", 1000);
+          if (!command.goalId) {
+            if (!state.concierge.legacyScene) return false;
+            delete state.concierge.legacyScene;
+            state.concierge.status = "not_ready";
+            delete state.concierge.live;
+            return true;
+          }
+          const item = goal(command.goalId);
+          if (item.scene || !item.legacyScene) return false;
+          delete item.legacyScene;
+          delete item.live;
+          activity(item, "session", `已忽略无法重新核实的旧 Herdr 现场：${reason}`, "系统");
+          return true;
+        }
+        case "scene.observe": {
+          for (const observation of command.scenes) {
+            if (!["working", "idle", "done", "blocked", "unknown"].includes(observation.presence.state))
+              throw new Error("无效的现场观测。");
+            const item = state.goals.find(candidate =>
+              candidate.scene?.bindingId === observation.bindingId &&
+              !["completed", "dropped"].includes(candidate.status));
+            const current = item?.live ?? (state.concierge.scene?.bindingId === observation.bindingId
+              ? state.concierge.live : undefined);
+            if (current?.state === observation.presence.state &&
+              current?.reachable === observation.presence.reachable) continue;
+            const presence = { ...observation.presence, checkedAt: iso(observation.presence.checkedAt) };
+            if (item) {
+              item.live = presence;
+              observeSceneWork(item, presence);
+              if (presence.state === "working") {
+                delete item.watchdog;
+                delete item.recovery;
+              }
+            } else if (state.concierge.scene?.bindingId === observation.bindingId) {
+              state.concierge.live = presence;
+              if (!presence.reachable) {
+                state.concierge.status = "not_ready";
+                state.concierge.detail = "管家现场已关闭或不可达，请恢复管家。";
+              } else if (state.concierge.initializedAttemptId === state.concierge.scene.attemptId) {
+                state.concierge.status = "ready";
+                delete state.concierge.detail;
+              }
+            }
+          }
+          return true;
+        }
+        case "backend.revoke": {
+          if (state.backendEpoch !== command.expectedEpoch)
+            throw new Error("stale_backend_epoch: 后端代次已改变。");
+          if (state.backendBinding) state.backendBinding.status = "revoked";
+          return true;
+        }
+        case "backend.commit": {
+          const binding = command.binding;
+          if (!binding || !["herdr", "orca"].includes(binding.backend) ||
+            !Number.isSafeInteger(binding.epoch) || binding.epoch <= state.backendEpoch ||
+            !binding.installationId || !binding.scopeGeneration || !binding.operationId)
+            throw new Error("无效的后端交接代次。");
+          // Mutate only backend fields in the latest locked snapshot. Never
+          // replace the workspace with the prepared checkpoint.
+          state.backendBinding = structuredClone(binding);
+          state.backendEpoch = binding.epoch;
+          if (state.concierge.scene)
+            state.concierge.legacyScene = undefined;
+          state.concierge = { session: "crewvane", status: "not_ready" };
+          for (const item of state.goals) {
+            const handoff = command.handoffs[item.id];
+            if (handoff) item.backendHandoff = structuredClone(handoff);
+            if (item.scene)
+              item.sceneHistory = [...(item.sceneHistory ?? []), item.scene].slice(-20);
+            delete item.scene;
+            delete item.sceneLaunch;
+            delete item.herdr;
+            delete item.legacyScene;
+            delete item.live;
+            delete item.agentRuntime;
+            delete item.sceneVisit;
+            delete item.watchdog;
+            delete item.ownerLaunchRecovery;
+            if (item.autonomy?.verificationSite) delete item.autonomy.verificationSite;
+            if (item.autonomy?.verificationLaunch) delete item.autonomy.verificationLaunch;
+            const continuation = item.autonomy?.continuation;
+            if (continuation && ["claimed", "sent"].includes(continuation.status)) {
+              continuation.status = "cancelled";
+              continuation.lastError = "后端交接已撤销旧执行租约；根据最新目标记录重新评估。";
+            }
+          }
+          return true;
+        }
+        case "backend.activate": {
+          if (!state.backendBinding || state.backendBinding.operationId !== command.operationId ||
+            state.backendBinding.status !== "resuming")
+            throw new Error("后端交接操作不匹配。");
+          state.backendBinding.status = "active";
+          delete state.backendBinding.operationId;
+          return true;
+        }
+        case "backend.handoff": {
+          const item = goal(command.goalId);
+          if (item.backendHandoff?.operationId !== command.operationId)
+            throw new Error("后端恢复记录已变化。");
+          Object.assign(item.backendHandoff, structuredClone(command.patch));
+          return item.backendHandoff;
+        }
         case "workspace.rename":
           state.name = text(command.name, "工作区名称", 80);
           return state.name;
@@ -982,7 +1275,8 @@ export class WorkspaceService {
           return item;
         }
         case "goal.direct": {
-          const request = text(command.text, "Herdr 终端消息", 20_000);
+          const backendLabel = state.backendBinding?.backend === "orca" ? "Orca" : "Herdr";
+          const request = text(command.text, "终端消息", 20_000);
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           if (command.goalId) {
             const item = goal(command.goalId);
@@ -1004,7 +1298,7 @@ export class WorkspaceService {
             item.activities.push({
               id: newId("act"),
               at,
-              actor: "你 · Herdr 直聊",
+              actor: `你 · ${backendLabel} 直聊`,
               kind: "message",
               text: attachmentActivity(request, incomingAttachments),
               ...(incomingAttachments.length
@@ -1031,15 +1325,15 @@ export class WorkspaceService {
             ...arrangement,
             steps: [],
             next: arrangement.mode === "concierge"
-              ? "管家正在理解 Herdr 终端中的原文并整理目标。" : arrangement.next,
+              ? `管家正在理解 ${backendLabel} 终端中的原文并整理目标。` : arrangement.next,
             attention: null,
             // The concierge already received this message in its terminal turn.
             // Mark it as delivered so desktop dispatch does not replay the same text.
             ...(arrangement.mode === "concierge"
-              ? { dispatch: { id: newId("handoff"), kind: "feedback" as const, status: "sent" as const, at, detail: "已从 Herdr 终端直接送达管家" } }
+              ? { dispatch: { id: newId("handoff"), kind: "feedback" as const, status: "sent" as const, at, detail: `已从 ${backendLabel} 终端直接送达管家` } }
               : {}),
             ...(incomingAttachments.length ? { attachments: incomingAttachments } : {}),
-            activities: [{ id: newId("act"), at, actor: "你 · Herdr 直聊", kind: "created", text: request }],
+            activities: [{ id: newId("act"), at, actor: `你 · ${backendLabel} 直聊`, kind: "created", text: request }],
             createdAt: at, updatedAt: at,
           };
           state.goals.push(item);
@@ -1047,8 +1341,9 @@ export class WorkspaceService {
         }
         case "scene.visit": {
           const item = goal(command.goalId), request = attentionRequest(item);
-          if (!request || item.mode !== "concierge" || !item.herdr?.agent ||
-            item.herdr.transport === "pane" || pendingSceneReply(item)) return item;
+          if (!request || item.mode !== "concierge" ||
+            (!item.scene && (!item.herdr?.agent || item.herdr.transport === "pane")) ||
+            pendingSceneReply(item)) return item;
           if (item.sceneVisit?.attentionId === request.id &&
             (item.sceneVisit.status === "pending" ||
               item.sceneVisit.status === "checking" &&
@@ -1059,6 +1354,14 @@ export class WorkspaceService {
             status: command.retry ? "pending" : "watching",
           };
           return item;
+        }
+        case "scene.cancel": {
+          const item = goal(command.goalId);
+          if (command.reason !== "user-input")
+            throw new Error("无效的现场核对取消原因");
+          if (!cancelSceneReconciliation(item)) return false;
+          stamp(item);
+          return true;
         }
         case "scene.check": {
           const item = goal(command.goalId), visit = item.sceneVisit;
@@ -1078,7 +1381,8 @@ export class WorkspaceService {
           if (item.mode !== "concierge")
             throw new Error("目标已由你接管，现场回执不能重新派发给管家");
           const actor = text(command.actor, "现场负责人", 120);
-          if (actor !== item.herdr?.agent && actor !== state.concierge.agent)
+          if (actor !== item.agentRuntime?.attempt.agent && actor !== item.herdr?.agent &&
+            actor !== "concierge" && actor !== state.concierge.agent)
             throw new Error("只有本目标登记的负责人或管家可以提交现场回执");
           const quote = text(command.quote, "用户在现场的原话", 4000);
           const summary = substantiveAgentText(command.summary, "现场处理结果", 4000);
@@ -1092,7 +1396,7 @@ export class WorkspaceService {
           item.sceneReply = {
             id: newId("reply"), attentionId: command.attentionId, quote, summary, actor, at,
           };
-          activity(item, "message", quote, "你 · Herdr 现场");
+          activity(item, "message", quote, `你 · ${item.scene?.backend === "orca" ? "Orca" : "Herdr"} 现场`);
           activity(item, "message", summary, actor);
           item.dispatch = {
             id: newId("handoff"), kind: "scene_reply", status: "pending", at,
@@ -1108,6 +1412,7 @@ export class WorkspaceService {
             throw new Error("这件事尚未开始，请先明确交给管家");
           const message = text(command.text, "消息", 12_000);
           cancelAgentReceipt(item);
+          cancelSceneReconciliation(item);
           const incomingAttachments = await validateGoalAttachments(this.root, command.attachments);
           const combined = await validateGoalAttachments(this.root, [
             ...(item.attachments ?? []),
@@ -1482,6 +1787,9 @@ export class WorkspaceService {
           delete item.reviewRounds;
           delete item.reviewLimit;
           delete item.herdr;
+          if (item.scene) item.sceneHistory = [...(item.sceneHistory ?? []), item.scene].slice(-20);
+          delete item.scene;
+          delete item.sceneLaunch;
           delete item.live;
           delete item.sceneVisit;
           delete item.sceneReply;
@@ -1664,6 +1972,14 @@ export class WorkspaceService {
             (item.autonomy?.verificationSite?.status === "ready"
               ? item.autonomy.verificationSite.reference
               : undefined);
+          const reviewerScene = item.autonomy?.verificationSite?.status === "ready"
+            ? item.autonomy.verificationSite.scene : undefined;
+          if (reviewerScene && (sameScene(reviewerScene, item.scene) ||
+            sameScene(reviewerScene, state.concierge.scene)))
+            throw new Error("复核站点不能复用交付执行者或管家的现场");
+          if (reviewerScene && managed?.role === "verifier" &&
+            reviewerScene.attemptId !== managed.attemptId)
+            throw new Error("stale_backend_epoch: 独立复核 attempt 已更新。");
           if (reviewerHerdr && reviewerHerdr.agent && reviewerHerdr.agent !== reviewer)
             throw new Error("复核站点与复核人身份不一致");
           if (reviewerHerdr && item.herdr) {
@@ -1696,6 +2012,7 @@ export class WorkspaceService {
               summary: substantiveAgentText(command.summary, "复核摘要", 12_000),
               criteria,
               reviewer,
+              ...(reviewerScene ? { reviewerScene: structuredClone(reviewerScene) } : {}),
               ...(reviewerHerdr
                 ? { reviewerHerdr: structuredClone(reviewerHerdr) }
                 : {}),
@@ -2584,7 +2901,7 @@ export class WorkspaceService {
               outcome,
               quote: note,
               source: command.sceneReplyId || command.source === "scene"
-                ? "Herdr 负责人现场"
+                ? `${item.scene?.backend === "orca" ? "Orca" : "Herdr"} 负责人现场`
                 : command.source === "herdr"
                 ? "Herdr 注意力面板"
                 : command.source === "cli" ? "Crewvane CLI" : "Crewvane 桌面",
@@ -2660,7 +2977,9 @@ export class WorkspaceService {
               throw new Error("该现场属于其他目标，请为当前目标创建独立负责人 Tab");
             item.herdr = structuredClone(reference);
             if (item.agentRuntime)
-              item.agentRuntime.attempt.scene = structuredClone(reference);
+              item.agentRuntime.attempt.legacyScene = {
+                version: 0, backend: "herdr", verification: "unverified", reference: structuredClone(reference),
+              };
             delete item.sceneVisit;
             delete item.live;
             if (item.mode === "concierge" && item.status === "active")
@@ -2678,10 +2997,14 @@ export class WorkspaceService {
         case "agent.runtime.register": {
           const item = goal(command.goalId),
             attempt = validatedAttempt(command.attempt);
-          ongoing(item);
+          ongoing(item, true);
           if (attempt.goalId !== item.id)
             throw new Error("Agent attempt 与目标不一致");
-          attempt.scene ??= item.herdr ? structuredClone(item.herdr) : undefined;
+          attempt.scene ??= item.scene ? structuredClone(item.scene) : undefined;
+          if (!attempt.scene && item.herdr) attempt.legacyScene = {
+            version: 0, backend: "herdr", verification: "unverified",
+            reference: structuredClone(item.herdr),
+          };
           if (!/^[a-f0-9]{64}$/.test(command.hookTokenHash))
             throw new Error("Agent Hook 令牌无效");
           if (!Array.isArray(command.capabilities) ||
@@ -2752,6 +3075,10 @@ export class WorkspaceService {
               );
             if (reminder) receipt.reminderTurnId = event.turnId;
             else runtime.receipt = undefined;
+            // A real Agent turn proves that the person reached the scene. Hook
+            // capable owners use their turn lifecycle instead of racing a
+            // synthetic reconciliation prompt against the user's next input.
+            if (!reminder) cancelSceneReconciliation(item);
             if (event.turnId)
               runtime.seenTurnIds = [
                 ...(runtime.seenTurnIds ?? []).filter(turn => turn !== event.turnId),
@@ -2872,8 +3199,16 @@ export class WorkspaceService {
           const item = goal(command.goalId);
           if (!["completed", "dropped"].includes(item.status))
             throw new Error("只有已结束的目标可以保存负责人恢复信息");
-          if (!item.herdr)
+          if (!item.herdr && !item.scene)
             throw new Error("当前目标没有可保存的负责人现场");
+          item.ownerResume = preservedOwnerResume(command.resume);
+          stamp(item);
+          return item;
+        }
+        case "session.resume.capture": {
+          const item = goal(command.goalId);
+          if (!item.scene || ["completed", "dropped", "backlog"].includes(item.status))
+            throw new Error("当前目标没有可捕获的负责人现场");
           item.ownerResume = preservedOwnerResume(command.resume);
           stamp(item);
           return item;
@@ -2889,6 +3224,9 @@ export class WorkspaceService {
             (!Number.isSafeInteger(reference.processId) || reference.processId <= 0))
             throw new Error("无效的管家进程 ID");
           const concierge: WorkspaceState["concierge"] = {
+            // Legacy Herdr presence writers must not erase the neutral launch
+            // identity. They update observations, not ownership.
+            ...state.concierge,
             session: reference?.session ?? "crewvane",
             ...(reference?.workspaceId === undefined ? {} : { workspaceId: reference.workspaceId }),
             ...(reference?.tabId === undefined ? {} : { tabId: reference.tabId }),
@@ -2901,6 +3239,8 @@ export class WorkspaceService {
           };
           if (command.detail)
             concierge.detail = text(command.detail, "状态说明", 1000);
+          else delete concierge.detail;
+          if (command.live === null) delete concierge.live;
           if (command.live)
             concierge.live = {
               state: command.live.state,

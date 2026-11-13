@@ -142,7 +142,7 @@ test("built-in context is private from list output and resolves by role and goal
   const concierge = await registry.resolve(saved, "concierge");
   assert.match(concierge.text, /你是 Crewvane 的控制面管家/);
   assert.match(concierge.text, /Agent 接入流程/);
-  assert.match(concierge.text, /Herdr 现场恢复/);
+  assert.match(concierge.text, /工作现场恢复/);
   assert.doesNotMatch(concierge.text, /标准交付流程|探索研究流程/);
   assert.deepEqual(
     concierge.packs.map(pack => pack.id),

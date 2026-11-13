@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   attentionGoals,
   attentionKind,
@@ -14,6 +14,7 @@ import {
   importAttachmentBytes,
   SkillRegistry,
   validateGoalAttachments,
+  validatedScene,
   WorkspaceService,
   type CrewvaneCommand,
   type Goal,
@@ -36,9 +37,21 @@ import { TerminalHost } from "./terminal-host.js";
 import { parseAgentCommand } from "./agent-command.js";
 import { Executables } from "./executables.js";
 import { HerdrInstallation, type HerdrStatus } from "./herdr-install.js";
+import { OrcaInstallation } from "./orca-install.js";
+import {
+  SessionControl,
+  SessionError,
+  SessionRuntime,
+  SessionRecoveryChannel,
+  detectOrcaApplication,
+  localProcesses,
+  localAdapter,
+  type SwitchAuthority,
+} from "../../../packages/sessions/src/index.js";
 import { HerdrPlugin } from "./herdr-plugin.js";
 import { deliverGoalUpdate } from "./goal-delivery.js";
 import { reconcileSceneReply } from "./scene-reconciliation.js";
+import { SessionPoller } from "./session-poller.js";
 import { CoordinatorInbox, type CoordinatorInboxItem, type CoordinatorInboxStatus } from "./coordinator-inbox.js";
 import { CoordinatorDispatcher, type CoordinatorExecutionResult } from "./coordinator-dispatcher.js";
 import { writeCoordinatorScope } from "./coordinator-scope.js";
@@ -62,6 +75,13 @@ import {
   type AutonomyCandidate,
   type AutonomyDispatchResult,
 } from "./autonomy-scheduler.js";
+import {
+  backendHandoffAdvanced,
+  backendHandoffHasPersistedProof,
+  captureBackendHandoffEvidence,
+} from "./backend-handoff-proof.js";
+import { prepareBackendHandoffCase } from "./backend-handoff-case.js";
+import { SessionCommandHost } from "./session-command-host.js";
 const exec = promisify(execFile);
 let window: BrowserWindow, tray: Tray, root: string | undefined, service: WorkspaceService | undefined, syncing = false, quitting = false;
 let stateWatcher: FSWatcher | undefined, stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -84,9 +104,161 @@ let tools: Executables, herdrInstallation: HerdrInstallation, herdrPlugin: Herdr
 let coordinatorInbox: CoordinatorInbox | undefined, coordinatorDispatcher: CoordinatorDispatcher | undefined;
 let herdrHostBridge: HerdrHostBridge | undefined;
 let autonomyScheduler: AutonomyScheduler | undefined;
+let sessionControl: SessionControl, orcaInstallation: OrcaInstallation;
+let backendSwitchAbort: AbortController | undefined;
+const sessionRuntimes = new Map<string, SessionRuntime>();
+const sessionHosts = new Map<string, Promise<SessionCommandHost>>();
+const sessionPoller = new SessionPoller();
+async function ensureSessionCommandHost(workspace: string): Promise<SessionCommandHost> {
+  let pending = sessionHosts.get(workspace);
+  if (!pending) {
+    pending = (async () => {
+      const host = new SessionCommandHost({
+        workspace, directory: sessionControl.directory,
+        canDispatch: () => sessionControl.canDispatch(),
+        runtime: context => new SessionRuntime({
+          ...sessionRuntime(workspace).options, managedContext: context, hostExecution: true,
+        }),
+      });
+      await host.start();
+      return host;
+    })();
+    sessionHosts.set(workspace, pending);
+    void pending.catch(() => { if (sessionHosts.get(workspace) === pending) sessionHosts.delete(workspace); });
+  }
+  return pending;
+}
+async function backendAdapter(backend: "herdr" | "orca", workspace: string) {
+  const control = await sessionControl.status();
+  const herdr = backend === "herdr" ? await herdrInstallation.ensure() : undefined;
+  if (backend === "herdr" && !herdr?.executable)
+    throw new Error(herdr?.detail || "Herdr 当前不可用。");
+  return localAdapter({
+    backend,
+    workspace,
+    control,
+    directory: join(app.getPath("userData"), "session-control"),
+    herdrExecutable: herdr?.executable,
+    environment: process.env,
+  });
+}
+function sessionRuntime(workspace = root) {
+  if (!workspace) throw new Error("请先打开工作区");
+  const existing = sessionRuntimes.get(workspace);
+  if (existing) return existing;
+  const runtime = new SessionRuntime({
+    control: sessionControl,
+    workspace,
+    cliDirectory: join(app.getPath("userData"), "bin"),
+    environment: process.env,
+    prepareHost: async () => { await ensureSessionCommandHost(workspace); },
+    adapter: backendAdapter,
+  });
+  sessionRuntimes.set(workspace, runtime);
+  return runtime;
+}
+async function adoptVerifiedLegacyScenes(workspace: string) {
+  const control = await sessionControl.status();
+  if (control.selected !== "herdr") return { adopted: 0, cleared: 0, blocked: 0 };
+  const target = new WorkspaceService(workspace), before = await target.read();
+  let legacyGoals = before.goals.filter(goal =>
+    (goal.legacyScene || goal.herdr) &&
+    !["completed", "dropped", "backlog"].includes(goal.status));
+  const verifyConcierge = before.concierge.legacyScene ||
+    ("paneId" in before.concierge ? before.concierge.paneId : undefined);
+  if (!legacyGoals.length && !verifyConcierge) return { adopted: 0, cleared: 0, blocked: 0 };
+  const status = await herdrInstallation.ensure();
+  if (!status.executable) throw new Error(status.detail ?? "旧 Herdr 现场需要 Herdr 才能重新核实。");
+  const adapter = await backendAdapter("herdr", workspace);
+  const detection = await adapter.detect();
+  if (detection.status !== "compatible")
+    throw new Error(detection.detail ?? "Herdr 版本无法核实旧现场。");
+  const runtime = await adapter.connect({ installationId: control.installationId, cwd: workspace });
+  const connection = client(status.executable, workspace);
+  let adopted = 0, cleared = 0, blocked = 0;
+  async function convert(reference: {
+    session: string; workspaceId?: string; tabId?: string; paneId?: string;
+    agent?: string; transport?: "pane"; processId?: number; launchPolicy?: "control-plane-v1";
+  }, attemptId?: string) {
+    const verified = await connection.inspectManagedReference(reference as HerdrReference).catch(() => undefined);
+    if (!verified) {
+      if (!reference.processId) {
+        cleared++;
+        return { kind: "stale" as const };
+      }
+      blocked++;
+      return { kind: "blocked" as const };
+    }
+    const processIdentity = await localProcesses.identity(verified.reference.processId!);
+    if (!processIdentity) {
+      blocked++;
+      return { kind: "blocked" as const };
+    }
+    adopted++;
+    return {
+      kind: "scene" as const,
+      scene: {
+        version: 1 as const,
+        backend: "herdr" as const,
+        installationId: control.installationId,
+        runtimeId: runtime.id,
+        runtimeGeneration: runtime.generation,
+        bindingId: randomUUID(),
+        attemptId: attemptId ?? randomUUID(),
+        backendEpoch: control.epoch,
+        process: processIdentity,
+        locator: {
+          kind: "herdr" as const,
+          session: verified.reference.session,
+          workspaceId: verified.reference.workspaceId!,
+          tabId: verified.reference.tabId!,
+          paneId: verified.reference.paneId!,
+          ...(verified.reference.agent ? { agent: verified.reference.agent } : {}),
+          ...(verified.reference.transport ? { transport: verified.reference.transport } : {}),
+          ...(verified.reference.processId ? { processId: verified.reference.processId } : {}),
+          ...(verified.reference.launchPolicy ? { launchPolicy: verified.reference.launchPolicy } : {}),
+        },
+      },
+    };
+  }
+  if (before.concierge.legacyScene) {
+    const converted = await convert(before.concierge.legacyScene.reference);
+    if (converted.kind === "scene") await target.execute({
+      type: "scene.bind", scene: converted.scene, role: "concierge",
+    });
+    else if (converted.kind === "stale") await target.execute({
+      type: "scene.legacy.clear",
+      reason: "旧管家进程已经不存在，切换到按目标记录恢复。",
+    });
+  }
+  for (const goal of legacyGoals) {
+    const legacy = goal.legacyScene ?? (goal.herdr ? {
+      reference: goal.herdr,
+    } : undefined);
+    if (!legacy) continue;
+    const converted = await convert(legacy.reference, goal.agentRuntime?.attempt.attemptId);
+    if (converted.kind === "scene") await target.execute({
+      type: "scene.bind", goalId: goal.id, scene: converted.scene, role: "owner",
+    });
+    else if (converted.kind === "stale") await target.execute({
+      type: "scene.legacy.clear", goalId: goal.id,
+      reason: "旧负责人进程已经不存在，切换到按目标记录恢复。",
+    });
+  }
+  const after = await target.read();
+  for (const goal of after.goals) {
+    if (!goal.autonomy?.verificationSite?.legacyScene || goal.autonomy.verificationSite.scene) continue;
+    const converted = await convert(goal.autonomy.verificationSite.legacyScene.reference);
+    if (converted.kind === "scene") await target.execute({
+      type: "scene.bind", goalId: goal.id, scene: converted.scene, role: "verifier",
+    });
+  }
+  return { adopted, cleared, blocked };
+}
 type SceneOpenResult =
   | { mode: "external"; lease: ExternalSceneLease }
-  | { mode: "embedded" };
+  | { mode: "embedded" }
+  | { mode: "native"; app: "Orca" };
 function sessionName(path = root) { return process.env.CREWVANE_HERDR_SESSION ?? `crewvane-${createHash("sha256").update(path ?? "").digest("hex").slice(0, 10)}`; }
 function sender(event: Electron.IpcMainInvokeEvent) { if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error("不受信任的界面请求"); }
 function activeService() { if (!service) throw new Error("请先打开工作区"); return service; }
@@ -189,15 +361,21 @@ async function installDetectedAgentHooks() {
   return statuses;
 }
 async function remindRuntimeOwner(goal: Goal, prompt: string) {
-  const herdr = await herdrStatus();
-  if (!herdr.executable || !goal.herdr) throw new Error("负责人现场暂不可达");
-  return client(herdr.executable, activeService().root)
-    .notifyOwnerReminder(goal.herdr, prompt);
+  const target = activeService(), current = (await target.read()).goals.find(item => item.id === goal.id);
+  if (!current?.scene) throw new Error("负责人现场暂不可达");
+  const receipt = await sessionRuntime(target.root).send(
+    current.scene,
+    `receipt-reminder-${current.agentRuntime?.receipt?.turnId ?? randomUUID()}`,
+    prompt,
+  );
+  if (receipt.status === "rejected") throw new Error(receipt.detail ?? "负责人现场拒绝本次提醒。");
+  return {
+    status: receipt.status === "unknown" ? "unconfirmed" as const : "sent" as const,
+    ...(receipt.detail ? { detail: receipt.detail } : {}),
+  };
 }
 async function notifyRuntimeConcierge(goal: Goal, detail: string) {
-  const target = activeService(), state = await target.read(), herdr = await herdrStatus();
-  if (!herdr.executable || state.concierge.status !== "ready")
-    throw new Error("管家尚未连接");
+  const target = activeService(), state = await target.read();
   const current = state.goals.find(item => item.id === goal.id) ?? goal;
   const issue: WatchdogRequest = {
     goalId: goal.id,
@@ -219,12 +397,21 @@ async function herdrStatus() {
     plugin: herdrPlugin?.status() ?? { phase: "idle", installed: false },
   };
 }
+const AGENT_COMMANDS = [
+  "codex",
+  "claude",
+  "cursor",
+  "cursor-agent",
+  "qoder",
+  "qodercli",
+  "omp",
+  "gemini",
+  "aider",
+] as const;
 async function agentChoices() {
-  const status = await herdrStatus();
-  if (!status.executable) return [];
-  const help = (await exec(status.executable, ["agent", "start", "--help"], { timeout: 10_000 })).stdout;
-  const kinds = /\[possible values:\s*([^\]]+)\]/.exec(help)?.[1]?.split(",").map(value => value.trim()) ?? [];
-  return Promise.all(kinds.filter(kind => /^[a-z][a-z0-9_-]{0,31}$/.test(kind)).map(async kind => ({
+  // Agent detection belongs to the shared runtime layer. It must not probe or
+  // even start Herdr while Orca is the selected backend.
+  return Promise.all(AGENT_COMMANDS.map(async kind => ({
     kind, installed: Boolean(await executable(kind)),
   })));
 }
@@ -256,6 +443,11 @@ async function prepareHerdrCompanionsNow(workspace = root) {
       message: `Crewvane CLI 或 Agent Hook 准备暂未完成：${error instanceof Error ? error.message : String(error)}`,
     });
   }
+  const control = await sessionControl.status();
+  if (control.selected === "orca") {
+    await orcaInstallation.refresh(control.orcaAppPath);
+    return await orcaInstallation.status();
+  }
   const status = await herdrInstallation.ensure();
   if (!status.executable) return status;
   const plugin = await herdrPlugin.ensure(status.executable);
@@ -276,6 +468,11 @@ async function installHerdr() {
   const status = await herdrInstallation.ensure(true);
   if (!status.executable) return status;
   await herdrPlugin.ensure(status.executable);
+  broadcastHerdrStatus(status);
+  return status;
+}
+async function checkHerdrUpdate() {
+  const status = await herdrInstallation.check();
   broadcastHerdrStatus(status);
   return status;
 }
@@ -374,7 +571,8 @@ async function installCliNow(workspace = root) {
   const cliBundle = app.isPackaged ? join(process.resourcesPath, "app.asar.unpacked/dist/cli/crewvane.cjs") : join(here, "cli/crewvane.cjs");
   const launcher = join(status.directory, "crewvane");
   const defaultRoot = workspace ? quoteShell(workspace) : '""';
-  await writeFile(launcher, `#!/bin/sh\n# Crewvane embedded CLI\n[ -n "\${CREWVANE_WORKSPACE:-}" ] || CREWVANE_WORKSPACE=${defaultRoot}\nexport CREWVANE_WORKSPACE\nELECTRON_RUN_AS_NODE=1 exec ${quoteShell(cliRuntime)} ${quoteShell(cliBundle)} "$@"\n`, { mode: 0o700 });
+  const controlDirectory = join(app.getPath("userData"), "session-control");
+  await writeFile(launcher, `#!/bin/sh\n# Crewvane embedded CLI\n[ -n "\${CREWVANE_WORKSPACE:-}" ] || CREWVANE_WORKSPACE=${defaultRoot}\nexport CREWVANE_WORKSPACE\nCREWVANE_CONTROL_DIRECTORY=${quoteShell(controlDirectory)}\nCREWVANE_CLI_DIRECTORY=${quoteShell(status.directory)}\nexport CREWVANE_CONTROL_DIRECTORY CREWVANE_CLI_DIRECTORY\nELECTRON_RUN_AS_NODE=1 exec ${quoteShell(cliRuntime)} ${quoteShell(cliBundle)} "$@"\n`, { mode: 0o700 });
   await chmod(launcher, 0o700);
   if (status.installed) await unlink(status.path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
@@ -412,7 +610,13 @@ function externalClient(path: string, workspace = root) {
 }
 async function closeEndedGoalSession(target: WorkspaceService, goalId: string, executable?: string) {
   const item = (await target.read()).goals.find(goal => goal.id === goalId);
-  if (!item || !["completed", "dropped"].includes(item.status) || !item.herdr) return false;
+  if (!item || !["completed", "dropped"].includes(item.status)) return false;
+  if (item.scene) {
+    await sessionRuntime(target.root).captureOwnerResume(goalId, item.scene).catch(() => undefined);
+    await sessionRuntime(target.root).close(item.scene, goalId);
+    return true;
+  }
+  if (!item.herdr) return false;
   const herdrExecutable = executable ?? (await herdrStatus()).executable;
   if (!herdrExecutable) throw new Error("Herdr 当前不可用，负责人现场将在恢复后自动关闭");
   const connection = client(herdrExecutable, target.root);
@@ -430,9 +634,9 @@ async function restartEndedGoal(target: WorkspaceService, goalId: string, note: 
     throw new Error("只有已完成或已放弃的目标可以重启");
   if (item.mode !== "concierge")
     throw new Error("个人事项请恢复到待办池，不需要重启 Agent");
-  // A previous close may have failed. Preserve the resumable identity before
-  // removing its stale tab so restart cannot orphan the old owner.
-  if (item.herdr)
+  // A previous close may have failed. Close only an identity-verified scene
+  // before opening the new backend attempt.
+  if (item.scene || item.herdr)
     await closeEndedGoalSession(target, item.id);
   const restarted = await target.execute({ type: "goal.restart", goalId, note }) as Goal;
   void agentRuntimeBroker?.refresh(goalId).catch(() => {});
@@ -449,13 +653,16 @@ async function restartEndedGoal(target: WorkspaceService, goalId: string, note: 
   }
   return restarted;
 }
-const preparations = new Map<string, Promise<HerdrReference>>();
-const refreshedConcierges = new Map<string, string>();
-function conciergeIdentity(reference: HerdrReference) {
-  return JSON.stringify([reference.session, reference.paneId, reference.agent, reference.processId]);
-}
+const preparations = new Map<string, Promise<import("../../../packages/core/src/index.js").SceneReferenceV1>>();
 const handoffs = new Map<string, Promise<void>>();
-const CONCIERGE_TURN_TIMEOUT_MS = 30_000;
+// A real Codex/OMP turn can legitimately spend more than 30 seconds creating
+// an owner and recording its first structured proof. Backend switching waits
+// for that turn to become idle before sending the next case instead of turning
+// normal coordination latency into recovery_required.
+const CONCIERGE_TURN_TIMEOUT_MS = 120_000;
+const BACKEND_HANDOFF_STALL_PROBE_MS = 15_000;
+const BACKEND_HANDOFF_IDLE_SETTLE_MS = 30_000;
+const BACKEND_HANDOFF_PROOF_TIMEOUT_MS = 240_000;
 function broadcastCoordinatorStatus(status: CoordinatorInboxStatus) {
   if (window && !window.isDestroyed())
     window.webContents.send("crewvane:event", { type: "coordinator-status", status });
@@ -547,6 +754,8 @@ async function executeCoordinatorItem(
 ): Promise<CoordinatorExecutionResult> {
   if (root !== target.root)
     return { status: "cancelled", detail: "工作区已切换，本次收件未发送。" };
+  if (!await sessionControl.canDispatch())
+    return { status: "deferred", detail: "现场交接或更新期间已保留通知，完成后继续派发。" };
   if (item.kind === "watchdog") {
     if (!item.watchdogReason || !item.watchdogBasis)
       return { status: "cancelled", detail: "巡检请求缺少原因或基准，已取消。" };
@@ -554,15 +763,25 @@ async function executeCoordinatorItem(
       item.watchdogReason,
     )) return { status: "cancelled", detail: "巡检请求包含未知原因，已取消。" };
     try {
-      const status = await herdrStatus();
-      if (!status.executable) throw new Error("Herdr 尚未准备好");
-      const reference = await prepareConcierge(target);
+      const current = (await target.read()).goals.find(goal => goal.id === item.goalId);
+      if (!current) throw new Error("目标不存在或已删除。");
+      if (current.watchdog?.basis !== item.watchdogBasis ||
+        current.watchdog.reason !== item.watchdogReason || attentionRequest(current) ||
+        ["completed", "dropped", "backlog"].includes(current.status))
+        return { status: "cancelled", detail: "巡检依据已被新的现场或语义写回取代。" };
+      const runtime = sessionRuntime(target.root);
+      const concierge = await prepareConcierge(target);
+      const site = (await runtime.inspect([concierge]))[0];
+      if (site?.identity === "match" && ["working", "blocked"].includes(site.state))
+        return { status: "deferred", detail: "管家正在处理上一回合，巡检通知仍保存在队列中。" };
       await writeCoordinatorScope(target.root, item.goalId, item.requestId);
-      await client(status.executable, target.root).notifyWatchdog(reference, [{
-        goalId: item.goalId,
-        reason: item.watchdogReason as WatchdogReason,
-        basis: item.watchdogBasis,
-      }]);
+      const result = await sessionRuntime(target.root).notifyGoal(
+        current,
+        `请核对巡检事项：${item.watchdogReason}。依据基准 ${item.watchdogBasis}。`,
+        undefined,
+        item.requestId,
+      );
+      if (result.receipt.status === "rejected") throw new Error(result.receipt.detail ?? "管家现场拒绝本次核对消息。");
       await target.execute({
         type: "watchdog.report",
         goalId: item.goalId,
@@ -570,8 +789,10 @@ async function executeCoordinatorItem(
         basis: item.watchdogBasis,
         outcome: "contacted",
       });
-      return { status: "sent", estimatedChars: 3_500 };
+      return { status: result.receipt.status === "unknown" ? "unconfirmed" : "sent", estimatedChars: 3_500 };
     } catch (error) {
+      if (error instanceof SessionError && error.code === "backend_busy")
+        return { status: "deferred", detail: error.message };
       const detail = error instanceof Error ? error.message : String(error);
       await target.execute({
         type: "watchdog.report",
@@ -584,7 +805,7 @@ async function executeCoordinatorItem(
       return {
         status: "failed",
         detail,
-        pauseQueue: error instanceof ConciergeBlockedError,
+        pauseQueue: /blocked|等待交互输入/i.test(detail),
       };
     }
   }
@@ -598,17 +819,15 @@ async function executeCoordinatorItem(
     return { status: "cancelled", detail: "已有更新请求，本次请求已合并。" };
 
   try {
-    const status = await herdrStatus();
-    if (!status.executable) throw new Error("Herdr 尚未准备好");
-    const reference = await prepareConcierge(target);
-    const messenger = client(status.executable, target.root);
-    const site = await messenger.inspectConcierge(reference);
-    if (site?.live.state === "working")
+    const runtime = sessionRuntime(target.root);
+    const concierge = await prepareConcierge(target);
+    const site = await runtime.inspect([concierge]);
+    if (site[0]?.state === "working")
       return {
         status: "deferred",
         detail: "管家仍在处理上一案卷，本通知已保留并将在其空闲后继续。",
       };
-    if (site?.live.state === "blocked")
+    if (site[0]?.state === "blocked")
       return {
         status: "deferred",
         detail: "管家正在等待人处理现场输入，本通知已保留且不会插入终端。",
@@ -620,23 +839,13 @@ async function executeCoordinatorItem(
       item.kind === "scene_reply" ? before.sceneReply : undefined,
     );
     await deliverGoalUpdate(target, item.goalId, async current => {
-      if (item.kind === "follow_up")
-        return messenger.notifyFollowUp(
-          reference,
-          current.id,
-          current.dispatch?.note || "",
-          current,
-          target.root,
-          CONCIERGE_TURN_TIMEOUT_MS,
-        );
-      return messenger.notifyGoal(
-        reference,
-        current.id,
-        current.title,
-        current,
-        target.root,
-        CONCIERGE_TURN_TIMEOUT_MS,
-      );
+      const result = await runtime.notifyGoal(current, current.dispatch?.note);
+      if (result.receipt.status === "rejected")
+        throw new Error(result.receipt.detail ?? "管家现场拒绝本次消息。");
+      return {
+        status: result.receipt.status === "unknown" ? "unconfirmed" : "sent",
+        ...(result.receipt.detail ? { detail: result.receipt.detail } : {}),
+      };
     }, item.requestId);
     const latest = (await target.read()).goals.find(goal => goal.id === item.goalId);
     if (!latest?.dispatch || latest.dispatch.id !== item.requestId)
@@ -644,8 +853,8 @@ async function executeCoordinatorItem(
     const deliveryStatus = latest.dispatch.status;
     let pauseQueue = false;
     if (deliveryStatus === "unconfirmed") {
-      const presence = await messenger.inspectConcierge(reference)
-        .then(site => site?.live.state)
+      const presence = await runtime.inspect([concierge])
+        .then(site => site[0]?.state)
         .catch(() => undefined);
       pauseQueue = presence === "working";
     }
@@ -662,6 +871,8 @@ async function executeCoordinatorItem(
       pauseQueue,
     };
   } catch (error) {
+    if (error instanceof SessionError && error.code === "backend_busy")
+      return { status: "deferred", detail: error.message };
     const detail = error instanceof Error ? error.message : String(error);
     const latest = (await target.read()).goals.find(goal => goal.id === item.goalId);
     if (latest?.dispatch?.id === item.requestId && latest.dispatch.status === "pending") {
@@ -676,7 +887,7 @@ async function executeCoordinatorItem(
     return {
       status: "failed",
       detail,
-      pauseQueue: error instanceof ConciergeBlockedError,
+      pauseQueue: /blocked|等待交互输入/i.test(detail),
     };
   }
 }
@@ -685,19 +896,16 @@ async function resetCoordinatorContextIfNeeded(target: WorkspaceService) {
   const status = await inbox.status();
   if (!status.contextResetDue || status.queued || status.processing) return;
   const state = await target.read();
-  const herdr = await herdrStatus();
-  if (!herdr.executable || state.concierge.status !== "ready") return;
-  const connection = client(herdr.executable, target.root);
-  const site = await connection.inspectConcierge(state.concierge);
-  if (!site || !["idle", "done"].includes(site.live.state)) return;
-  await connection.closeConcierge(site.reference);
+  if (state.concierge.status !== "ready" || !state.concierge.scene) return;
+  const runtime = sessionRuntime(target.root);
+  const site = (await runtime.inspect([state.concierge.scene]))[0];
+  if (!site || !["idle"].includes(site.state)) return;
+  await runtime.close(state.concierge.scene);
   await target.execute({
     type: "concierge.status",
     status: "not_ready",
-    reference: { session: site.reference.session },
     detail: "正在轮换管家上下文，已完成案卷仍保存在工作区。",
   });
-  refreshedConcierges.delete(target.root);
   await prepareConcierge(target);
   await inbox.markContextReset();
   broadcastCoordinatorStatus(await inbox.status());
@@ -718,6 +926,7 @@ async function drainCoordinatorQueue(target: WorkspaceService) {
 }
 async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<void> {
   if (root !== target.root) return;
+  if (!await sessionControl.canDispatch()) return;
   const key = `${target.root}:${goalId}`;
   const pending = handoffs.get(key); if (pending) return pending;
   const work = (async () => {
@@ -725,7 +934,7 @@ async function dispatchGoal(target: WorkspaceService, goalId: string): Promise<v
       let current = (await target.read()).goals.find(goal => goal.id === goalId);
       if (!current || current.mode !== "concierge" ||
         ["backlog", "completed", "dropped"].includes(current.status)) return;
-      if (current?.dispatch?.kind === "restart" && !current.herdr) {
+      if (current?.dispatch?.kind === "restart" && !current.scene && !current.herdr) {
         try {
           await restartOwnerSession(target, current);
         } catch (error) {
@@ -783,36 +992,11 @@ function restartOwnerTask(goal: Goal) {
   ].join("\n\n");
 }
 async function restartOwnerSession(target: WorkspaceService, goal: Goal) {
-  const status = await herdrStatus();
-  if (!status.executable) throw new Error(status.detail || "Herdr 尚未准备好");
-  const session = sessionName(target.root);
-  const run: HerdrCommandRunner = async args => {
-    const { stdout } = await exec(status.executable!, ["--session", session, ...args], {
-      timeout: 190_000,
-      maxBuffer: 1_000_000,
-      env: { ...process.env, HERDR_SESSION: session },
-    });
-    return stdout;
-  };
-  return launchOwner(
-    target,
-    {
-      goalId: goal.id,
-      name: restartOwnerName(goal),
-      task: restartOwnerTask(goal),
-      ...(goal.ownerResume ? { resume: goal.ownerResume } : {}),
-    },
-    {
-      environment: {
-        ...process.env,
-        HERDR_ENV: "1",
-        HERDR_SESSION: session,
-        CREWVANE_HERDR_BINARY: status.executable,
-        HOME: app.getPath("home"),
-      },
-      run,
-    },
-  );
+  return sessionRuntime(target.root).launchOwner({
+    goalId: goal.id,
+    name: restartOwnerName(goal),
+    task: restartOwnerTask(goal),
+  });
 }
 async function prepareConcierge(target = activeService()) {
   const pending = preparations.get(target.root);
@@ -822,98 +1006,37 @@ async function prepareConcierge(target = activeService()) {
   try { return await preparing; } finally { preparations.delete(target.root); }
 }
 async function doPrepareConcierge(target: WorkspaceService) {
-  const status = await herdrInstallation.ensure();
-  if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好，请在设置中重试");
   await installCli(target.root);
-  const plugin = await herdrPlugin.ensure(status.executable);
-  broadcastHerdrStatus(status);
-  if (plugin.phase === "error") throw new Error(plugin.detail);
+  await installDetectedAgentHooks();
+  const control = await sessionControl.status();
+  if (control.selected === "herdr") {
+    const status = await herdrInstallation.ensure();
+    if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好，请在设置中重试");
+    const plugin = await herdrPlugin.ensure(status.executable);
+    broadcastHerdrStatus(status);
+    if (plugin.phase === "error") throw new Error(plugin.detail);
+  }
   const state = await target.read();
-  await target.execute({
-    type: "concierge.status",
-    status: "not_ready",
-    reference: state.concierge,
-    live: null,
-    detail: "正在准备全局管家…",
-  });
-  try {
-    const connection = client(status.executable, target.root);
-    const site = await connection.inspectConcierge(state.concierge);
-    if (site) {
-      const existing = site.reference;
-      const identity = conciergeIdentity(existing);
-      const refreshResult = await refreshConciergeIfSafe({
-        reference: existing,
-        live: site.live,
-        alreadyRefreshed: refreshedConcierges.get(target.root) === identity,
-        refresh: candidate => connection.refreshConcierge(candidate, target.root, state.agents),
-      });
-      if (refreshResult === "refreshed")
-        refreshedConcierges.set(target.root, identity);
-      const live: LivePresence = refreshResult === "blocked"
-        ? { state: "blocked", checkedAt: new Date().toISOString(), reachable: true }
-        : site.live;
-      await target.execute({
-        type: "concierge.status",
-        status: "ready",
-        reference: existing,
-        live,
-        ...(live.state === "blocked"
-          ? { detail: "管家正在等待交互输入；已保留现有现场。" }
-          : {}),
-      });
-      return existing;
-    }
-    const home = app.getPath("home");
-    const preferences = state.agents ?? { concierge: "codex" };
-    const command = parseAgentCommand(preferences.concierge, (await agentChoices()).map(option => option.kind));
-    const agentExecutable = await executable(command.executable, target.root);
-    // Finder does not see shell aliases or functions. The actual interactive
-    // pane is the source of truth; directory preflight is only an optimization.
-    const launchExecutable = agentExecutable ??
-      (command.executable.startsWith("~/")
-        ? join(home, command.executable.slice(2))
-        : command.executable);
-    const reference = await connection.prepareConcierge(
-      target.root,
-      state.concierge,
-      command.kind ?? "",
-      join(home, ".local/bin"),
-      `${dirname(status.executable)}:${join(home, ".local/bin")}`,
-      agentExecutable ? dirname(agentExecutable) : join(home, ".local/bin"),
-      async (reference) => {
-        await target.execute({ type: "concierge.status", status: "not_ready", reference, detail: "正在启动管家…" });
-      },
-      preferences,
-      command.args,
-      launchExecutable,
-      (await cliStatus()).directory,
-      status.executable,
-      herdrHostBridge?.socketPath ?? "",
-      herdrHostBridge?.token ?? "",
-      !agentExecutable,
-    );
-    refreshedConcierges.set(target.root, conciergeIdentity(reference));
+  if (!state.concierge.scene ||
+    state.concierge.initializedAttemptId !== state.concierge.scene.attemptId)
     await target.execute({
-      type: "concierge.status",
-      status: "ready",
-      reference,
-      live: { state: "unknown", checkedAt: new Date().toISOString(), reachable: true },
+      type: "scene.concierge.status",
+      status: "not_ready",
+      detail: "正在准备全局管家…",
     });
-    return reference;
+  try {
+    const scene = await sessionRuntime(target.root).prepareConcierge();
+    // The runtime owns initialization/readiness. Reusing a verified concierge
+    // must not clear its presence or generate another identity handshake.
+    return scene;
   } catch (error) {
-    if (error instanceof ConciergeBlockedError) {
-      const reference = (await target.read()).concierge;
-      await target.execute({
-        type: "concierge.status",
-        status: "ready",
-        reference,
-        live: { state: "blocked", checkedAt: new Date().toISOString(), reachable: true },
-        detail: "管家正在等待交互输入；已保留现有现场。",
-      });
-      return reference;
-    }
-    const detail = error instanceof Error ? error.message : String(error);
+    // Never pass an untrusted transport's arbitrarily long stderr to a Core
+    // status field. Keep a useful, bounded first line and leave the original
+    // delivery receipt available for recovery.
+    const reported = (error instanceof Error ? error.message : String(error))
+      .split(/\r?\n/).find(line => line.trim())?.trim() ?? "";
+    const detail = reported.slice(0, 800) ||
+      "管家初始化尚未确认；请打开原现场核对，Crewvane 不会重复创建或重发。";
     await target.execute({ type: "concierge.status", status: "error", reference: (await target.read()).concierge, detail });
     throw new Error(`管家尚未准备好：${detail}`);
   }
@@ -954,65 +1077,75 @@ async function openExternalScene(
     herdrExecutable: status.executable,
   });
 }
-async function openConcierge(target = activeService(), goalId?: string) {
-  // A stored tab is only a locator. It may still be open while the concierge
-  // process has exited or been replaced by a manually started agent.
-  const reference = await prepareConcierge(target);
-  await openHerdr(reference, goalId);
-  const latest = (await target.read()).concierge;
-  if (latest.status !== "ready" || latest.detail) {
-    await target.execute({
-      type: "concierge.status",
-      status: "ready",
-      reference: latest,
-      live: latest.live ?? null,
-    });
-  }
-  if (root === target.root) broadcastSnapshot(await target.read(), target.root);
-  return reference;
-}
-async function openConciergeExternal(target = activeService(), goalId?: string) {
-  const reference = await prepareConcierge(target);
-  const lease = await openExternalScene(reference, goalId);
-  const latest = (await target.read()).concierge;
-  if (latest.status !== "ready" || latest.detail) {
-    await target.execute({
-      type: "concierge.status",
-      status: "ready",
-      reference: latest,
-      live: latest.live ?? null,
-    });
-  }
-  if (root === target.root) broadcastSnapshot(await target.read(), target.root);
-  return lease;
-}
 async function openEmbeddedScene(target: WorkspaceService, goalId?: string) {
-  const state = await target.read();
-  if (!goalId) {
-    await openConcierge(target);
+  const candidate = goalId ? (await target.read()).goals.find(goal => goal.id === goalId) : undefined;
+  if (candidate?.mode === "manual" && !candidate.scene && !candidate.autonomy?.verificationSite?.scene) {
+    // A recorded personal item opens the real workspace, not a model session.
+    // A failed concierge initialization must not disable terminal viewing.
+    if ((await sessionControl.status()).selected === "orca")
+      throw new Error("这件个人事项没有 Orca 受管现场，请先交给管家；不会静默启动另一位管家。");
+    const executable = await herdrInstallationStatusBinary();
+    await (await backendAdapter("herdr", target.root)).connect({
+      installationId: (await sessionControl.status()).installationId,
+      cwd: target.root, startIfMissing: true,
+    });
+    await client(executable, target.root).ensureWorkspace();
+    await terminals.attach(executable, sessionName(target.root), target.root);
+    if (root === target.root) window.webContents.send("crewvane:event", {
+      type: "terminal-open", session: sessionName(target.root), title: "工作现场", goalId,
+    });
     return;
   }
-  const item = state.goals.find(goal => goal.id === goalId);
-  if (!item) throw new Error("目标不存在");
-  if (item.mode === "concierge" && !item.herdr) {
-    await openConcierge(target, goalId);
-    return;
-  }
-  await openHerdr(item.herdr, goalId);
+  const scene = await sceneForGoal(target, goalId);
+  if (scene.backend !== "herdr") throw new Error("Orca 模式使用原生工作现场，不提供内嵌终端。");
+  await sessionRuntime(target.root).focus(scene);
+  if (goalId) await target.execute({ type: "scene.visit", goalId });
+  await terminals.attach(await herdrInstallationStatusBinary(), sessionName(target.root), target.root);
+  if (root === target.root) window.webContents.send("crewvane:event", {
+    type: "terminal-open", session: sessionName(target.root),
+    title: goalId ? "工作现场" : "全局管家", goalId,
+  });
 }
 async function openExternalSceneForGoal(target: WorkspaceService, goalId?: string) {
-  const state = await target.read();
-  if (!goalId) return openConciergeExternal(target);
-  const item = state.goals.find(goal => goal.id === goalId);
-  if (!item) throw new Error("目标不存在");
-  if (item.mode === "concierge" && !item.herdr)
-    return openConciergeExternal(target, goalId);
-  return openExternalScene(item.herdr, goalId);
+  const candidate = goalId ? (await target.read()).goals.find(goal => goal.id === goalId) : undefined;
+  if (candidate?.mode === "manual" && !candidate.scene && !candidate.autonomy?.verificationSite?.scene) {
+    if ((await sessionControl.status()).selected === "orca")
+      throw new Error("这件个人事项没有 Orca 受管现场，请先交给管家；不会静默启动另一位管家。");
+    const executable = await herdrInstallationStatusBinary();
+    await (await backendAdapter("herdr", target.root)).connect({
+      installationId: (await sessionControl.status()).installationId,
+      cwd: target.root, startIfMissing: true,
+    });
+    await client(executable, target.root).ensureWorkspace();
+    return externalTerminals.open({ workspaceRoot: target.root,
+      session: sessionName(target.root), herdrExecutable: executable });
+  }
+  const scene = await sceneForGoal(target, goalId);
+  if (scene.backend !== "herdr") throw new Error("Orca 模式使用原生工作现场。");
+  await sessionRuntime(target.root).focus(scene);
+  if (goalId) await target.execute({ type: "scene.visit", goalId });
+  return externalTerminals.open({
+    workspaceRoot: target.root,
+    session: sessionName(target.root),
+    herdrExecutable: await herdrInstallationStatusBinary(),
+  });
 }
 async function openPreferredScene(
   target: WorkspaceService,
   goalId?: string,
+  recover = false,
 ): Promise<SceneOpenResult> {
+  if (recover) {
+    if (!goalId) throw new Error("恢复现场需要目标 ID。");
+    await sessionRuntime(target.root).recoverOwnerForConsultation(goalId);
+  }
+  const scene = await sceneForGoal(target, goalId);
+  if (scene.backend === "orca") {
+    await sessionRuntime(target.root).focus(scene);
+    if (goalId) await target.execute({ type: "scene.visit", goalId });
+    if (root === target.root) broadcastSnapshot(await target.read(), target.root);
+    return { mode: "native", app: "Orca" };
+  }
   const status = await externalTerminals.status();
   if (status.settings.openWith === "external") {
     return {
@@ -1022,6 +1155,395 @@ async function openPreferredScene(
   }
   await openEmbeddedScene(target, goalId);
   return { mode: "embedded" };
+}
+async function herdrInstallationStatusBinary() {
+  const executable = (await herdrInstallation.status()).executable ?? process.env.CREWVANE_HERDR_BINARY;
+  if (!executable) throw new Error("Herdr 当前不可用。");
+  return executable;
+}
+async function sceneForGoal(target: WorkspaceService, goalId?: string) {
+  const state = await target.read();
+  if (!goalId) {
+    return prepareConcierge(target);
+  }
+  const item = state.goals.find(goal => goal.id === goalId);
+  if (!item) throw new Error("目标不存在");
+  if (item.scene) {
+    const observed = (await sessionRuntime(target.root).inspect([item.scene]))[0];
+    if (observed?.identity === "match" && observed.state === "exited")
+      throw new Error("原现场已结束，请在目标详情点击“恢复并进入现场”。未自动创建新负责人。");
+    return item.scene;
+  }
+  if (item.autonomy?.verificationSite?.scene) return item.autonomy.verificationSite.scene;
+  if (item.backendHandoff && item.mode === "concierge" &&
+    !["completed", "dropped", "backlog"].includes(item.status)) {
+    throw new Error("目标等待显式恢复，请在目标详情点击“恢复并进入现场”。");
+  }
+  return prepareConcierge(target);
+}
+async function backendControlStatus() {
+  const control = await sessionControl.status();
+  const [journal, workspaces, orca] = await Promise.all([
+    sessionControl.journal(),
+    sessionControl.registrations(),
+    orcaInstallation.status(),
+  ]);
+  const states = await Promise.all(workspaces.map(workspace =>
+    new WorkspaceService(workspace.root).read().catch(() => undefined)));
+  const impact = states.reduce((result, state) => {
+    if (!state) return result;
+    result.goals += state.goals.filter(goal =>
+      goal.mode === "concierge" && !["completed", "dropped", "backlog"].includes(goal.status)).length;
+    result.scenes += (state.concierge.scene ? 1 : 0) +
+      state.goals.filter(goal => goal.scene).length +
+      state.goals.filter(goal => goal.autonomy?.verificationSite?.scene).length;
+    return result;
+  }, { goals: 0, scenes: 0 });
+  return { control, journal, workspaces, orca, impact };
+}
+function backendSwitchHooks() {
+  return {
+    adapter: backendAdapter,
+    busy: async (workspace: string) => {
+      if (workspace !== root || !coordinatorInbox) return false;
+      const status = await coordinatorInbox.status();
+      return Boolean(status.processing) || status.queued > 0;
+    },
+    resume: async (input: {
+      workspace: string;
+      state: WorkspaceState;
+      authority: SwitchAuthority;
+      operationId: string;
+    }) => {
+      const target = new WorkspaceService(input.workspace);
+      const channel: SessionRecoveryChannel = new SessionRecoveryChannel(sessionControl.directory, async (request): Promise<unknown> => {
+        const state = await target.read(), context = request.context, binding = state.backendBinding;
+        const scope = JSON.parse(await readFile(join(input.workspace, ".crewvane/coordinator-scope.json"), "utf8"));
+        if (!binding || binding.status !== "resuming" || binding.operationId !== input.operationId ||
+          context.role !== "concierge" || context.installationId !== binding.installationId ||
+          context.backend !== binding.backend || context.epoch !== binding.epoch ||
+          context.scopeGeneration !== binding.scopeGeneration || context.goalId !== scope.goalId ||
+          context.attemptId !== state.concierge.scene?.attemptId)
+          throw new Error("恢复操作不属于当前管家、代次或案卷。");
+        const managed: SessionRuntime = new SessionRuntime({ ...runtime.options, managedContext: context });
+        if (request.operation === "launch") {
+          const value = request.input;
+          if (value.goalId !== scope.goalId || typeof value.name !== "string" ||
+            value.role && value.role !== "owner" && value.role !== "verifier" ||
+            value.task !== undefined && typeof value.task !== "string" ||
+            value.taskFile !== undefined && typeof value.taskFile !== "string")
+            throw new Error("恢复启动参数无效。");
+          return managed.launchOwner({
+            goalId: scope.goalId, name: value.name,
+            role: value.role as "owner" | "verifier" | undefined,
+            task: value.task as string | undefined, taskFile: value.taskFile as string | undefined,
+          }, input.authority);
+        }
+        if (typeof request.input.deliveryId !== "string" || typeof request.input.text !== "string" ||
+          request.input.text.length > 100_000) throw new Error("恢复投递参数无效。");
+        return managed.send(validatedScene(request.input.scene), request.input.deliveryId,
+          request.input.text, input.authority);
+      });
+      const runtime: SessionRuntime = new SessionRuntime({
+        ...sessionRuntime(input.workspace).options,
+        environment: { ...process.env, ...channel.environment },
+      });
+      const quiet = async (scene: import("../../../packages/core/src/index.js").SceneReferenceV1) => {
+        const deadline = Date.now() + CONCIERGE_TURN_TIMEOUT_MS;
+        do {
+          const site = (await runtime.inspect([scene]))[0];
+          if (site?.identity === "match" && site.state === "idle") return true;
+          if (site?.state === "blocked" || site?.state === "exited") return false;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } while (Date.now() < deadline);
+        return false;
+      };
+      const hasBusinessProof = async (
+        goalId: string,
+        scene: import("../../../packages/core/src/index.js").SceneReferenceV1,
+        before: ReturnType<typeof captureBackendHandoffEvidence>,
+        timeout: number,
+        expectedStarted: boolean,
+      ) => {
+        const startedAt = Date.now(), deadline = startedAt + timeout;
+        let sawWorking = expectedStarted, idleSince: number | undefined;
+        do {
+          const current = (await target.read()).goals.find(goal => goal.id === goalId);
+          if (current && backendHandoffAdvanced(before, current)) return true;
+          const site = (await runtime.inspect([scene]))[0];
+          if (site?.state === "blocked" || site?.state === "exited") return false;
+          if (site?.state === "working") {
+            sawWorking = true;
+            idleSince = undefined;
+          } else if (site?.state === "idle") {
+            idleSince ??= Date.now();
+            if (sawWorking && Date.now() - idleSince >= BACKEND_HANDOFF_IDLE_SETTLE_MS)
+              return false;
+            if (!sawWorking && Date.now() - startedAt >= BACKEND_HANDOFF_STALL_PROBE_MS)
+              return false;
+          } else {
+            idleSince = undefined;
+          }
+          await new Promise(resolve => setTimeout(resolve, 1_000));
+        } while (Date.now() < deadline);
+        const current = (await target.read()).goals.find(goal => goal.id === goalId);
+        return Boolean(current && backendHandoffAdvanced(before, current));
+      };
+      await channel.start();
+      try {
+        const concierge = await runtime.prepareConcierge(input.authority);
+        if (!await quiet(concierge)) throw new Error("新管家尚未空闲，已保留交接记录，请核对原现场后恢复。");
+        let deferRemaining = false;
+        for (const id of input.state.goals.map(goal => goal.id)) {
+          // Preparation is not a frozen business snapshot.
+          const goal = (await target.read()).goals.find(goal => goal.id === id);
+          const handoff = goal?.backendHandoff;
+          if (!goal || !handoff || handoff.operationId !== input.operationId ||
+            !["case-rehydrate", "native-resume"].includes(handoff.method)) continue;
+          if (["accepted", "skipped"].includes(handoff.status)) continue;
+          if (goal.scene) {
+            const observation = (await runtime.inspect([goal.scene]))[0];
+            if (observation?.identity !== "match" || !observation.reachable)
+              throw new Error("恢复现场的身份或存活尚未核实；已保留原交接，不会重复派发。");
+            await target.execute({
+              type: "backend.handoff",
+              goalId: id,
+              operationId: input.operationId,
+              patch: {
+                status: "accepted",
+                detail: "恢复后发现负责人现场已绑定，未重复派发。",
+              },
+            });
+            continue;
+          }
+          if (["pending", "unconfirmed", "failed", "stopped"].includes(handoff.status) &&
+            backendHandoffHasPersistedProof(handoff, goal)) {
+            await target.execute({
+              type: "backend.handoff",
+              goalId: id,
+              operationId: input.operationId,
+              patch: {
+                status: "accepted",
+                receiptId: handoff.receiptId,
+                detail: "重试时发现了超时之后才落盘的结构化协调证据；没有重放旧任务。",
+              },
+            });
+            if (goal.dispatch?.kind === "resume" && handoff.receiptId)
+              await target.execute({
+                type: "goal.dispatch",
+                goalId: id,
+                status: "sent",
+                requestId: handoff.receiptId,
+              });
+            continue;
+          }
+          if (["pending", "unconfirmed", "failed", "stopped"].includes(handoff.status))
+            throw new Error(
+              "已有后端交接的结果尚未确认；请先核对原现场，不能自动重放旧案卷。",
+            );
+          if (goal.status !== "active" || goal.mode !== "concierge" || goal.autonomy?.paused) {
+            await target.execute({ type: "backend.handoff", goalId: id, operationId: input.operationId,
+              patch: { method: "deferred", status: "skipped" } });
+            continue;
+          }
+          if (attentionRequest(goal)) {
+            // A decision belongs to its owner, not to a fresh implementation
+            // task. Restore a read-only consultation scene and preserve the
+            // exact attention ID. scene-reply will enqueue the concierge only
+            // after a real user answer has been saved.
+            const restored = await runtime.launchOwner({
+              goalId: id,
+              name: `owner-${id.replace(/[^a-z0-9]/gi, "").slice(-8).toLowerCase()}`,
+              consultationOnly: true,
+            }, input.authority);
+            await target.execute({ type: "backend.handoff", goalId: id, operationId: input.operationId,
+              patch: { status: restored.receipt?.status === "unknown" ? "unconfirmed" : "accepted",
+                receiptId: restored.receipt?.deliveryId, detail: restored.receipt?.detail } });
+            continue;
+          }
+          const note = "后端已交接。先核对最新案卷与磁盘已有成果，再创建独立负责人继续明确下一步；不得重复旧任务或外部动作。";
+          if (deferRemaining) {
+            if (goal.dispatch?.status !== "pending")
+              await target.execute({ type: "goal.dispatch", goalId: id, status: "pending", kind: "resume", note });
+            continue;
+          }
+          const queued = await prepareBackendHandoffCase({
+            workspace: input.workspace, goalId: id, operationId: input.operationId,
+            note, waitForIdle: () => quiet(concierge),
+          });
+          if (!queued) continue;
+          const deliveryId = queued.dispatch?.id;
+          if (!deliveryId) throw new Error("恢复交接缺少持久化派发编号。");
+          const beforeProof = captureBackendHandoffEvidence(queued);
+          let result;
+          try {
+            result = await runtime.notifyGoal(queued, note, input.authority, deliveryId);
+          } catch (error) {
+            if (!(error instanceof SessionError && error.code === "backend_busy") ||
+              !await quiet(concierge)) throw error;
+            result = await runtime.notifyGoal(queued, note, input.authority, deliveryId);
+          }
+          if (result.receipt.status === "rejected") throw new Error(result.receipt.detail ?? "管家未接受恢复案卷。");
+          const proven = await hasBusinessProof(
+            id,
+            concierge,
+            beforeProof,
+            result.receipt.status === "started"
+              ? BACKEND_HANDOFF_PROOF_TIMEOUT_MS
+              : BACKEND_HANDOFF_STALL_PROBE_MS,
+            result.receipt.status === "started",
+          );
+          if (!proven) {
+            await target.execute({
+              type: "backend.handoff",
+              goalId: id,
+              operationId: input.operationId,
+              patch: {
+                status: "unconfirmed",
+                receiptId: result.receipt.deliveryId,
+                detail: "终端已接受交接，但限定时间内没有结构化协调证据；目标已保留为待派发，不会重放旧业务任务。",
+              },
+            });
+            deferRemaining = true;
+            continue;
+          }
+          await target.execute({
+            type: "backend.handoff",
+            goalId: id,
+            operationId: input.operationId,
+            patch: {
+              status: "accepted",
+              receiptId: result.receipt.deliveryId,
+              detail: result.receipt.detail ?? "已观察到新的结构化协调记录。",
+            },
+          });
+          await target.execute({
+            type: "goal.dispatch",
+            goalId: id,
+            status: "sent",
+            requestId: deliveryId,
+          });
+        }
+      } finally { await channel.stop(); }
+    },
+    onProgress: (journal: unknown) => {
+      if (window && !window.isDestroyed())
+        window.webContents.send("crewvane:event", { type: "backend-switch", journal });
+    },
+  };
+}
+async function finishBackendTransition(
+  journal: Awaited<ReturnType<SessionControl["switchTo"]>>,
+) {
+  if (journal?.phase === "ready") {
+    sessionRuntimes.clear();
+    sessionPoller.reset();
+  }
+  if (root && journal?.phase === "ready") {
+    await herdrHostBridge?.stop().catch(() => {});
+    const control = await sessionControl.status();
+    if (control.selected === "herdr") {
+      herdrHostBridge = new HerdrHostBridge(
+        root,
+        sessionName(root),
+        async () => {
+          const status = await herdrInstallation.ensure();
+          if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好");
+          return status.executable;
+        },
+      );
+      await herdrHostBridge.start();
+    } else herdrHostBridge = undefined;
+  }
+  const status = await publishBackendControlStatus();
+  return { journal, status };
+}
+async function publishBackendControlStatus() {
+  const status = await backendControlStatus();
+  if (window && !window.isDestroyed())
+    window.webContents.send("crewvane:event", { type: "backend-control", status });
+  return status;
+}
+async function switchSessionBackend(backend: "herdr" | "orca") {
+  const current = await sessionControl.status();
+  if (current.phase !== "ready") {
+    throw new Error("当前现场交接尚未完成，请先重试或恢复。");
+  }
+  if (backend === "orca") {
+    const detection = await orcaInstallation.refresh();
+    if (detection.detection.status !== "compatible")
+      throw new Error(detection.detection.detail ?? "Orca 尚未通过安装与兼容检测。");
+  }
+  if (current.selected === "herdr") {
+    for (const workspace of await sessionControl.registrations()) {
+      const migration = await adoptVerifiedLegacyScenes(workspace.root);
+      if (migration.blocked)
+        throw new Error("有旧 Herdr 现场仍无法核实进程身份。请先打开对应现场，确认后再次切换。");
+    }
+  }
+  const hooks = backendSwitchHooks();
+  backendSwitchAbort = new AbortController();
+  try {
+    const journal = await sessionControl.switchTo(backend, hooks, backendSwitchAbort.signal);
+    return await finishBackendTransition(journal);
+  } finally { backendSwitchAbort = undefined; }
+}
+async function retrySessionBackendSwitch() {
+  const journal = await sessionControl.retrySwitch(backendSwitchHooks());
+  return finishBackendTransition(journal);
+}
+async function orcaInstallAction(action: unknown) {
+  if (action === "check") return orcaInstallation.check();
+  if (action === "install") {
+    const maintenanceId = await sessionControl.beginMaintenance("orca");
+    await publishBackendControlStatus();
+    try {
+      const result = await orcaInstallation.install();
+      if (maintenanceId && result.phase !== "awaiting_installation")
+        await sessionControl.endMaintenance(maintenanceId);
+      return result;
+    } catch (error) {
+      if (maintenanceId) await sessionControl.endMaintenance(maintenanceId);
+      throw error;
+    } finally { await publishBackendControlStatus(); }
+  }
+  if (action === "cancel") {
+    orcaInstallation.cancel();
+    const status = await orcaInstallation.status();
+    if (!["downloading", "verifying"].includes(status.phase)) {
+      const control = await sessionControl.status();
+      if (control.maintenance) await sessionControl.endMaintenance(control.maintenance.id);
+    }
+    await publishBackendControlStatus();
+    return status;
+  }
+  if (action === "refresh") {
+    const status = await orcaInstallation.refresh();
+    const control = await sessionControl.status();
+    if (status.detection.status === "compatible" && control.maintenance)
+      await sessionControl.endMaintenance(control.maintenance.id);
+    await publishBackendControlStatus();
+    return status;
+  }
+  throw new Error("无效的 Orca 安装操作。");
+}
+async function requestNeutralSceneReply(workspace: string, goal: Goal) {
+  if (!goal.scene || !goal.sceneVisit) return false;
+  const runtime = sessionRuntime(workspace);
+  const observation = (await runtime.inspect([goal.scene]))[0];
+  if (!observation || observation.identity !== "match" || !observation.reachable ||
+    observation.state !== "idle") return false;
+  const question = attentionRequest(goal)?.summary ?? "当前待处理事项";
+  const receipt = await runtime.send(
+    goal.scene,
+    `scene-reconcile-${goal.sceneVisit.id}`,
+    [
+      `用户已查看当前现场。如果「${question}」已在现场由用户明确答复，`,
+      `立即把这个明确事实与用户原话通过 crewvane goal scene-reply ${goal.id} 写回；`,
+      "不要只回复“已回答”。如果尚未处理，继续当前工作或保持原状态；后续仍需按 Crewvane 语义命令写回。",
+    ].join(""),
+  );
+  return receipt.status !== "rejected";
 }
 async function reconcileConcierge(target: WorkspaceService, executable: string) {
   if (preparations.has(target.root)) return;
@@ -1129,17 +1651,21 @@ async function deliverAttentionNotifications(target: WorkspaceService, state: Aw
 async function openWorkspace(path: string) {
   const canonical = await realpath(path); if (!(await stat(canonical)).isDirectory()) throw new Error("工作区必须是目录");
   const opened = new WorkspaceService(canonical), initialState = await opened.read();
+  const backendControl = await sessionControl.registerWorkspace(canonical);
+  await ensureSessionCommandHost(canonical);
   await herdrHostBridge?.stop().catch(() => {});
-  herdrHostBridge = new HerdrHostBridge(
-    canonical,
-    sessionName(canonical),
-    async () => {
-      const status = await herdrInstallation.ensure();
-      if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好");
-      return status.executable;
-    },
-  );
-  await herdrHostBridge.start();
+  if (backendControl.selected === "herdr") {
+    herdrHostBridge = new HerdrHostBridge(
+      canonical,
+      sessionName(canonical),
+      async () => {
+        const status = await herdrInstallation.ensure();
+        if (!status.executable) throw new Error(status.detail ?? "Herdr 尚未准备好");
+        return status.executable;
+      },
+    );
+    await herdrHostBridge.start();
+  } else herdrHostBridge = undefined;
   await agentRuntimeBroker?.stop().catch(() => {});
   deliverGoalStatusChanges(opened, initialState, canonical);
   const inbox = await CoordinatorInbox.open(canonical);
@@ -1218,63 +1744,68 @@ async function synchronize() {
   const target = service, workspace = root;
   try {
     let state = await target.read();
-    await autonomyScheduler?.tick();
+    if (await sessionControl.canDispatch()) await autonomyScheduler?.tick();
     state = await target.read();
     deliverGoalStatusChanges(target, state, workspace);
     await deliverAttentionNotifications(target, state, workspace);
-    let status = await herdrStatus();
-    if (status.executable) {
-      try {
-        await reconcileConcierge(target, status.executable);
-      } catch (error) {
-        const current = await target.read();
-        if (current.concierge.status === "ready") {
-          await target.execute({
-            type: "concierge.status",
-            status: "not_ready",
-            reference: current.concierge,
-            live: {
-              state: "unknown",
-              checkedAt: new Date().toISOString(),
-              reachable: false,
-            },
-            detail: `无法与 Herdr 同步：${error instanceof Error ? error.message : String(error)}`,
-          });
-        }
-      }
-      state = await target.read();
-      for (const goal of state.goals.filter(goal =>
-        ["completed", "dropped"].includes(goal.status) && goal.herdr)) {
-        await closeEndedGoalSession(target, goal.id, status.executable).catch(() => {});
-      }
-      state = await target.read();
+    if (!await sessionControl.canDispatch()) {
+      broadcastSnapshot(state, workspace);
+      return;
     }
+    for (const goal of state.goals.filter(goal =>
+      ["completed", "dropped"].includes(goal.status) && (goal.scene || goal.herdr)))
+      await closeEndedGoalSession(target, goal.id).catch(() => {});
+    state = await target.read();
     for (const goal of state.goals.filter(goal => goal.mode === "concierge" && goal.dispatch?.status === "pending" &&
       !["completed", "dropped"].includes(goal.status))) {
       void dispatchGoal(target, goal.id).catch(() => {});
     }
     const tracked = state.goals.filter(goal => !["completed", "dropped"].includes(goal.status) &&
-      (goal.herdr?.agent || goal.herdr?.transport === "pane"));
-    if (status.executable && tracked.length) {
+      (goal.scene || goal.autonomy?.verificationSite?.scene));
+    const backendScenes = [
+      ...(state.concierge.scene ? [state.concierge.scene] : []),
+      ...tracked.flatMap(goal => [
+        ...(goal.scene ? [goal.scene] : []),
+        ...(goal.autonomy?.verificationSite?.scene ? [goal.autonomy.verificationSite.scene] : []),
+      ]),
+    ];
+    if (backendScenes.length) {
       try {
-        const all = await client(status.executable, workspace).presences(tracked);
-        const presences = Object.fromEntries(Object.entries(all).filter(([id, presence]) => {
-          const previous = tracked.find(goal => goal.id === id)?.live;
-          return previous?.state !== presence.state || previous?.reachable !== presence.reachable;
-        }));
-        if (Object.keys(presences).length) await target.execute({ type: "live.sync", presences });
-      } catch {
-        const presences = Object.fromEntries(tracked.filter(goal => goal.live?.reachable !== false)
-          .map(goal => [goal.id, { state: "unknown" as const, reachable: false, checkedAt: new Date().toISOString() }]));
-        if (Object.keys(presences).length) await target.execute({ type: "live.sync", presences });
+        const observations = await sessionPoller.inspect(backendScenes,
+          scenes => sessionRuntime(workspace).inspect(scenes));
+        if (observations) await target.execute({
+          type: "scene.observe",
+          scenes: observations.map(observation => ({
+            bindingId: observation.bindingId,
+            presence: {
+              state: observation.state === "unknown" ? "unknown" :
+                observation.state === "exited" ? "unknown" : observation.state,
+              reachable: observation.reachable,
+              checkedAt: observation.observedAt,
+            },
+          })),
+        });
+      } catch (error) {
+        const current = await target.read();
+        if (current.concierge.status === "ready" && current.concierge.scene) {
+          await target.execute({
+            type: "concierge.status",
+            status: "not_ready",
+            live: {
+              state: "unknown",
+              checkedAt: new Date().toISOString(),
+              reachable: false,
+            },
+            detail: `无法与 ${current.backendBinding?.backend === "orca" ? "Orca" : "Herdr"} 同步：${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
       }
     }
-    if (status.executable) {
-      const connection = client(status.executable, workspace);
-      // This runs outside the coordinator queue: it talks only to the owner.
-      for (const item of (await target.read()).goals.filter(goal => goal.sceneVisit?.status === "pending"))
-        void reconcileSceneReply(target, item.id, connection).catch(() => {});
-    }
+    // This runs outside the coordinator queue: it talks only to the owner.
+    for (const item of (await target.read()).goals.filter(goal => goal.sceneVisit?.status === "pending"))
+      void reconcileSceneReply(target, item.id, {
+        requestSceneReply: async goal => requestNeutralSceneReply(workspace, goal),
+      }).catch(() => {});
     const requests = (await target.execute({ type: "watchdog.inspect", at: new Date().toISOString() }) as WatchdogRequest[]).slice(0, 10);
     state = await target.read();
     // An agent may write a decision or delivery while the concierge prompt is
@@ -1354,6 +1885,17 @@ app.whenReady().then(async () => {
     app.isPackaged ? join(process.resourcesPath, "herdr") : undefined,
     process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim() || undefined,
   );
+  sessionControl = new SessionControl(join(app.getPath("userData"), "session-control"));
+  const backendControl = await sessionControl.initialize({ recoverInterrupted: true });
+  orcaInstallation = new OrcaInstallation(
+    join(app.getPath("userData"), "runtime", "orca-installer"),
+    status => {
+      if (window && !window.isDestroyed())
+        window.webContents.send("crewvane:event", { type: "orca-installation", status });
+    },
+  );
+  if (backendControl.orcaAppPath)
+    await orcaInstallation.refresh(backendControl.orcaAppPath);
   if (process.env.CREWVANE_TEST_ISOLATE_TOOLS === "1") herdrInstallation.disableBundledForTest();
   const integrationEnvironment = process.env.CREWVANE_TEST_HOME ? {
     ...process.env,
@@ -1426,7 +1968,7 @@ app.whenReady().then(async () => {
     const target = activeService();
     if (command.type === "goal.delete") {
       const item = (await target.read()).goals.find(goal => goal.id === command.goalId);
-      if (item && ["completed", "dropped"].includes(item.status) && item.herdr)
+      if (item && ["completed", "dropped"].includes(item.status) && (item.scene || item.herdr))
         await closeEndedGoalSession(target, item.id);
     }
     const result = await target.execute(command);
@@ -1436,8 +1978,9 @@ app.whenReady().then(async () => {
         : undefined,
     ).catch(() => {});
     if (command.type === "scene.visit" && command.retry) {
-      const status = await herdrStatus();
-      if (status.executable) void reconcileSceneReply(target, command.goalId, client(status.executable, target.root)).catch(() => {});
+      void reconcileSceneReply(target, command.goalId, {
+        requestSceneReply: goal => requestNeutralSceneReply(target.root, goal),
+      }, { graceMs: 0 }).catch(() => {});
     }
     if (command.type === "goal.intake" || command.type === "goal.message" || (command.type === "goal.create" && command.input.mode === "concierge") ||
       command.type === "goal.followup" || command.type === "goal.delegate" || (command.type === "goal.resume" && command.mode === "concierge") ||
@@ -1512,6 +2055,54 @@ app.whenReady().then(async () => {
     return webhookNotifier.test((await activeService().read()).name);
   });
   ipcMain.handle("crewvane:install-herdr", (event) => { sender(event); return installHerdr(); });
+  ipcMain.handle("crewvane:check-herdr-update", (event) => {
+    sender(event);
+    return checkHerdrUpdate();
+  });
+  ipcMain.handle("crewvane:orca-status", event => {
+    sender(event);
+    return orcaInstallation.status();
+  });
+  ipcMain.handle("crewvane:backend-status", event => {
+    sender(event);
+    return backendControlStatus();
+  });
+  ipcMain.handle("crewvane:backend-switch", (event, backend: unknown) => {
+    sender(event);
+    if (backend !== "herdr" && backend !== "orca") throw new Error("无效的会话后端。");
+    return switchSessionBackend(backend);
+  });
+  ipcMain.handle("crewvane:backend-retry", event => {
+    sender(event);
+    return retrySessionBackendSwitch();
+  });
+  ipcMain.handle("crewvane:backend-cancel", event => {
+    sender(event);
+    backendSwitchAbort?.abort();
+  });
+  ipcMain.handle("crewvane:backend-restore", async event => {
+    sender(event);
+    return finishBackendTransition(await sessionControl.restoreOriginal(backendSwitchHooks()));
+  });
+  ipcMain.handle("crewvane:orca-action", (event, action: unknown) => {
+    sender(event);
+    return orcaInstallAction(action);
+  });
+  ipcMain.handle("crewvane:orca-select-application", async event => {
+    sender(event);
+    const picked = await dialog.showOpenDialog(window, {
+      title: "选择已有 Orca 应用",
+      defaultPath: "/Applications",
+      properties: ["openFile"], filters: [{ name: "macOS Application", extensions: ["app"] }],
+    });
+    if (picked.canceled || !picked.filePaths[0]) return null;
+    const path = await realpath(picked.filePaths[0]);
+    const detected = await detectOrcaApplication(path);
+    if (detected.status === "incompatible" || detected.status === "missing")
+      throw new Error(detected.detail ?? "所选应用不是可验证的官方 Orca。");
+    await sessionControl.setOrcaPath(path);
+    return orcaInstallation.refresh(path);
+  });
   ipcMain.handle("crewvane:cli-status", (event) => { sender(event); return cliStatus(); });
   ipcMain.handle("crewvane:install-cli", (event) => { sender(event); return installCli(); });
   ipcMain.handle("crewvane:skills-status", (event) => { sender(event); return skillsStatus(); });
@@ -1582,7 +2173,11 @@ app.whenReady().then(async () => {
     activeService();
     return openExternalScene();
   });
-  ipcMain.handle("crewvane:prepare-concierge", (event) => { sender(event); return prepareConcierge(); });
+  ipcMain.handle("crewvane:prepare-concierge", (event) => {
+    sender(event);
+    sessionPoller.reset();
+    return prepareConcierge();
+  });
   ipcMain.handle("crewvane:coordinator-status", async event => {
     sender(event);
     return (await ensureCoordinatorInbox()).inbox.status();
@@ -1599,9 +2194,10 @@ app.whenReady().then(async () => {
     sender(event);
     await openEmbeddedScene(activeService(), goalId);
   });
-  ipcMain.handle("crewvane:open-scene", async (event, goalId?: string) => {
+  ipcMain.handle("crewvane:open-scene", async (event, goalId?: string, recover?: boolean) => {
     sender(event);
-    return openPreferredScene(activeService(), goalId);
+    if (recover !== undefined && typeof recover !== "boolean") throw new Error("无效的恢复参数。");
+    return openPreferredScene(activeService(), goalId, recover);
   });
   ipcMain.handle("crewvane:open-scene-external", async (event, goalId?: string) => {
     sender(event);
@@ -1650,6 +2246,7 @@ app.on("before-quit", () => {
   stateWatcher?.close();
   if (stateRefreshTimer) clearTimeout(stateRefreshTimer);
   void agentRuntimeBroker?.stop().catch(() => {});
+  for (const host of sessionHosts.values()) void host.then(value => value.stop()).catch(() => {});
   void herdrHostBridge?.stop().catch(() => {});
   terminals.dispose();
 });

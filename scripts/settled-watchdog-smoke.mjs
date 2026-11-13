@@ -17,7 +17,7 @@ await writeFile(join(workspace, "AGENTS.md"), `# 隔离验收
 `);
 const service = new WorkspaceService(workspace);
 const agent = process.env.CREWVANE_TRIAL_AGENT ||
-  `omp --tools=read,bash,edit,write --approval-mode=yolo --no-skills --no-rules --no-extensions --session-dir ${join(trial, "agent-sessions")}`;
+  "omp";
 await service.execute({ type:"agents.configure", preferences:{ concierge:agent, owner:agent } });
 await service.execute({
   type: "workspace.autonomy.set",
@@ -52,8 +52,8 @@ try {
   console.log(JSON.stringify({step:"delegated",trial,session,goalId:goal.id}));
   await expect.poll(async () => {
     const item = (await state()).goals.find(item => item.id===goal.id);
-    if (item?.dispatch?.status==="failed" && !item.herdr) throw new Error(item.dispatch.detail || "派发失败");
-    return item?.herdr?.agent ?? null;
+    if (item?.dispatch?.status==="failed" && !item.scene) throw new Error(item.dispatch.detail || "派发失败");
+    return item?.scene?.locator.paneId ?? null;
   },{timeout:240_000,intervals:[1000]}).not.toBeNull();
   await expect.poll(async () => {
     const item = (await state()).goals.find(item => item.id===goal.id);
@@ -65,10 +65,8 @@ try {
   },{timeout:240_000,intervals:[500]}).toMatch(/^(idle|done)$/);
   const settled = (await state()).goals.find(item => item.id===goal.id);
   assert.equal(settled.attention,null,"idle alone must not invent a decision");
-  assert.ok(["active","waiting"].includes(settled.status));
-  if (settled.status === "waiting")
-    assert.equal(settled.waitingFor,settled.herdr.agent,"a quiet owner may only self-wait until reconciliation");
-  console.log(JSON.stringify({step:"owner-settled",owner:settled.herdr.agent,live:settled.live}));
+  assert.equal(settled.status, "active", "idle does not mean waiting for an external party");
+  console.log(JSON.stringify({step:"owner-settled",owner:settled.scene.locator.paneId,live:settled.live}));
   await expect.poll(async () => {
     const item = (await state()).goals.find(item => item.id===goal.id);
     return item?.watchdog?.reason==="settled" && Boolean(item.watchdog.contactedAt);
@@ -77,7 +75,7 @@ try {
   await expect.poll(async () => (await state()).goals.find(item => item.id===goal.id)?.attention?.kind,
     {timeout:240_000,intervals:[1000]}).toBe("decision");
   const current = await state(), item = current.goals.find(item => item.id===goal.id);
-  assert.equal(item.herdr.agent,settled.herdr.agent,"reconcile the original owner, not a replacement");
+  assert.equal(item.scene.locator.paneId,settled.scene.locator.paneId,"reconcile the original owner, not a replacement");
   assert.equal(item.recovery,undefined);
   assert.equal(item.watchdog,undefined);
   assert.equal(item.status,"active");
@@ -88,7 +86,7 @@ try {
   await page.screenshot({path:join(trial,"settled-reconciled.png"),animations:"disabled"});
   await writeFile(join(trial,"verified-state.json"),JSON.stringify(current,null,2));
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({result:"passed",trial,goalId:goal.id,owner:item.herdr.agent,attention:item.attention.summary}));
+  console.log(JSON.stringify({result:"passed",trial,goalId:goal.id,owner:item.scene.locator.paneId,attention:item.attention.summary}));
 } catch (error) {
   await writeFile(join(trial,"failed-state.json"),JSON.stringify(await state(),null,2));
   const listed = await herdr(["agent","list"]).catch(() => undefined);

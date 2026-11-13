@@ -93,7 +93,10 @@ async function launchInstalled(appPath, label) {
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("button", { name: "重新安装", exact: true }).waitFor();
     const cli = join(home, ".local/bin/crewvane");
-    assert.ok((await exec(cli, ["status", "--root", workspace, "--json"])).stdout.includes('"version": 3'));
+    const installedState = JSON.parse(
+      (await exec(cli, ["status", "--root", workspace, "--json"])).stdout,
+    );
+    assert.equal(installedState.version, 4, `${label}: bundled CLI must use the current workspace format`);
     const created = JSON.parse((await exec(cli, ["goal", "create", "--title", "安装包 CLI 验收",
       "--project", "personal", "--root", workspace, "--json"])).stdout);
     await writeFile(join(trial, `${label}-cli.json`), JSON.stringify(created));

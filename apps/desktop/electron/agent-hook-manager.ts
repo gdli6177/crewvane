@@ -3,17 +3,21 @@ import { randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
+  lstat,
   mkdir,
   readFile,
   rename,
+  rm,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import parseArgsStringToArgv from "string-argv";
 import type { AgentRuntimeAdapterId } from "../../../packages/core/src/types.js";
+import { withLock } from "../../../packages/core/src/storage.js";
 
 const exec = promisify(execFile);
 const manifestVersion = 1;
@@ -172,9 +176,18 @@ function managedCommand(cli: string, id: ManagedAdapterId) {
 
 function isManagedHandler(value: unknown, id: ManagedAdapterId) {
   const command = jsonRecord(value).command;
-  return typeof command === "string" &&
-    command.includes(marker) &&
-    new RegExp(`--adapter\\s+${id}(?:\\s|$)`, "i").test(command);
+  if (typeof command !== "string" || !command.includes(marker)) return false;
+  const argv = parseArgsStringToArgv(command);
+  return argv.length === 5 && basename(argv[0] ?? "") === "crewvane" &&
+    argv.slice(1).join(" ") === `hook ingest --adapter ${id}`;
+}
+
+function hasManagedHooks(config: Record<string, any>, id: ManagedAdapterId) {
+  return Object.values(jsonRecord(config.hooks)).some(groups =>
+    Array.isArray(groups) && groups.some(group => {
+      const handlers = Array.isArray(group?.hooks) ? group.hooks : [group];
+      return handlers.some((handler: unknown) => isManagedHandler(handler, id));
+    }));
 }
 
 function mergeHookEvents(
@@ -188,18 +201,27 @@ function mergeHookEvents(
   next.hooks = hooks;
   for (const event of definition.events) {
     const current = Array.isArray(hooks[event]) ? hooks[event] : [];
+    let removed = false;
     const cleaned = current
       .map(group => {
         const copy = jsonRecord(group);
         if (Array.isArray(copy.hooks)) {
-          copy.hooks = copy.hooks.filter(handler =>
+          const kept = copy.hooks.filter(handler =>
             !isManagedHandler(handler, definition.id));
-          if (!copy.hooks.length) return undefined;
+          if (kept.length !== copy.hooks.length) {
+            removed = true;
+            copy.hooks = kept;
+            if (!kept.length) return undefined;
+          }
         }
-        if (isManagedHandler(copy, definition.id)) return undefined;
+        if (isManagedHandler(copy, definition.id)) {
+          removed = true;
+          return undefined;
+        }
         return copy;
       })
       .filter(Boolean);
+    if (remove && !removed) continue;
     hooks[event] = remove
       ? cleaned
       : [...cleaned, {
@@ -227,8 +249,10 @@ function mergeCursorConfig(
   next.version ??= 1;
   next.hooks = hooks;
   for (const event of definition.events) {
-    const cleaned = (Array.isArray(hooks[event]) ? hooks[event] : [])
+    const current = Array.isArray(hooks[event]) ? hooks[event] : [];
+    const cleaned = current
       .filter(handler => !isManagedHandler(handler, definition.id));
+    if (remove && cleaned.length === current.length) continue;
     hooks[event] = remove
       ? cleaned
       : [...cleaned, { command, timeout: 2 }];
@@ -241,9 +265,44 @@ function mergeCursorConfig(
 async function atomicJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, path);
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(temporary, path);
+  } finally { await rm(temporary, { force: true }); }
+}
+
+async function readOwnedConfig(path: string) {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() ||
+      (process.getuid && info.uid !== process.getuid()) || info.size > 2_000_000)
+      throw new Error("Agent 配置必须是当前用户拥有的真实文件；原文件未修改");
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Serialize Crewvane writers and detect edits by other installers before commit. */
+async function updateOwnedConfig(
+  path: string,
+  merge: (body: string | undefined) => string | undefined,
+) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  return withLock(dirname(path), async () => {
+    const before = await readOwnedConfig(path);
+    const next = merge(before);
+    if (next === undefined || next === before) return;
+    await backupOnce(path);
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, next, { mode: 0o600, flag: "wx" });
+      if (await readOwnedConfig(path) !== before)
+        throw new Error("Agent 配置已被其他程序更新；Crewvane 已停止写入，请重新检测后重试");
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
+  }, 2_000);
 }
 
 async function backupOnce(path: string) {
@@ -378,12 +437,7 @@ export class AgentHookManager {
         unsupported: true,
         detail: `版本不支持：${definition.label} 配置格式已变化（${schemaProblem}），Crewvane 未修改原文件。`,
       };
-    const events = jsonRecord(config?.hooks);
-    const installed = Object.values(events).some(groups =>
-      Array.isArray(groups) && groups.some(group => {
-        const handlers = Array.isArray(group?.hooks) ? group.hooks : [group];
-        return handlers.some((handler: unknown) => isManagedHandler(handler, definition.id));
-      }));
+    const installed = config ? hasManagedHooks(config, definition.id) : false;
     return {
       configPath: path,
       installed,
@@ -412,7 +466,7 @@ export class AgentHookManager {
       let installed = json.installed;
       if (id === "omp") {
         const body = await readFile(configPath, "utf8").catch(() => "");
-        installed = body.includes("Crewvane managed OMP extension");
+        installed = body.startsWith("// Crewvane managed OMP extension\n");
       }
       let status: HookInstallStatus = "not-installed";
       if (!detected) status = "not-installed";
@@ -570,49 +624,47 @@ export default function crewvaneExtension(pi) {
 
   private async installJson(definition: AdapterDefinition) {
     const path = this.configPath(definition.id);
-    let config: Record<string, any> = {};
-    try {
-      config = parseConfig(await readFile(path, "utf8"));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-        throw new Error("Agent 配置不是有效 JSON，Crewvane 未修改原文件");
-    }
-    const schemaProblem = hookSchemaProblem(config, definition);
-    if (schemaProblem)
-      throw new Error(
-        `版本不支持：${definition.label} 配置格式已变化（${schemaProblem}）`,
-      );
-    await backupOnce(path);
-    const command = managedCommand(this.cliPath, definition.id);
-    const next = definition.id === "cursor"
-      ? mergeCursorConfig(config, definition, command, false)
-      : mergeHookEvents(config, definition, command, false);
-    await atomicJson(path, next);
+    await updateOwnedConfig(path, body => {
+      let config: Record<string, any>;
+      try { config = body === undefined ? {} : parseConfig(body); }
+      catch { throw new Error("Agent 配置不是有效 JSON，Crewvane 未修改原文件"); }
+      const schemaProblem = hookSchemaProblem(config, definition);
+      if (schemaProblem)
+        throw new Error(`版本不支持：${definition.label} 配置格式已变化（${schemaProblem}）`);
+      const command = managedCommand(this.cliPath, definition.id);
+      const next = definition.id === "cursor"
+        ? mergeCursorConfig(config, definition, command, false)
+        : mergeHookEvents(config, definition, command, false);
+      if (JSON.stringify(next) === JSON.stringify(config)) return;
+      return `${JSON.stringify(next, null, 2)}\n`;
+    });
   }
 
   private async removeManaged(definition: AdapterDefinition) {
     const path = this.configPath(definition.id);
     if (definition.id === "omp") {
-      const body = await readFile(path, "utf8").catch(() => "");
-      if (body.includes("Crewvane managed OMP extension"))
-        await unlink(path).catch(() => {});
+      await withLock(dirname(path), async () => {
+        const body = await readOwnedConfig(path);
+        if (body?.startsWith("// Crewvane managed OMP extension\n"))
+          await unlink(path);
+      }, 2_000);
       return;
     }
-    let config: Record<string, any>;
-    try {
-      config = parseConfig(await readFile(path, "utf8"));
-    } catch {
-      return;
-    }
-    const schemaProblem = hookSchemaProblem(config, definition);
-    if (schemaProblem)
-      throw new Error(`版本不支持：${definition.label} 配置格式已变化（${schemaProblem}），原文件未修改`);
-    const command = managedCommand(this.cliPath, definition.id);
-    const next = definition.id === "cursor"
-      ? mergeCursorConfig(config, definition, command, true)
-      : mergeHookEvents(config, definition, command, true);
-    await backupOnce(path);
-    await atomicJson(path, next);
+    await updateOwnedConfig(path, body => {
+      if (body === undefined) return;
+      let config: Record<string, any>;
+      try { config = parseConfig(body); } catch { return; }
+      const schemaProblem = hookSchemaProblem(config, definition);
+      if (schemaProblem)
+        throw new Error(`版本不支持：${definition.label} 配置格式已变化（${schemaProblem}），原文件未修改`);
+      if (!hasManagedHooks(config, definition.id)) return;
+      const command = managedCommand(this.cliPath, definition.id);
+      const next = definition.id === "cursor"
+        ? mergeCursorConfig(config, definition, command, true)
+        : mergeHookEvents(config, definition, command, true);
+      if (JSON.stringify(next) === JSON.stringify(config)) return;
+      return `${JSON.stringify(next, null, 2)}\n`;
+    });
   }
 
   install(id: ManagedAdapterId) {
@@ -632,14 +684,12 @@ export default function crewvaneExtension(pi) {
     try {
       if (id === "omp") {
         const path = this.configPath(id);
-        const existing = await readFile(path, "utf8").catch(() => "");
-        if (existing && !existing.includes("Crewvane managed OMP extension"))
-          throw new Error("OMP 扩展目录中已有同名文件，Crewvane 已保护原文件");
-        await backupOnce(path);
-        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-        const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-        await writeFile(temporary, this.ompExtension(), { mode: 0o600 });
-        await rename(temporary, path);
+        await updateOwnedConfig(path, existing => {
+          if (existing !== undefined &&
+            !existing.startsWith("// Crewvane managed OMP extension\n"))
+            throw new Error("OMP 扩展目录中已有同名文件，Crewvane 已保护原文件");
+          return this.ompExtension();
+        });
       } else {
         await this.installJson(definition);
       }
@@ -679,7 +729,7 @@ export default function crewvaneExtension(pi) {
       enabled: false,
       installed: false,
       waitingTrust: false,
-      detail: "已停用，目标继续使用 Herdr 与巡检状态。",
+      detail: "已停用，目标继续使用当前会话后端与巡检状态。",
     };
     await this.save();
     return (await this.status()).find(item => item.id === id)!;
@@ -722,7 +772,7 @@ export default function crewvaneExtension(pi) {
       if (saved?.installed) {
         const current = id === "omp"
           ? (await readFile(this.configPath(id), "utf8").catch(() => ""))
-              .includes("Crewvane managed OMP extension")
+              .startsWith("// Crewvane managed OMP extension\n")
           : (await this.jsonStatus(definitions[id], detected)).installed;
         if (current && saved.managedRevision === managedRevision) continue;
       }

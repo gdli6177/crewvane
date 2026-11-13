@@ -1,3 +1,4 @@
+import { hasGoalScene, goalSceneLabel } from "./goalEntry.js";
 import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -162,15 +163,16 @@ export function GoalDetail({
       : goal.watchdog?.lastError;
   const runtime = goal.agentRuntime;
   const observedRuntime = runtime && runtime.lastSequence > 0 ? runtime : undefined;
+  const backendLabel = goal.scene?.backend === "orca" ? "Orca" : "Herdr";
   const runtimeSource = observedRuntime
     ? runtimeAdapterLabels[observedRuntime.attempt.adapter] ?? "Agent 即时事件"
     : goal.live
-      ? "Herdr 现场监测"
+      ? `${backendLabel} 现场监测`
       : "巡检保护";
   const runtimeDetail = observedRuntime
     ? runtimeEventLabels[observedRuntime.lastEventType] ?? observedRuntime.lastEventType
     : goal.live
-      ? `Herdr 现场状态：${
+      ? `${backendLabel} 现场状态：${
           goal.live.state === "working" ? "工作中"
             : goal.live.state === "blocked" ? "等待输入"
               : goal.live.state === "unknown" ? "状态未知"
@@ -219,14 +221,14 @@ export function GoalDetail({
                   className="goal-scene-button"
                   disabled={busy}
                   title={
-                    goal.herdr
-                      ? `打开 ${goal.owner} 的 Herdr 工作现场`
+                    hasGoalScene(goal)
+                      ? `打开 ${goal.owner} 的工作现场`
                       : "打开当前工作区的管家现场"
                   }
-                  onClick={() => void service.openHerdr(goal.id)}
+                  onClick={() => void service.openHerdr(goal.id, goalSceneLabel(goal) === "恢复并进入现场")}
                 >
                   <SquareTerminal size={15} />
-                  <span>{goal.herdr ? "回到现场" : "找管家"}</span>
+                  <span>{goalSceneLabel(goal)}</span>
                 </button>
               )}
               <StatusPill tone={goalToneBadge[view.tone]}>{view.label}</StatusPill>
@@ -331,8 +333,8 @@ export function GoalDetail({
                       {runtime
                         ? "等待负责人提交近期回复或结构化进展。"
                         : goal.live
-                          ? "Herdr 状态保持可用；目标完成、等待外部和找人决定仍以 Crewvane 结构化为准。"
-                          : "Hook 不可用时由 Herdr 与巡检完整兜底，不会阻止目标继续执行。"}
+                          ? `${backendLabel} 状态保持可用；目标完成、等待外部和找人决定仍以 Crewvane 结构化为准。`
+                          : "Hook 不可用时由当前会话后端与巡检完整兜底，不会阻止目标继续执行。"}
                     </p>
                   )}
                 </section>

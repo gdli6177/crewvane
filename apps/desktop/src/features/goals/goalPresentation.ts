@@ -1,4 +1,6 @@
+import { hasGoalScene } from "./goalEntry.js";
 import { attentionKind, attentionRequest, pendingSceneReply } from "../../../../../packages/core/src/model.js";
+import { SCENE_RECONCILIATION_GRACE_MS } from "../../../../../packages/core/src/reconciliation.js";
 import { resolveAcceptance } from "../../../../../packages/core/src/autonomy.js";
 import type {
   Activity,
@@ -117,6 +119,15 @@ export function sceneSyncPresentation(goal: Goal) {
     visit.status === "watching") return undefined;
   const expired = visit.status === "checking" &&
     Date.now() - Date.parse(visit.attemptedAt || visit.at) >= 150_000;
+  const waitingForPerson = visit.status === "pending" &&
+    Date.now() - Date.parse(visit.pendingAt ?? visit.at) < SCENE_RECONCILIATION_GRACE_MS;
+  if (waitingForPerson) return {
+    label: "等你现场处理",
+    detail: "已为你留出现场交互时间；只有现场出现真实用户答复并由负责人写回后，事项才会更新。",
+    quote: undefined,
+    summary: undefined,
+    retry: undefined,
+  };
   const checking = visit.status === "pending" || visit.status === "checking" && !expired;
   return {
     label: checking ? "正在核对现场" : "现场尚未确认处理结果",
@@ -171,7 +182,7 @@ function executionPresentation(goal: Goal): Pick<GoalPresentation, "label" | "de
       ? "负责人当前空闲；目标仍在跟进中，下一步已经记录。到了需要你处理时会进入注意力。"
       : "负责人当前空闲，尚未记录明确的下一步；管家会补全推进计划。",
   };
-  return goal.herdr ? {
+  return hasGoalScene(goal) ? {
     label: "待管家跟进", tone: "running",
     detail: "现场已登记，尚未确认负责人当前是否执行；以记录的下一步为准。",
   } : {
@@ -186,7 +197,7 @@ export function goalProgressLabel(goal: Goal) {
   if (kind === "decision") return "等你决定";
   if (kind === "review") return "等你验收";
   if (kind === "follow_up") return "到点跟进";
-  if (kind === "intervention") return goal.herdr ? "需要你排障" : "需要你处理";
+  if (kind === "intervention") return hasGoalScene(goal) ? "需要你排障" : "需要你处理";
   if (goal.status === "waiting") return "等待外部";
   if (goal.mode === "manual") return "由你处理";
   if (goal.status === "review" &&
@@ -254,7 +265,7 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
   const contextAttachments = attachmentsFor(contextActivity);
 
   let tone: GoalTone = "running";
-  let label = goal.mode === "manual" ? "由你处理" : goal.herdr ? "等待管家跟进" : "等待分配";
+  let label = goal.mode === "manual" ? "由你处理" : hasGoalScene(goal) ? "等待管家跟进" : "等待分配";
   let detail = goal.mode === "manual"
     ? "这件事由你安排，做完即可标记完成；需要协作时可以交给管家。"
     : "目标已保存，管家会安排负责人并写回下一步。";
@@ -314,8 +325,8 @@ export function presentGoal(goal: Goal, state: WorkspaceState): GoalPresentation
     nextLabel = "决定后继续";
   } else if (needsIntervention) {
     tone = "blocked";
-    label = goal.herdr ? "需要你排障" : "需要你处理";
-    detail = goal.herdr
+    label = hasGoalScene(goal) ? "需要你排障" : "需要你处理";
+    detail = hasGoalScene(goal)
       ? "负责人无法自行继续，需要你在现场完成一次操作。"
       : "这件事有尚未处理的事项，可以回复管家或查看完整记录。";
     brief = goal.attention?.summary || goal.next;

@@ -13,18 +13,52 @@ import {
 import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { runBoard } from "./board.js";
 import { launchOwner } from "./owner-launch.js";
 import { attachOwner } from "./owner-attach.js";
 import { ingestAgentHook } from "./hook-ingest.js";
+import {
+  SessionControl,
+  SessionRuntime,
+  localAdapter,
+  managedSessionContext,
+  type SendReceipt,
+} from "../../packages/sessions/src/index.js";
 const exec = promisify(execFile);
+async function managedRuntime(workspace: string, managedContext: ReturnType<typeof managedSessionContext>) {
+  const directory = process.env.CREWVANE_CONTROL_DIRECTORY?.trim();
+  if (!directory) throw new Error("受管 CLI 缺少 Crewvane 后端控制目录；请从 Crewvane 桌面或已接入的负责人现场运行。");
+  const control = new SessionControl(directory);
+  // A managed Agent may be unable to inspect OS processes. The desktop owns
+  // admission/identity checks; its current descriptor is discovered below.
+  if (!managedContext) await control.initialize();
+  const cliDirectory = process.env.CREWVANE_CLI_DIRECTORY?.trim();
+  if (!cliDirectory) throw new Error("受管 CLI 缺少可执行的 Crewvane 命令目录。");
+  return new SessionRuntime({
+    control,
+    workspace,
+    managedContext,
+    cliDirectory,
+    environment: process.env,
+    adapter: async (backend, adapterWorkspace) => localAdapter({
+      backend,
+      workspace: adapterWorkspace,
+      control: await control.status(),
+      directory,
+      herdrExecutable: process.env.CREWVANE_HERDR_BINARY,
+      environment: process.env,
+    }),
+  });
+}
 const usage = `Crewvane — 把所有事整理成清晰的下一步
 
 人的消息入口（保存原话，不从文本推断批准或完成）：
   crewvane status [--json]
   crewvane attention [--json]
   crewvane board [--new] [--once]
+  crewvane scene focus [GOAL_ID]（只定位已登记现场；省略 ID 回到管家）
   crewvane ask TEXT [--project ID] [--attachment PATH ...]
   crewvane capture TEXT [--self] [--project ID] [--remind-at ISO]
     [--attachment PATH ...]（只记录；--self 表示由你执行）
@@ -73,6 +107,8 @@ Agent 状态协议（仅在明确事实发生后使用）：
     [--transport pane --process-id PID]（自定义 CLI）
   crewvane owner launch ID --name NAME [--task TEXT | --task-file FILE]
     创建隔离的负责人现场；省略任务内容时读取目标详情与下一步
+  crewvane owner send ID --text TEXT
+    向当前目标已核实的原负责人现场发送一条协调消息
   crewvane owner attach ID --name NAME --session SESSION
     --workspace ID --tab ID --pane ID [--agent NAME] [--recovery-id ID]
     在核对 Herdr 真实现场后，恢复并绑定 owner launch 未确认的负责人
@@ -182,7 +218,7 @@ async function createSkillDraft(
     name,
     description,
     version: "1.0.0",
-    minimumCrewvane: "0.10.0",
+    minimumCrewvane: "0.11.0",
     kind: "process",
     roles,
     entry: "SKILL.md",
@@ -218,6 +254,11 @@ ${description}
 function textArg(value: string | undefined, label: string) {
   if (!value?.trim()) throw new Error(`${label} 不能为空`);
   return value.trim();
+}
+export function assertOwnerSendReceipt(receipt: SendReceipt): SendReceipt {
+  if (receipt.status === "rejected")
+    throw new Error(`负责人现场拒绝本次消息：${receipt.detail?.trim() || "未提供原因"}`);
+  return receipt;
 }
 function currentHerdrReference(agent?: string): HerdrReference | undefined {
   if (process.env.HERDR_ENV !== "1") return undefined;
@@ -455,16 +496,30 @@ export async function run(argv: string[], io = { out: console.log, error: consol
     const managedAgentName = process.env.CREWVANE_AGENT_NAME?.trim(),
       verifierMode = process.env.CREWVANE_ROLE?.trim() === "verifier",
       verifierGoalId = process.env.CREWVANE_GOAL_ID?.trim(),
-      service = new WorkspaceService(args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd())),
+      workspaceRoot = args.one("root") ?? (process.env.CREWVANE_WORKSPACE?.trim() || process.cwd()),
+      sessionContext = managedSessionContext(process.env),
       coordinatorMode = process.env.CREWVANE_COORDINATOR === "1",
       coordinatorContext = await coordinatorCaseId(group === "direct" && args.has("new")),
       coordinatorCase = coordinatorContext?.goalId,
+      managedContext = sessionContext?.role === "concierge"
+        ? { ...sessionContext, goalId: coordinatorCase }
+        : sessionContext,
+      service = new WorkspaceService(workspaceRoot, managedContext),
       actor = args.one("actor") ?? (managedAgentName || undefined);
     const managedAgent = coordinatorMode || Boolean(managedAgentName);
     const requireHumanCli = () => {
       if (managedAgent)
         throw new Error("该命令只能由人通过桌面或普通终端执行，受管 Agent 不能调用");
     };
+    if (group === "scene" && action === "focus") {
+      requireHumanCli();
+      const state = await service.read();
+      const scene = target ? state.goals.find(item => item.id === target)?.scene : state.concierge.scene;
+      if (!scene) throw new Error("现场尚未登记或需要重新核实，请先在桌面恢复现场。");
+      const focused = await (await managedRuntime(workspaceRoot, managedContext)).focus(scene);
+      io.out(args.has("json") ? JSON.stringify(focused) : "已定位原现场。");
+      return 0;
+    }
     if (verifierMode) {
       if (!managedAgentName)
         throw new Error("独立复核者必须由 Crewvane 启动并登记身份");
@@ -488,6 +543,7 @@ export async function run(argv: string[], io = { out: console.log, error: consol
         taskFile?: string;
         role?: "owner" | "verifier";
       } | undefined;
+    let ownerSend: { text: string } | undefined;
     if (verifierMode && group === "status") {
       const state = await service.read(),
         goal = state.goals.find(item => item.id === verifierGoalId);
@@ -509,7 +565,15 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       verifierRead = true;
     }
     if (group === "board" && !coordinatorCase) {
-      await runBoard(service, io, { once: args.has("once"), startWithNewGoal: args.has("new") });
+      await runBoard(service, io, {
+        once: args.has("once"), startWithNewGoal: args.has("new"),
+        focusScene: async goalId => {
+          const state = await service.read();
+          const scene = goalId ? state.goals.find(item => item.id === goalId)?.scene : state.concierge.scene;
+          if (!scene) throw new Error("现场尚未登记或需要重新核实，请先在桌面恢复现场。");
+          await (await managedRuntime(service.root, sessionContext)).focus(scene);
+        },
+      });
       return 0;
     }
     if (coordinatorMode && !coordinatorCase) {
@@ -537,6 +601,8 @@ export async function run(argv: string[], io = { out: console.log, error: consol
       } else if (group === "session" && action === "set") {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "owner" && action === "launch") {
+        assertCoordinatorCase(coordinatorCase, target);
+      } else if (group === "owner" && action === "send") {
         assertCoordinatorCase(coordinatorCase, target);
       } else if (group === "owner" && action === "attach") {
         assertCoordinatorCase(coordinatorCase, target);
@@ -1179,6 +1245,8 @@ export async function run(argv: string[], io = { out: console.log, error: consol
             ? { taskFile: textArg(args.one("task-file"), "--task-file") }
             : {}),
         };
+      else if (group === "owner" && action === "send")
+        ownerSend = { text: textArg(args.one("text"), "--text") };
       else if (group === "verifier" && action === "launch")
         ownerLaunch = {
           name: textArg(args.one("name"), "--name"),
@@ -1200,7 +1268,21 @@ export async function run(argv: string[], io = { out: console.log, error: consol
     }
     if (ownerLaunch) {
       if (!target) throw new Error("owner launch 必须指定当前目标 ID");
-      result = await launchOwner(service, { goalId: target, ...ownerLaunch });
+      result = await managedRuntime(workspaceRoot, managedContext).then(runtime =>
+        runtime.launchOwner({ goalId: target!, ...ownerLaunch! }));
+    } else if (ownerSend) {
+      if (!target) throw new Error("owner send 必须指定当前目标 ID");
+      const state = await service.read(), item = state.goals.find(goal => goal.id === target);
+      if (!item?.scene) throw new Error("当前目标没有已核实的负责人现场；请先 owner launch。");
+      const runtime = await managedRuntime(workspaceRoot, managedContext);
+      const receipt = assertOwnerSendReceipt(await runtime.send(
+        item.scene,
+        args.one("delivery-id") ?? `owner-send-${randomUUID()}`,
+        ownerSend.text,
+      ));
+      if (!managedAgent && item.sceneVisit)
+        await service.execute({ type: "scene.cancel", goalId: item.id, reason: "user-input" });
+      result = receipt;
     } else if (command) result = await service.execute(command);
     if (coordinatorMode && group === "direct" && args.has("new") && command?.type === "goal.direct")
       await advanceCoordinatorCase(result as import("../../packages/core/src/index.js").Goal);

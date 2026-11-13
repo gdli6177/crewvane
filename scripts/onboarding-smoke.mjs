@@ -43,7 +43,7 @@ readline.createInterface({input:process.stdin}).on("line", text => {
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 await writeFile(join(home, ".zshrc"), [
   "cv-local-agent() {",
-  `  exec ${shellQuote(customCli)} "$@"`,
+  `  ${shellQuote(customCli)} "$@"`,
   "}",
   "",
 ].join("\n"), { mode: 0o600 });
@@ -138,7 +138,7 @@ try {
   await page.screenshot({ path: join(home, "legacy-recovered-dark.png"), animations:"disabled" });
   const recovered = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
   assert.equal(recovered.recovery.reason, "unsupported-version");
-  assert.equal(JSON.parse(await readFile(join(legacy, ".crewvane/state.json"), "utf8")).version, 3);
+  assert.equal(JSON.parse(await readFile(join(legacy, ".crewvane/state.json"), "utf8")).version, 4);
   assert.equal((await stat(recovered.recovery.archivedPath)).isDirectory(), true);
   assert.equal(
     JSON.parse(await readFile(join(recovered.recovery.archivedPath, "state.json"), "utf8")).version,
@@ -170,8 +170,10 @@ try {
   trace("custom-cli-concierge");
   await expect.poll(async () => (await page.evaluate(() => window.crewvane.command({type:"snapshot"}))).concierge.status, {timeout:90_000}).toBe("ready");
   let state = await page.evaluate(() => window.crewvane.command({type:"snapshot"}));
-  assert.equal(state.concierge.transport, "pane");
-  const firstReference = state.concierge;
+  assert.equal(state.concierge.scene.backend, "herdr");
+  const firstScene = state.concierge.scene;
+  const firstReference = { ...firstScene.locator, transport: "pane",
+    processId: firstScene.process.pid };
   await exec(installedExecutable, [
     "--session", session, "tab", "focus", firstReference.tabId,
   ], { env: testEnvironment, timeout: 10_000 });
@@ -258,7 +260,10 @@ try {
   await expect.poll(() => readFile(log, "utf8").catch(() => ""), {timeout:10_000}).toContain('"kind":"start"');
   const started = JSON.parse((await readFile(log, "utf8")).split("\n")[0]);
   assert.deepEqual(started.args, ["--model", "local test model"]);
-  assert.equal(started.pid, state.concierge.processId);
+  const parent = Number((await exec("/bin/ps", ["-p", String(started.pid), "-o", "ppid="])).stdout.trim());
+  assert.ok(started.pid === firstScene.process.pid || parent === firstScene.process.pid,
+    "The configured CLI must run in the verified launcher, without confusing child and launcher identities.");
+  firstReference.processId = started.pid; // Legacy HerdrClient's foreground-only reference.
   await page.evaluate(() => window.crewvane.prepareConcierge());
   assert.equal((await readFile(log, "utf8")).split("\n").filter(line => line.includes('"kind":"start"')).length, 1);
   const longGoalRequest =
@@ -289,9 +294,11 @@ try {
   const messages = await readFile(log, "utf8");
   assert.ok(messages.includes(created.id), "actual custom CLI stdin must receive the goal ID");
   const roleInputs = messages.trim().split("\n").map(line => JSON.parse(line))
-    .filter(entry => entry.kind === "input" && entry.text.includes("不亲自执行目标"));
+    .filter(entry => entry.kind === "input" && /不亲自执行(?:业务)?目标/.test(entry.text));
   assert.ok(roleInputs.length >= 2, "initial identity and new goal must both carry the no-execution boundary into real stdin");
-  assert.ok(messages.includes("整理后交给本目标独立负责人"));
+  assert.ok(messages.includes("简单任务也交给独立负责人"));
+  assert.ok(messages.includes("crewvane owner launch") && messages.includes("crewvane owner send"),
+    "case instructions must delegate through the backend-neutral owner CLI");
   assert.ok(messages.includes(longGoalRequest), "the full one-box intake must reach the real CLI");
   await page.getByRole("dialog").waitFor();
   await page.getByRole("button", { name:"给管家留言", exact:true }).click();
@@ -428,7 +435,10 @@ try {
   restored.on("pageerror", error => errors.push(String(error)));
   await expect.poll(async () => (await restored.evaluate(() => window.crewvane.environment())).workspace).toBe(await realpath(rootB));
   await restored.evaluate(() => window.crewvane.prepareConcierge());
-  assert.equal((await restored.evaluate(() => window.crewvane.command({type:"snapshot"}))).concierge.processId, firstReference.processId);
+  const reusedConcierge = (await restored.evaluate(() => window.crewvane.command({type:"snapshot"}))).concierge;
+  assert.deepEqual(reusedConcierge.scene, firstScene);
+  assert.equal(reusedConcierge.status, "ready", "Reusing an initialized concierge must not leave it preparing.");
+  assert.equal(reusedConcierge.detail, undefined);
   assert.equal((await stat(installedExecutable)).mtimeMs, beforeRestart, "bundled or installed binary must be reused without replacing it");
   assert.equal((await readFile(log, "utf8")).split("\n").filter(line => line.includes('"kind":"start"')).length, 1);
   // Let the real custom CLI exit, then occupy the old pane with a manually
@@ -446,8 +456,8 @@ try {
   await expect.poll(async () => (await restored.evaluate(() => window.crewvane.command({type:"snapshot"})))
     .concierge.status, { timeout: 90_000 }).toBe("ready");
   const recoveredConcierge = (await restored.evaluate(() => window.crewvane.command({type:"snapshot"}))).concierge;
-  assert.notEqual(recoveredConcierge.paneId, firstReference.paneId);
-  assert.notEqual(recoveredConcierge.processId, firstReference.processId);
+  assert.notEqual(recoveredConcierge.scene.locator.paneId, firstReference.paneId);
+  assert.notEqual(recoveredConcierge.scene.process.pid, firstScene.process.pid);
   await expect.poll(() => readFile(log, "utf8").then(value =>
     value.split("\n").filter(line => line.includes('"kind":"start"')).length),
   { timeout: 10_000 }).toBe(3);

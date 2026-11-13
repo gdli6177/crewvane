@@ -6,31 +6,30 @@
 ## 边界
 
 ```text
-Electron 主进程      可信文件选择、Herdr、系统通知、受约束 IPC
+Electron 主进程      可信文件选择、会话后端、系统通知、受约束 IPC
 React 渲染进程       注意力、目标详情、设置；无 Node 或任意命令能力
 Autonomy scheduler   状态变化即触发 + 10 秒补偿；领取持久续跑并交给管家收件箱
 packages/core        目标、委托、续跑、复核、验收、发布、Bot、锁与原子存储
 cli                  人用消息入口与受信任 Agent 状态协议，调用同一个 core 服务
 Agent Adapter        Codex、Claude Code、Cursor、Qoder 与 OMP 生命周期接入
 Skill Registry       内置角色/工序与工作区本地方法、摘要、授权和启动时解析
-Herdr                Session、Tab、Pane、Agent 生命周期与消息
+Session Adapter     Herdr / Orca 的创建、发送、观测、聚焦、恢复与关闭
 Herdr 插件           注意力 Pane、新目标与回到管家动作；不是安全边界或状态副本
 ```
 
-Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解析 Agent 结果。它通过官方 Hook / Extension 观测受支持 Agent 的生命周期，并把事件归一化为 Crewvane 自己的 attempt 与 turn 记录；会话、Agent 管理与通信仍由 Herdr 负责。任意已经能在 Herdr 中运行的 CLI Agent 都可以使用，未支持 Hook 的 CLI 自动回退到 Herdr 与巡检。
+Crewvane 不运行模型，不管理模型凭据，也不根据终端画面解析 Agent 结果。它通过官方 Hook / Extension 观测受支持 Agent 的生命周期，并把事件归一化为 Crewvane 自己的 attempt 与 turn 记录。设置中选择 Herdr 或 Orca 作为本安装唯一的会话后端，不会双路派发；未支持 Hook 的 CLI 自动回退到当前后端与巡检。
 
-Herdr 在 0.10.0 已位于可替换的 Session Adapter 边界之后：Core、CLI 语义协议、
-Agent Hook 和 Skill 解析不依赖 Herdr 私有命令。当前仍只有一个完整的 Session
-后端实现，因此 0.10.0 是“可替换”，尚不是“无 Herdr 可运行”。未来 Native PTY
-或其他后端必须覆盖创建、发送、观测、恢复、关闭和人工介入同步后才能替换。
+0.11.0 的 `packages/sessions` 提供统一 Session 契约、持久切换事务、私有 launcher、身份与代次校验。Herdr 使用 Session / Tab / Pane；Orca 使用官方 CLI 的原生终端。代码只保证传输、幂等、权限、状态与恢复；Skill 指导管家理解目标、委派、追问和整理交付，两种后端复用相同的 Crewvane CLI 语义写回。
+
+后端切换保存目标和消息，不搬移终端全文。旧现场先静止并核实停止，再以新 attempt 按案卷恢复；旧 attempt、旧 attention 和旧回执不能覆盖新事实。注意力 ↔ 现场通过 `goal.decide` / `goal.scene-reply` / `goal.resolve` 的结构化 ID 关联。现场答复先持久保存原话，再由管家核对并解除对应事项，不由“打开过现场”或终端 idle 推断解决。
 
 ## 状态
 
 工作区由用户选择，状态位于 `<workspace>/.crewvane/`。`state.json` 是完整快照，`events.jsonl` 是追加事件记录；事件只保存状态摘要的 SHA-256 与字节数，不再为每次修改复制整份 workspace。日志超过 16 MB 时在状态写锁内只保留最近约 4 MB、最多 2,000 条完整事件，并原子替换旧日志，避免长时间运行产生数 GB 的重复快照。工作区根目录的 `.crewvane-lock/` 串行化桌面和 CLI 的读取、恢复与并发写入，确保旧状态被整体归档时不会与写入交错。每次修改先写临时文件，再原子替换快照。`decisions.md` 与 `rejected.md` 由结构化决定记录派生，供 Agent 和人直接阅读。图片原图位于 `.crewvane/attachments/`，状态只保存相对路径、MIME、大小和 SHA-256；导入校验真实文件魔数并限制数量与体积。已结束目标保留图片 30 天，应用启动时清理，也支持逐张或随目标永久删除。
 
-`WorkspaceState.version = 3` 当前包含项目及上线策略、工作区/项目自主设置、目标、委托摘要、续跑、复核、验收、独立发布目标、Bot 绑定、决定账本与唯一管家引用。旧状态中的 `workflows` / `steps` 字段只作为结构兼容占位读取，不再暴露产品或协议入口。打开工作区时，core 先验证快照版本和顶层结构；有效 v2 原地迁移为 v3，先保存 `.crewvane/state.v2.backup.json`，再为现有目标补 `kind=delivery`、工作区 `human-review`、项目 `inherit/unknown`，不批量开启自主推进。有效 v3 保留原记录。发现 v1、未来版本、损坏 JSON、缺字段快照或只有旧事件日志时，在 workspace 根目录取得恢复锁，先在相邻临时目录完整生成 v3 数据，再把整个 `.crewvane` 原子归档为 `.crewvane.backup-*` 并切换新目录。归档保留附件与旧事件，不猜测迁移执行状态或 Herdr 现场；新状态写入 `recovery` 标记，桌面显示备份原因和打开入口。细节见 [工作区兼容检查与自动恢复](product/workspace-recovery.md)。
+`WorkspaceState.version = 4` 包含项目及上线策略、自主设置、目标、续跑、复核、验收、发布、Bot、决定账本、唯一管家和中性现场引用。`workflows` / `steps` 只作为旧结构读取，不暴露产品入口。有效 v2 先保留 `state.v2.backup.json` 并补齐保守自主默认值；有效 v3 先保留 `.crewvane/state.v3.backup.json`，再原地升级为 v4，保留目标、attention、消息、附件与授权。备份失败则停止迁移。无法离线核实的 Herdr 引用保存为 `legacyScene`，不编造 runtime 身份；连接核实后才可操作。有效 v4 幂等读取。v1、未来版本、损坏快照或缺快照按既有恢复协议整库归档，不把有效 v3 当作垃圾重建。细节见 [双后端规格](product/session-backends-v0.11.0.md) 与 [工作区恢复](product/workspace-recovery.md)。
 
-目标可选保存 `agentRuntime`：当前 `AgentAttempt`、Adapter 能力、最后事件、当前 turn、最新 Prompt / 回复和 Stop 回执。`AgentAttempt` 在负责人启动、重启或恢复时新建，并由 `crewvane owner launch` 导出目标 ID、attempt ID、Hook token 与 Agent 名称。原生事件只接受版本、事件 ID、单调序号、来源、Agent、attempt、turn 与受限内容；事件 ID 和 `attemptId + sequence` 去重排序，旧 attempt、旧 turn 与迟到事件只写诊断日志。有效 v2 工作区先写 `.crewvane/state.v2.backup.json`，再原地迁移为 v3，不归档整个目录。
+目标可选保存 `agentRuntime`：当前 `AgentAttempt`、Adapter 能力、最后事件、当前 turn、最新 Prompt / 回复和 Stop 回执。`AgentAttempt` 在负责人启动、重启或恢复时新建，并由 `crewvane owner launch` 导出目标 ID、attempt ID、Hook token 与 Agent 名称。原生事件只接受版本、事件 ID、单调序号、来源、Agent、attempt、turn 与受限内容；事件 ID 和 `attemptId + sequence` 去重排序，旧 attempt、旧 turn 与迟到事件只写诊断日志。旧 backend epoch 也会被拒绝，不能覆盖当前现场。
 
 目标内容与状态命令分离：
 
@@ -93,7 +92,7 @@ stderr 有界，120 秒后终止，结果写入审计活动。脚本、Hook 和 
 
 可信 Stop Hook 进一步缩短这段反馈链：回合结束后等待 5 秒，若当前 turn 仍没有结构化 Crewvane 写回，就向同一负责人发送一次命令提醒；再等 30 秒仍缺失时标记 `protocol_missing` 并交给管家，不直接打扰人。Hook heartbeat 不进入 `Activity`，不会重置工作区配置的业务无进展计时（默认 30 分钟）。没有受支持 Hook 的 Agent 继续使用 90 秒 Herdr 路径。详细 Adapter 矩阵、事件模型、隐私限制和故障降级见 [Agent Runtime Hooks](product/agent-runtime-hooks.md)。
 
-状态归并顺序固定为：明确 Crewvane CLI 语义写回 > 当前 attempt Hook > Herdr 生命周期 > Watchdog。任何 Hook、Stop 或 Agent 回复都不能推断完成、等待外部、找人决定或验收放行。
+状态归并顺序固定为：明确 Crewvane CLI 语义写回 > 当前 attempt Hook > 当前 Session 后端生命周期 > Watchdog。任何 Hook、Stop 或 Agent 回复都不能推断完成、等待外部、找人决定或验收放行。
 
 负责人现场答复通过 `goal.scene-reply` 保存原话和实际结果，再由唯一管家提交状态命令。注意力与回执分别具有独立编号；管家 scope 绑定二者并在状态事务内校验，防止迟到回复清除新问题。现场访问和工作回合仅触发空闲时的一次协议补核对，不构成审批事实；失败保持事项和重试入口。细节见 [人工交互同步](product/herdr-interaction-sync.md)。
 
@@ -101,7 +100,7 @@ stderr 有界，120 秒后终止，结果写入审计活动。脚本、Hook 和 
 
 ### 场景优先导航
 
-注意力中的真实现场介入与有真实引用的普通活动目标直接打开 Herdr；决定、验收、到期跟进与派发失败使用轻量动作卡。已完成和已放弃目标只打开历史记录。完整记录继续承担附件、消息历史和目标管理，现场条仅展示结构化目标事实并提供回到注意力的入口。
+注意力中的真实现场介入与有真实引用的普通活动目标直接打开当前后端的现场；决定、验收、到期跟进与派发失败使用轻量动作卡。已完成和已放弃目标只打开历史记录。完整记录继续承担附件、消息历史和目标管理，现场条仅展示结构化目标事实并提供回到注意力的入口。
 
 入口策略集中在 `apps/desktop/src/features/goals/goalEntry.ts`，动作卡复用 `GoalActionDock` 与 core 命令。Electron 的 `terminal-open` 事件携带当前 `goalId`，渲染进程只从同一份工作区快照派生现场上下文，不维护终端内容副本，也不把滚动历史注入 Agent 上下文。
 
@@ -111,7 +110,9 @@ stderr 有界，120 秒后终止，结果写入审计活动。脚本、Hook 和 
 
 内嵌轻现场使用同一 Session 与同一核心快照，不维护第二套 Agent 状态。纯文本继续走 xterm PTY；仅图片剪贴板时，渲染进程通过受约束 IPC 确认系统剪贴板类型，再向当前 Agent 写一次 `Ctrl+V`，让 CLI 自己读取剪贴板，避免把图片字节复制进 Crewvane 状态。轻现场标题栏提供强制外部打开入口，用户所选默认模式只影响普通“回到现场”动作。
 
-## Herdr 管家
+## 会话后端与管家
+
+0.11 起以下 Herdr 安装、插件和外部 attach 机制只在 Herdr 被选中时启用；Orca 使用原生窗口与 `SessionRuntime`，不安装或启动 Herdr。
 
 `Executables` 将 Finder 的精简 PATH 与用户登录 shell 的 PATH、常见安装目录合并，保留可执行入口的符号链接名称。安装包在构建时从 Herdr 官方 GitHub Release 获取当前平台二进制，校验 SHA-256 后再连同应用签名；用户首次启动不依赖 Homebrew、网络或系统 PATH。`HerdrInstallation` 启动时先探测应用内置、userData/runtime 或本机已有版本，有效二进制立即可用；随后通过轻量 GitHub Releases API 在后台检查最新版，发现更新时把官方资产下载到 userData/runtime/herdr，再次校验 SHA-256 与实际版本后原子替换。安装请求去重，不修改用户已有安装。更新检查失败时继续使用内置或本机 CLI，并显示可重试提示；安装失败不丢目标。
 
@@ -119,9 +120,9 @@ stderr 有界，120 秒后终止，结果写入审计活动。脚本、Hook 和 
 
 Crewvane 不向 Codex 或其他 Agent CLI 注入运行时专属的 `workspace-write`、网络开关、审批参数或额外目录。设置中的启动命令是可执行文件与原生 argv；支持哪些模型、沙箱和权限选项由该 CLI 自己决定。Electron renderer 的 `sandbox: true` 是应用安全边界，与 Agent 执行权限无关。
 
-应用打开工作区后使用按路径派生的命名 Session，也可以通过 `CREWVANE_HERDR_SESSION` 固定名称。准备管家会检查 CLI 和 Server，优先复用实时 `concierge`，检查登记的 Pane，再显式设置工作区、Session 和 CLI `PATH`，最后启动默认的 Codex 管家。Session 未运行时，应用内 PTY 启动 `herdr session attach <session>` 并等待 Server 就绪，不打开系统 Terminal。同一工作区复用一个连接；收起面板不终止会话，重启应用重新 attach。输入和尺寸 IPC 只允许访问当前工作区的连接，不接受渲染器指定的可执行文件。
+应用打开工作区后，`SessionRuntime` 通过当前 Session Adapter 准备唯一管家，复用可核实的现有现场；新现场使用设置中保存的完整 CLI 命令。Herdr 使用按工作区路径派生的命名 Session，可通过 `CREWVANE_HERDR_SESSION` 固定名称；Orca 使用经过验证的本机 runtime、folder 工作区和真实终端 handle。隐藏 Crewvane 窗口不结束 Agent。所有普通启动、发送和关闭先取得 `SessionControl` 租约，再在返回时复核 backend epoch；切换期间仅受限恢复授权可以操作清单内资源。
 
-管家通过 `crewvane` 读取和写回目标，只负责分发、协调跟进与向人交接。所有实际执行，包括简单任务、返工和检查，都交给独立负责人；管家不得在阻塞时接手执行。负责人使用 Herdr Tab、Pane 和 Agent 消息，但 Crewvane 不预设任务图、分配算法或固定层级拓扑。每次派发前先把 `coordinator-scope.json` 写入同目录临时文件，再用 rename 原子替换；准备或刷新管家不会先删除 scope，因此队列中的目标任务不会遇到短暂的文件缺失。Herdr `timeout` 或 `agent_prompt_stalled` 只表示提交后未能及时观察生命周期变化，保存为 `unconfirmed` 并禁止自动重发；真实现场与巡检继续确认后续结果。
+管家通过 `crewvane` 读取和写回目标，只负责分发、协调跟进与向人交接。所有实际执行，包括简单任务、返工和检查，都交给独立负责人；管家不得在阻塞时接手执行。负责人使用 Herdr Tab、Pane 和 Agent 消息，但 Crewvane 不预设任务图、分配算法或固定层级拓扑。每次派发前先把 `coordinator-scope.json` 写入同目录临时文件，再用 rename 原子替换；准备或刷新管家不会先删除 scope，因此队列中的目标任务不会遇到短暂的文件缺失。Herdr `agent_prompt_stalled` 表示输入已被接受但未及时观察到 working，传输回执保持 `accepted`；timeout 保持未知。两者都不能证明管家完成协调，业务层没有结构化证据时保存为 `unconfirmed`，禁止自动重发。
 
 Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接在管家终端追加入口时，管家先调用 `crewvane direct` 写回原始消息：带当前案卷时追加活动，明确的新事项创建新目标并标记为已经从终端送达，避免桌面再次派发同一文本。`direct --new` 成功后会把管家的案卷 scope 原子切到新目标，允许同一回合继续读取、整理和派发新案卷。桌面监听 `.crewvane/state.json`，外部 CLI 写入后立即刷新，不需要等待 10 秒巡检。这个同步依赖管家执行协议；未经 CLI 写回的终端聊天仍只是终端内容。
 
@@ -133,7 +134,7 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 `CoordinatorDispatcher` 每个工作区只有一个 drain，因此一次只有一个 Crewvane 管家回合。负责人创建、执行、交付和 Herdr 现场仍按目标并行；协调收件箱不串行化负责人。单个目标失败后继续处理其他目标。优先级只在当时可排队项之间生效，已经开始的回合不能被后来的人工消息抢占；较低优先级后台工作可以持续运行，不会饿死人工消息。Herdr 明确报 blocked 时暂停下一次自动尝试；`unconfirmed` 且现场仍 `working` 时也暂停，留到下一次轮询或新事件唤醒。收件箱只保留最近 240 条终态记录，超过容量不会删除排队或处理中项目。
 
-每条目标通知在发送前原子更新 `coordinator-scope.json`；巡检路径也执行同一步骤。请求绑定 `requestId`，旧回执不能修改新目标状态。管家单回合观察上限为 30 秒。累计完成 40 个案卷或估算约 240,000 字符后，应用只在管家 `idle` / `done` 且队列为空时关闭并重建管家上下文；所有目标事实仍在 core 状态中，轮换不会清理消息、附件、交付或注意力。
+每条目标通知在发送前原子更新 `coordinator-scope.json`；巡检路径也执行同一步骤。请求绑定 `requestId`，旧回执不能修改新目标状态。管家单回合观察上限为 120 秒；后端恢复最多等待 60 秒的结构化协调证据。超时保存未确认，停止自动重放。累计完成 40 个案卷或估算约 240,000 字符后，应用只在管家 `idle` / `done` 且队列为空时关闭并重建管家上下文；所有目标事实仍在 core 状态中，轮换不会清理消息、附件、交付或注意力。
 
 应用启动时，持久化为 `queued` 的请求继续处理；`processing` 表示应用可能已把请求交给管家却不知道完整结果，因此转为 `unconfirmed` 且不自动重放。顶部状态只统计每个目标最新一条失败或未确认记录，后续成功重试会清除旧提示。详细设计与基准见 [持久协调收件箱](product/coordinator-inbox.md)。
 
@@ -143,29 +144,27 @@ Herdr 0.9.5 的插件事件不暴露用户提交的 prompt 文本。用户直接
 
 管家进程从 `<workspace>/.crewvane` 启动，并继承 `CREWVANE_COORDINATOR=1` 与当前案卷 scope 文件。受管 Crewvane CLI 只允许读取当前目标的详情和 status，以及更新该目标的 update、progress、wait、decide、risk、ship、kind、brief、checkpoint、boundary、complete、rework、drop、resolve、remind、scene-reply 和 session，并可启动负责人或独立复核者；`goal list`、attention、ask、message、验收、自主设置、发布批准和跨目标读写会被拒绝。自主目标进入 `review` 后不能由管家调用 `complete` 绕过验收。结束或放弃时 CLI 要求 `--note` / `--reason` 保留用户明确说出的原话。该边界保护 Crewvane 数据 API，不能阻止 Agent 直接读取文件或绕过 CLI。
 
-首次创建负责人统一调用受管的 `crewvane owner launch`。这个 CLI 流程先解析角色、
-目标类型和本地方法，再原子地创建独立 Herdr Tab、在 Pane 内清除管家的
-`CREWVANE_COORDINATOR*` 环境、显式导出负责人署名、目标 ID、attempt ID、Hook
-token、Crewvane 工作区与真实 workspace/tab/pane 上下文、启动设置中保存的完整
-Agent argv、记录真实现场并发送任务。若 Pane 刚创建、Herdr 尚报
-`agent_pane_busy`，CLI 只在同一个 Pane 上按 100 ms 起的指数退避重试，最长 15
-秒；其他可能在进程创建后发生的启动错误不重放，避免重复启动。即使执行目录是另一
-个项目，子进程也必须继续写回原 Crewvane 工作区。默认任务正文直接读取已保存的
-目标原文与下一步，避免受 CLI 终端约 1 KB 的单次命令输入上限影响；环境初始化和
-自定义 CLI 输入均按 Unicode 码点拆成不超过 768 字节的短行，长 PATH 分组导出而
-不丢弃目录。长补充说明只能通过当前工作区内受校验的 `--task-file` 传入。
+首次创建负责人统一调用受管的 `crewvane owner launch`，独立 CLI 与 Desktop 复用 `packages/sessions/src/runtime.ts`。先解析角色与目标方法，再创建私有 launcher、生成 attempt，清除管家控制环境并导出当前目标身份；在真实 `/bin/zsh -ilc` 中 source 启动器，保留 `.zshrc` alias、函数、原生 argv 与 shell PATH。后端只接收短启动命令，避免 canonical 行长限制。启动器把安装、epoch、attempt、进程出生时间及后端 locator 写入私有文件收据；收据没有 Prompt 或 Hook token。读到收据不等于 Agent 已开始，发送前仍核实进程、身份与生命周期。
 
-环境注入使用 Work 区内私有文件收据替代会永远等待的 terminal marker。首次收据
-超时只允许在同一 Pane 幂等重试一次环境初始化；Agent 命令和业务任务不会重发。
-仍无法确认时，目标保存 `ownerLaunchRecovery` 的 recovery ID、attempt 和现场
-身份。`crewvane owner attach` 只在当前 Herdr Session 内运行，并核验 Workspace、
-Tab、Pane、Agent 或前台 PID 后绑定真实现场；恢复 ID 已被取代、Session 漂移或
-Pane 被其他目标占用时拒绝覆盖。它避免模型手工串联多个 Herdr 命令时漏掉环境
-隔离；自定义 CLI 仍通过真实前台 PID 记录为 pane transport。
+创建和发送在外部副作用前持久记录请求，响应丢失后先通过同一 request / binding 收据发现原现场，不能重建或换正文重发。新受管路径不再等待终端 marker。旧 Herdr 恢复记录仍由 `owner attach` 验证 Session、Workspace、Tab、Pane 和进程，兼容入口不能绕过中性后端的 epoch 守卫。后端切换后的恢复默认按目标案卷继续；只有实际捕获且受支持的原生会话才标为原会话恢复。
+
+正常运行的受管 `owner launch` / `owner send` 优先经过中性的桌面 Session Host；
+受限 Agent 不需要自行查询系统进程或放开沙箱。工作区内的 `0600` 描述文件只保存
+当前私有通道与令牌，不进入目标、消息或启动收据；每次调用重新发现，应用重启后
+仍存活的管家不会继续使用旧端点。Host 只接受当前管家 attempt、后端 epoch 与
+当前案卷的启动或投递，实际操作继续经过同一 SessionRuntime 的身份与幂等校验。
+切换期间仅持有内部 SwitchAuthority 的恢复通道可执行。未认领请求在一秒后原子
+取消；已认领而结果丢失则保持未确认，不自动重放。
+
+后端交接先等待上一管家回合真正空闲，再重新读取目标并发布下一案卷 scope。
+负责人现场已创建不代表管家回合已经结束，不能提前切换 scope；等待期间人的
+新决定、消息或结束操作必须以最新状态为准。
+
+Herdr 的 OMP 传输对超过 10 行或 1,000 UTF-16 code units 的正文使用 `0600` 私有文件和一条短读取指引，避开 OMP 18.15 的大段粘贴交互菜单；原始 delivery ID 与 SHA-256 仍绑定完整正文。不会再补按 Enter 或把同一任务拆成多个回合。未知投递不重放；过保留期且不再绑定活动现场的已确认正文通过会话维护清理。
 
 `crewvane hook ingest --adapter <id>` 是内部稳定入口。Adapter 把官方原生事件送入 CLI，CLI 负责能力校验、turn 归一化、12,000 字符限制与原文 SHA-256，然后通过 `/tmp/crewvane-<uid>/<workspace-hash>.sock` 发给 Electron Broker。Socket 请求失败或 500 ms 内不可用时，事件写入工作区 `.crewvane/runtime/spool/`；目录与文件分别使用 `0700` / `0600`，最多 200 条、保留 7 天。应用重启先 drain 离线队列，再按持久 receipt 时间恢复计时器。工具参数、工具输出和终端全文不会进入 stored event。
 
-桌面设置中的“Agent 接入”由 `AgentHookManager` 管理。Codex、Claude Code、Cursor、Qoder 通过 marker、首次备份、JSON 合并与原子替换维护各自官方配置；只增删 Crewvane 条目，损坏 JSON、未来 schema 和未知结构不会被覆盖。OMP 使用官方 Extension API，同名用户 extension 会被保护。Codex 安装后显示“等待信任”，直到原生事件实际被收到；用户可在设置中停用或卸载，停用状态会阻止自动重装。v1 不安装 Pre/PostToolUse，避免工具级进程与重复写入放大。
+桌面设置中的“Agent 接入”由 `AgentHookManager` 管理。Codex、Claude Code、Cursor、Qoder 通过可核实的命令 marker、首次备份、JSON 合并与原子替换维护各自官方配置；只增删 Crewvane 条目。保留第三方 handlers、matcher、空用户分组和其他设置；没有受管条目的卸载不重写配置。写入按配置目录加锁，并在提交前重新核对原内容；发现外部编辑则停止写入。损坏 JSON、未来 schema、非普通文件和符号链接不会被覆盖。OMP 使用官方 Extension API，只更新以 Crewvane 标记开头的同名文件，其他扩展和同名用户文件被保护。Codex 安装后显示“等待信任”，直到原生事件实际被收到；用户可在设置中停用或卸载，停用状态会阻止自动重装。v1 不安装 Pre/PostToolUse，避免工具级进程与重复写入放大。
 
 ## 上线策略与决定账本
 

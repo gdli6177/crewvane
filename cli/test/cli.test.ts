@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run } from "../src/cli.js";
+import { assertOwnerSendReceipt, run } from "../src/cli.js";
 import { renderBoardPlain } from "../src/board.js";
 import { WorkspaceService, type Goal } from "../../packages/core/src/index.js";
 const fixtures: string[] = [];
@@ -29,6 +29,21 @@ const inheritedProcessKeys = [
 ] as const;
 afterEach(async () => { await Promise.all(fixtures.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture(prefix: string) { const root = await mkdtemp(join(tmpdir(), prefix)); fixtures.push(root); return root; }
+test("owner send treats a rejected scene receipt as a hard CLI failure", () => {
+  assert.throws(() => assertOwnerSendReceipt({
+    status: "rejected",
+    deliveryId: "owner-send-test",
+    payloadSha256: "a".repeat(64),
+    scene: {
+      version: 1, backend: "herdr", installationId: "installation", backendEpoch: 1,
+      bindingId: "binding", attemptId: "attempt", runtimeId: "runtime",
+      runtimeGeneration: "generation",
+      locator: { kind: "herdr", session: "crewvane-test", workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1" },
+    },
+    at: new Date().toISOString(),
+    detail: "现场身份、空闲或前台 Agent 无法确认，未发送。",
+  }), /负责人现场拒绝本次消息.*未发送/);
+});
 async function call(root: string, argv: string[]) {
   let stdout = "", stderr = "";
   const code = await run([...argv, "--root", root, "--json"], { out: (text) => { stdout += text; }, error: (text) => { stderr += text; } });
@@ -154,7 +169,7 @@ test("CLI reports an automatically protected legacy workspace", async () => {
   assert.match(stdout, /旧版工作区已自动保护/);
   assert.match(stdout, /\.crewvane\.backup-/);
   const next = JSON.parse(await readFile(join(root, ".crewvane/state.json"), "utf8"));
-  assert.equal(next.version, 3);
+  assert.equal(next.version, 4);
   assert.equal(next.recovery.reason, "unsupported-version");
 });
 test("CLI rejects incomplete or fabricated review records", async () => {
@@ -491,7 +506,7 @@ test("owner launch is routed through the current concierge case", async () => {
       ])
     );
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /Herdr 管家的受管现场/);
+    assert.match(result.stderr, /缺少 Crewvane 后端控制目录/);
   } finally {
     if (previousEnv === undefined) delete process.env.HERDR_ENV;
     else process.env.HERDR_ENV = previousEnv;

@@ -19,6 +19,7 @@ import {
   Moon,
   NotebookPen,
   Copy,
+  Download,
   PackageOpen,
   Plus,
   RefreshCw,
@@ -51,14 +52,17 @@ import type {
   SkillPackView,
   WorkspaceState,
 } from "../../../packages/core/src/types.js";
-import { api } from "./api.js";
+import { api, type BackendControlStatus } from "./api.js";
+type HerdrEnvironmentStatus = Awaited<ReturnType<typeof api.herdrStatus>>;
 import { GoalIntakeForm } from "./features/intake/GoalIntakeForm.js";
+import { OrcaInstallationCard } from "./features/settings/OrcaInstallationCard.js";
+import { BackendSelectionCard } from "./features/settings/BackendSelectionCard.js";
 import { TaskPool } from "./features/tasks/TaskPool.js";
 import { TaskDetail } from "./features/tasks/TaskDetail.js";
 import { useReminderClock } from "./features/tasks/useReminderClock.js";
 import { GoalDetail } from "./features/goals/GoalDetail.js";
 import { GoalAttentionCard } from "./features/goals/GoalAttentionCard.js";
-import { goalEntryDestination } from "./features/goals/goalEntry.js";
+import { goalEntryDestination, hasGoalScene } from "./features/goals/goalEntry.js";
 import { goalProgressLabel, presentSceneContext, sceneSyncPresentation } from "./features/goals/goalPresentation.js";
 import type { GoalDetailService } from "./features/goals/goalService.js";
 import {
@@ -165,11 +169,12 @@ function App() {
     [toast, setToast] = useState(""),
     [busy, setBusy] = useState(false),
     [pickingWorkspace, setPickingWorkspace] = useState(false),
-    [herdr, setHerdr] = useState<any>(),
+    [herdr, setHerdr] = useState<HerdrEnvironmentStatus>(),
     [cli, setCli] = useState<any>(),
     [skills, setSkills] = useState<any>(),
     [agentHooks, setAgentHooks] = useState<AgentHookAdapterStatus[]>([]),
     [coordinatorQueue, setCoordinatorQueue] = useState<CoordinatorInboxStatus>(),
+    [backendStatus, setBackendStatus] = useState<BackendControlStatus>(),
     [webhook, setWebhook] = useState<WebhookSettings>({
       enabled: false,
       configured: false,
@@ -252,6 +257,7 @@ function App() {
       .then((env) => {
         setWorkspace(env.workspace);
         setVersion(env.version);
+        void refreshBackendStatus().catch(showError);
         if (env.workspace) {
           void api.coordinatorStatus().then(setCoordinatorQueue).catch(() => {});
           return api.command({ type: "snapshot" }).then(applyState);
@@ -268,6 +274,29 @@ function App() {
       }
       if (event.type === "diagnostic") setError(event.message);
       if (event.type === "herdr-status") setHerdr(event.status);
+      if (event.type === "backend-control") {
+        setBackendStatus(event.status);
+        if (event.status.control.selected === "herdr")
+          void api.herdrStatus().then(setHerdr).catch(showError);
+        else {
+          setHerdr(undefined);
+          setTerminal(undefined);
+        }
+      }
+      if (event.type === "backend-switch") {
+        setBackendStatus(current => current ? {
+          ...current,
+          journal: event.journal,
+          control: {
+            ...current.control,
+            phase: event.journal.phase === "recovery_required" ? "recovery_required" :
+              ["ready", "cancelled"].includes(event.journal.phase) ? "ready" : "switching",
+          },
+        } : current);
+      }
+      if (event.type === "orca-installation") {
+        setBackendStatus(current => current ? { ...current, orca: event.status } : current);
+      }
       if (event.type === "agent-runtime-status") setAgentHooks(event.status);
       if (event.type === "coordinator-status") setCoordinatorQueue(event.status);
       if (event.type === "cli-status") setCli(event.status);
@@ -279,7 +308,6 @@ function App() {
         setTerminal({ session: event.session, title: event.title, goalId: event.goalId, visible: true });
       }
     });
-    void api.herdrStatus().then(setHerdr).catch(showError);
     return () => {
       unsubscribe();
       if (stateFrame.current !== undefined) cancelAnimationFrame(stateFrame.current);
@@ -288,7 +316,7 @@ function App() {
   }, []);
   useEffect(() => {
     if (page === "settings") {
-      void api.herdrStatus().then(setHerdr).catch(showError);
+      void refreshBackendStatus().catch(showError);
       void api.cliStatus().then(setCli).catch(showError);
       void api.skillsStatus().then(setSkills).catch(showError);
       void api.agentRuntimeStatus().then(setAgentHooks).catch(showError);
@@ -305,7 +333,17 @@ function App() {
     setError(String(reason).replace(/^Error: /, "")
       .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
   }
-  async function openScene(id?: string, forceEmbedded = false) {
+  async function refreshBackendStatus() {
+    const next = await api.backendStatus();
+    setBackendStatus(next);
+    if (next.control.selected === "herdr") setHerdr(await api.herdrStatus());
+    else {
+      setHerdr(undefined);
+      setTerminal(undefined);
+    }
+    return next;
+  }
+  async function openScene(id?: string, forceEmbedded = false, recover = false) {
     if (busy) return;
     setModal("");
     setBusy(true); setError("");
@@ -315,9 +353,11 @@ function App() {
         notify(`已打开内嵌轻现场${id ? "。" : "，关闭面板不会终止 Agent。"}`);
       }
       else {
-        const result = await api.openScene(id);
+        const result = await api.openScene(id, recover);
         if (result.mode === "embedded") {
           notify(`已打开内嵌轻现场${id ? "。" : "，关闭面板不会终止 Agent。"}`);
+        } else if (result.mode === "native") {
+          notify(`已在 ${result.app} 中定位${id ? "目标现场" : "全局管家"}。`);
         } else {
           const label = result.lease.terminal === "iterm2"
             ? "iTerm2"
@@ -360,8 +400,8 @@ function App() {
         showError(reason);
       }
     },
-    openHerdr: async (currentGoalId) => {
-      await openScene(currentGoalId);
+    openHerdr: async (currentGoalId, recover) => {
+      await openScene(currentGoalId, false, recover);
     },
     openUrl: async (url) => {
       try {
@@ -716,7 +756,8 @@ function App() {
             </IconButton>
           </div>
         )}
-        {herdr && (herdr.phase === "checking" || herdr.phase === "downloading" || herdr.phase === "error") && (
+        {backendStatus?.control.selected !== "orca" && herdr &&
+          (herdr.phase === "checking" || herdr.phase === "downloading" || herdr.phase === "error") && (
           <div className={`setup-status ${herdr.phase}`} role="status" aria-live="polite">
             <SquareTerminal size={16} />
             <span>{herdr.detail || "正在检查 Herdr…"}</span>
@@ -820,7 +861,7 @@ function App() {
                                   (p) => p.id === item.projectId,
                                 )?.name
                               }{" "}
-                              · {sceneSync?.label || (kind === "intervention" && !item.herdr ? "需要你处理" : attentionLabel[kind])}
+                              · {sceneSync?.label || (kind === "intervention" && !hasGoalScene(item) ? "需要你处理" : attentionLabel[kind])}
                             </span>
                             <h3>{item.title}</h3>
                             <p>{sceneSync?.summary || item.attention?.summary || item.next}</p>
@@ -1038,6 +1079,8 @@ function App() {
               agentHooks={agentHooks}
               onAgentHooksChange={setAgentHooks}
               notify={notify}
+              backendStatus={backendStatus}
+              setBackendStatus={setBackendStatus}
               agentOptions={agentOptions}
               webhook={webhook}
               saveAgents={async (preferences: AgentPreferences) => {
@@ -1082,7 +1125,25 @@ function App() {
                 setBusy(true);
                 setError("");
                 try {
-                  if (action === "herdr") await api.installHerdr();
+                  if (action === "herdr-check") {
+                    const checked = await api.checkHerdrUpdate();
+                    setHerdr(await api.herdrStatus());
+                    notify(checked.detail?.startsWith("检查更新未完成")
+                      ? checked.detail
+                      : checked.updateAvailable
+                      ? `发现 Herdr ${checked.latestVersion}，可在设置中更新。`
+                      : checked.installed
+                        ? `Herdr ${checked.version} 已是当前版本。`
+                        : "Herdr 尚未安装。");
+                    return;
+                  }
+                  if (action === "herdr-install") {
+                    const installed = await api.installHerdr();
+                    setHerdr(await api.herdrStatus());
+                    notify(installed.installed
+                      ? `Herdr ${installed.version ?? ""} 已就绪`
+                      : "Herdr 更新未完成，当前可用版本与目标记录均未改变。");
+                  }
                   if (action === "cli") {
                     const result = await api.installCli();
                     notify(result.output);
@@ -1098,15 +1159,13 @@ function App() {
                     setAgentHooks(await api.agentRuntimeStatus());
                   }
                   if (action === "concierge") await api.prepareConcierge();
-                  setHerdr(await api.herdrStatus());
+                  if (backendStatus?.control.selected === "herdr")
+                    setHerdr(await api.herdrStatus());
                   setAgentOptions(await api.agentChoices());
                   setAgentHooks(await api.agentRuntimeStatus());
                   setCli(await api.cliStatus());
                   applyState(await api.command({ type: "snapshot" }));
-                  const ready = await api.herdrStatus();
-                  notify(action === "herdr" && ready.phase === "error"
-                    ? "本机版本可用，更新检查未完成，可稍后重试。"
-                    : action === "herdr" ? `Herdr ${ready.version ?? ""} 已就绪` : "已准备就绪");
+                  if (action !== "herdr-install") notify("已准备就绪");
                 } catch (reason) {
                   showError(reason);
                 } finally {
@@ -1642,6 +1701,8 @@ function Settings({
   agentHooks,
   onAgentHooksChange,
   notify,
+  backendStatus,
+  setBackendStatus,
   theme,
   setTheme,
   onAction,
@@ -1694,7 +1755,13 @@ function Settings({
             </div>
           </header>
           <div className="ui-settings-grid">
-            <SceneSettingsEditor busy={busy} notify={notify} />
+            <BackendSelectionCard
+              status={backendStatus}
+              onStatusChange={setBackendStatus}
+            />
+            {backendStatus?.control.selected === "herdr" && (
+              <SceneSettingsEditor busy={busy} notify={notify} />
+            )}
             <AgentPreferencesEditor
               key={workspace}
               preferences={state.agents ?? { concierge: "codex" }}
@@ -1721,15 +1788,15 @@ function Settings({
             <span>02</span>
             <div>
               <h2 id="settings-tools-heading">连接与环境</h2>
-              <p>管理 Herdr、Agent 生命周期事件、命令行入口、Skill 和工作区位置。</p>
+              <p>管理执行后端、Agent 生命周期事件、命令行入口、Skill 和工作区位置。</p>
             </div>
           </header>
           <div className="ui-settings-grid">
-        <SettingsSection
+        {backendStatus?.control.selected === "herdr" && <SettingsSection
           wide
           icon={<SquareTerminal />}
-          title="Herdr 与全局管家"
-          description="会话由 Herdr 托管，关闭 Crewvane 窗口也不会终止；启动时自动检查最新版，并接入 Crewvane 注意力面板。"
+          title="Herdr 运行时"
+          description="Herdr 负责当前执行现场与全局管家。更新会保留现有目标；正在运行的版本不会在检查阶段被替换。"
         >
           <div className="settings-facts">
             {herdr?.session && (
@@ -1757,6 +1824,7 @@ function Settings({
               <span className="settings-status ready">
                 <i />
                 已安装 {herdr.version}
+                {herdr.latestVersion ? ` · 最新 ${herdr.latestVersion}` : ""}
                 {herdr.plugin?.phase === "ready" ? " · 注意力面板已接入" : ""}
               </span>
             ) : (
@@ -1766,14 +1834,34 @@ function Settings({
               <span className="ui-field__error">{herdr.plugin.detail}</span>
             )}
           </div>
+          {herdr?.detail && (
+            <p
+              className={herdr.phase === "error" ? "ui-field__error" : "muted"}
+              role={herdr.phase === "error" ? "alert" : "status"}
+              aria-live="polite"
+            >
+              {herdr.detail}
+            </p>
+          )}
           <div className="ui-settings-card__actions">
             <Button
-              variant="secondary"
+              variant={herdr?.updateAvailable ? "primary" : "secondary"}
               size="sm"
+              icon={herdr?.updateAvailable ? <Download size={14} /> : <RefreshCw size={14} />}
               disabled={busy || herdr?.phase === "checking" || herdr?.phase === "downloading"}
-              onClick={() => void onAction("herdr")}
+              onClick={() => void onAction(
+                herdr?.updateAvailable || !herdr?.installed ? "herdr-install" : "herdr-check",
+              )}
             >
-              {herdr?.phase === "downloading" ? "正在自动安装…" : herdr?.phase === "checking" ? "正在检查…" : herdr?.installed ? "检查更新" : "重试准备"}
+              {herdr?.phase === "downloading"
+                ? "正在更新…"
+                : herdr?.phase === "checking"
+                  ? "正在检查…"
+                  : !herdr?.installed
+                    ? "安装 Herdr"
+                    : herdr.updateAvailable
+                      ? `更新 Herdr`
+                      : "检查更新"}
             </Button>
             <Button
               variant="secondary"
@@ -1787,7 +1875,8 @@ function Settings({
               内嵌轻现场
             </Button>
           </div>
-        </SettingsSection>
+        </SettingsSection>}
+        <OrcaInstallationCard />
         <AgentRuntimeSettings
           adapters={agentHooks ?? []}
           busy={busy}
@@ -2926,7 +3015,7 @@ function AgentRuntimeSettings({
       const next = await api.agentRuntimeStatus();
       onChange(next);
       notify(action === "disable"
-        ? "已停用 Hook；该 Agent 仍可使用 Herdr 与巡检状态。"
+        ? "已停用 Hook；该 Agent 仍可使用当前会话后端与巡检状态。"
         : action === "uninstall"
           ? "已移除 Crewvane 管理的 Hook，其他用户 Hook 保持不变。"
           : "Agent Hook 已更新。");
@@ -3083,7 +3172,7 @@ function AgentPreferencesEditor({ preferences, options, busy, onSave }: {
         </datalist>
         <div className="ui-form__footer">
           <p className="ui-form__note">
-            填写本机任意交互式 CLI 和参数，例如 codex --model gpt-5、npx --yes my-agent。支持绝对路径与 ~/ 路径；自定义 CLI 直接在终端启动，无需 Herdr 类型适配。管家案卷边界由 Crewvane CLI 约束，不是操作系统文件沙箱。环境变量和 shell 表达式请放入自己的启动脚本。
+            填写本机任意交互式 CLI 和参数，例如 codex --model gpt-5、npx --yes my-agent。支持绝对路径与 ~/ 路径；切换 Herdr 或 Orca 后仍使用同一条命令。管家案卷边界由 Crewvane CLI 约束，不是操作系统文件沙箱。环境变量和 shell 表达式请放入自己的启动脚本。
           </p>
           <Button type="submit" variant="secondary" disabled={busy}>
             保存偏好

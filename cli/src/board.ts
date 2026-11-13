@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { createInterface } from "node:readline";
 import { emitKeypressEvents } from "node:readline";
-import { promisify } from "node:util";
 import {
   attentionGoals,
   attentionKind,
@@ -12,7 +10,6 @@ import {
   type WorkspaceState,
 } from "../../packages/core/src/index.js";
 
-const exec = promisify(execFile);
 const ESC = "\x1b[";
 const kindLabel: Record<AttentionKind, string> = {
   decision: "决定",
@@ -24,6 +21,7 @@ const kindLabel: Record<AttentionKind, string> = {
 export interface BoardOptions {
   once?: boolean;
   startWithNewGoal?: boolean;
+  focusScene?(goalId?: string): Promise<void>;
 }
 
 export interface BoardSink {
@@ -64,7 +62,7 @@ export function renderBoard(state: WorkspaceState, selectedId?: string, message?
   const active = goals.filter(goal => goal.mode === "concierge" && goal.status === "active" && !attention.includes(goal)).length;
   const lines = [
     `${ESC}38;5;111m╭────────────────────────────────────────────────────────────╮${ESC}0m`,
-    `${ESC}38;5;111m│${ESC}0m  ${ESC}1mCREWVANE${ESC}0m  ${ESC}38;5;79m注意力控制台${ESC}0m  ${ESC}2mHerdr plugin${ESC}0m                 ${ESC}38;5;111m│${ESC}0m`,
+    `${ESC}38;5;111m│${ESC}0m  ${ESC}1mCREWVANE${ESC}0m  ${ESC}38;5;79m注意力控制台${ESC}0m  ${ESC}2m${state.backendBinding?.backend === "orca" ? "Orca" : "Herdr"}${ESC}0m                 ${ESC}38;5;111m│${ESC}0m`,
     `${ESC}38;5;111m╰────────────────────────────────────────────────────────────╯${ESC}0m`,
     `  ${ESC}38;5;214m${attention.length} 件需要你${ESC}0m   ${ESC}38;5;110m${waiting} 件在等${ESC}0m   ${ESC}2m${active} 件推进中 · ${deferred} 件暂存 · ${personal} 件我来做${ESC}0m`,
     "",
@@ -301,24 +299,20 @@ export async function runBoard(
   const openScene = async () => {
     const goal = selected();
     if (!goal) return;
-    if (goal.mode === "manual" && !goal.herdr)
+    if (goal.mode === "manual" && !goal.scene)
       return setMessage("这件事没有 Agent 现场；需要 Agent 执行时，请先交给管家。");
-    if (process.env.HERDR_ENV !== "1")
-      return setMessage("请从 Herdr 中的 Crewvane 面板打开现场。");
-    const reference = goal.herdr ?? state.concierge;
-    if (!reference.tabId) return setMessage("这个事项还没有可打开的 Herdr 现场。");
+    if (!options.focusScene) return setMessage("请从已安装的 Crewvane CLI 或桌面打开现场。");
     await act(async () => {
-      await exec(process.env.HERDR_BIN_PATH || "herdr", ["tab", "focus", reference.tabId!], { timeout: 10_000 });
+      await options.focusScene!(goal.id);
       return "已切换到负责人现场。";
     });
   };
   const focusConcierge = async () => {
-    if (!state.concierge.agent && state.concierge.transport !== "pane")
+    if (!state.concierge.scene)
       return setMessage("管家还没有启动，请先在桌面点击「找管家」。");
-    if (process.env.HERDR_ENV !== "1")
-      return setMessage("请从 Herdr 中的 Crewvane 面板回到管家。");
+    if (!options.focusScene) return setMessage("请从已安装的 Crewvane CLI 或桌面回到管家。");
     await act(async () => {
-      await exec(process.env.HERDR_BIN_PATH || "herdr", ["agent", "focus", "concierge"], { timeout: 10_000 });
+      await options.focusScene!();
       return "已切换到全局管家。";
     });
   };

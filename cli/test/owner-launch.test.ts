@@ -385,7 +385,7 @@ test("a blocked verifier preserves an actionable verification site without touch
   const saved = (await service.read()).goals[0]!;
   assert.equal(saved.herdr, undefined);
   assert.equal(saved.autonomy?.verificationSite?.status, "blocked");
-  assert.equal(saved.autonomy?.verificationSite?.reference.agent, "reviewer-blocked");
+  assert.equal(saved.autonomy?.verificationSite?.reference?.agent, "reviewer-blocked");
   assert.equal(saved.attention?.kind, "intervention");
   assert.match(saved.next, /复核者现场/);
 });

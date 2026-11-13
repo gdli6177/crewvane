@@ -77,18 +77,21 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Crewvane｜协航 0.10.0 · macOS Apple Silicon
+          Crewvane｜协航 0.11.0 · macOS Apple Silicon
 
           ## 本版更新
 
-          - 新增“工作方法”本地能力包：把重复流程、评审清单或团队 SOP 安装为说明型 Skill，并由目标按需挂载到负责人或独立复核者。
-          - 内置管家、负责人、复核者、标准交付、探索研究、发布检查、Agent 接入和 Herdr 现场恢复 Skills；内置 Skills 不占用目标的本地方法名额。
-          - 新增 `crewvane-local-pack-author`，用户可以用自然语言让 Agent 创建、验证和安装工作方法，无需直接编辑 JSON。
-          - 本地方法限制文件数、体积、引用文本和上下文长度；脚本必须单独授权，批准绑定当前 SHA-256，内容变化会立即使旧授权失效。
-          - Skill 只提供角色约束和流程说明。目标状态仍只由 Crewvane 语义 CLI 写入；终端空闲、Agent Stop 或脚本成功都不会自动完成或验收。
-          - 修复负责人环境注入无法确认时的恢复路径：保留真实现场和 recovery ID，允许 `crewvane owner attach` 校验 Session、Workspace、Tab、Pane、Agent 与前台进程后绑定，不重放业务任务。
-          - Herdr 已退到可替换 Adapter 边界；0.10.0 仍以 Herdr 作为当前会话后端，但核心能力不再依赖模型专属的运行时、沙箱或厂商协议。
-          - 保留 v3 数据、注意力、协调收件箱、Agent Hooks、Webhook、自主目标、外部终端和内嵌轻现场原有行为。
+          - 设置可排他选择 Herdr 或 Orca；不会两套后端同时派发。回到 Orca 现场使用原生工作界面。
+          - 提供 Orca 安装、选择已有应用、检查更新与重新检测；本版验证 Orca 1.4.258。
+          - 双向切换保留目标、消息、注意力与验收，停止旧现场后按案卷恢复；不搬终端全文。
+          - 注意力与 Agent 现场双向同步：问题、人的现场原话与管家解除事项使用同一 ID；旧回执不能清掉新问题。
+          - 修复 OMP 长案卷输入可能停在未提交草稿的问题：完整正文使用私有文件传递，已结束且过保留期的正文自动清理。
+          - 统一保护 Codex、Claude Code、Cursor、Qoder 与 OMP 的已有 Hooks / Extensions；安装和升级合并配置，停用和卸载只移除 Crewvane 条目，保留 OpenViking 等第三方能力。
+          - 交接等待真实现场或结构化协调证据；未知结果保持恢复状态，不把输入被接受当作处理完成，也不自动重发任务。
+          - 修复 Orca 后台终端误报不可达，以及复用已初始化管家后一直显示“正在准备”的问题。
+          - 管家上一回合结束后才切换下一案卷；正常启动与投递复用桌面受控通道，避免受限 Agent 的进程查询权限阻塞负责人启动。
+          - 代码负责传输、身份、幂等、状态与恢复；Skills 负责协调与执行方法。Crewvane CLI 仍是唯一业务语义写入口。
+          - 保留注意力、协调收件箱、Agent Hooks、Webhook、自主目标、外部终端和内嵌轻现场原有行为。
 
           ## 安装
 
@@ -97,7 +100,7 @@ jobs:
           安装或替换应用后，请在设置中重新安装 Crewvane CLI，并检查“Agent 接入”和“工作方法”。
           如旧版已安装 Crewvane Skill，请在设置中重新安装 Skill，以同时获得主协议和本地能力包创建器。
           Codex 首次使用受管 Hook 时，请按 Codex 提示在 /hooks 中审核并信任 Crewvane 条目。
-          有效 v3 工作区直接保留；有效 v2 会先备份到 .crewvane/state.v2.backup.json 后迁移到 v3。
+          有效 v3 工作区会先备份到 .crewvane/state.v3.backup.json 后迁移到 v4；有效 v2 同样先备份再迁移。
           当前安装包没有 Apple Developer ID 签名与公证，macOS 可能提示无法验证开发者。
           核对发布来源后，可在系统设置 > 隐私与安全性中按提示选择仍要打开。
           使用说明：https://github.com/gdli6177/crewvane/blob/main/docs/crewvane.md
